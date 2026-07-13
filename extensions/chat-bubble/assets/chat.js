@@ -580,6 +580,24 @@
             currentMessageElement.textContent = "Sorry, our servers are currently busy. Please try again later.";
             break;
 
+          case 'product_created':
+            ShopAIChat.UI.removeTypingIndicator();
+            if (data.url) {
+              setTimeout(() => {
+                window.location.href = data.url;
+              }, 1500);
+            }
+            break;
+
+          case 'product_error':
+            ShopAIChat.UI.removeTypingIndicator();
+            console.error('Product creation error:', data.error);
+            ShopAIChat.Message.add(
+              "I've noted your blend, but I ran into an issue creating your product just now. Our team has been notified — please try again in a moment.",
+              'assistant', messagesContainer
+            );
+            break;
+
           case 'auth_required':
             // Save the last user message for resuming after authentication
             sessionStorage.setItem('shopAiLastMessage', userMessage || '');

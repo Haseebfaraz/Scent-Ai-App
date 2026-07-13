@@ -1,32 +1,69 @@
 {{ 'chat.css' | asset_url | stylesheet_tag }}
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 
-<div class="shop-ai-chat-container">
-  <div class="shop-ai-chat-bubble" style="background-color: {{ block.settings.chat_bubble_color }}">
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-    </svg>
-  </div>
-
-  <div class="shop-ai-chat-window">
-    <div class="shop-ai-chat-header">
-      <div>{{ 'chat.title' | t }}</div>
-      <button class="shop-ai-chat-close">✕</button>
+<div class="scent-architect-section-wrapper" id="scent-ai-chat-bot">
+  <div class="scent-architect-container">
+    
+    <div class="scent-architect-branding-col">
+      <div class="brand-icon-box">
+        <div class="inner-brand-symbol"></div>
+      </div>
+      
+      <h2 class="scent-architect-title">Scent Architect AI</h2>
+      <p class="scent-architect-description">
+        Our intelligence engine analyzes your aesthetic preferences, memories, and desired mood to synthesize a one-of-a-kind molecular fragrance profile.
+      </p>
+      
+      <div class="scent-pill-grid">
+        <span class="scent-pill" data-scent="Oriental">ORIENTAL</span>
+        <span class="scent-pill" data-scent="Spicy Woody">SPICY WOODY</span>
+        <span class="scent-pill" data-scent="Chypre">CHYPRE</span>
+        <span class="scent-pill" data-scent="Aromatic">AROMATIC</span>
+        <span class="scent-pill" data-scent="Fruity">FRUITY</span>
+        <span class="scent-pill" data-scent="Citrus">CITRUS</span>
+      </div>
     </div>
 
-    <div class="shop-ai-chat-messages">
-      <!-- Messages will be added here by JavaScript -->
+    <div class="scent-architect-interface-col">
+      <div class="shop-ai-chat-container">
+        
+        <div class="shop-ai-chat-bubble" style="display: none !important;"></div>
+
+        <div class="shop-ai-chat-window">
+          
+          <div class="scent-interface-header">
+            <div class="header-left-meta">
+              <div class="meta-icon-square">
+                <span class="square-dot-pattern"></span>
+              </div>
+              <div class="meta-text-lines">
+                <span class="meta-label-top">ACTIVE SYNTHESIS</span>
+                <span class="meta-label-sub">Session ID: #AURA-9921</span>
+              </div>
+            </div>
+            <div class="header-right-status">
+              <span class="status-pulse-dot"></span>
+              <span class="status-text-slug">SYSTEM READY</span>
+            </div>
+            <button class="shop-ai-chat-close" style="display: none !important;">✕</button>
+          </div>
+
+          <div class="shop-ai-chat-messages"></div>
+
+          <div class="shop-ai-chat-input">
+            <input type="text" placeholder="{{ 'chat.inputPlaceholder' | t }}">
+            <button class="shop-ai-chat-send">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="22" y1="2" x2="11" y2="13"></line>
+                <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+              </svg>
+            </button>
+          </div>
+          
+        </div>
+      </div>
     </div>
 
-    <div class="shop-ai-chat-input">
-      <input type="text" placeholder="{{ 'chat.inputPlaceholder' | t }}">
-      <button class="shop-ai-chat-send">
-        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <line x1="22" y1="2" x2="11" y2="13"></line>
-          <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-        </svg>
-      </button>
-    </div>
   </div>
 </div>
 
@@ -42,7 +79,7 @@
 {% schema %}
 {
   "name": "AI Chat Assistant",
-  "target": "body",
+  "target": "section",  
   "settings": [
     {
       "type": "color",
@@ -75,3 +112,54 @@
   ]
 }
 {% endschema %}
+
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const pills = document.querySelectorAll('.scent-pill');
+    const chatInput = document.querySelector('.shop-ai-chat-input input');
+    const sendButton = document.querySelector('.shop-ai-chat-send');
+
+    if (!chatInput || !sendButton) return;
+
+    pills.forEach(pill => {
+      pill.style.cursor = 'pointer';
+      pill.addEventListener('click', () => {
+        const preferredScent = pill.getAttribute('data-scent');
+        chatInput.value = `My preferred fragrance classification is ${preferredScent}.`;
+        sendButton.click();
+      });
+    });
+
+    function attachStreamRedirectListener() {
+      if (window.appChatEventSource) {
+        console.log("Scent Architect Stream detected. Registering redirection listeners...");
+        
+        window.appChatEventSource.addEventListener('message', (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'REDIRECT_TO_BESPOKE_CANVAS') {
+              const productHandle = data.payload.handle;
+              sessionStorage.setItem('active_scent_layers', JSON.stringify(data.payload.layers));
+              sessionStorage.setItem('active_scent_title', data.payload.title);
+              sessionStorage.setItem('active_scent_description', data.payload.description);
+              window.location.href = `/products/${productHandle}`;
+            }
+          } catch (err) {
+            console.error("Error parsing stream payload:", err);
+          }
+        });
+        return true;
+      }
+      return false;
+    }
+
+    if (!attachStreamRedirectListener()) {
+      const checkStreamInterval = setInterval(() => {
+        if (attachStreamRedirectListener()) {
+          clearInterval(checkStreamInterval);
+        }
+      }, 250);
+      setTimeout(() => clearInterval(checkStreamInterval), 10000);
+    }
+  });
+</script>
