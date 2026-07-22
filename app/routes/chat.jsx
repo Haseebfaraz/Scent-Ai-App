@@ -1186,19 +1186,13 @@ function getConversation(conversationId) {
   return { id, history: CONVERSATIONS.get(id) };
 }
 
-// Tracks every internal_id that search_containers_for_layer has actually returned for a given
-// conversation — the confirm_scent_combination gate chain checks against this set (not just "does
-// this title exist anywhere in the catalog") so a container can only ever be finalized if it was
-// genuinely surfaced by a real search, never one the model picked from memory without checking.
-const OFFERED_CONTAINERS = new Map();
-function getOfferedSet(conversationId) {
-  if (!OFFERED_CONTAINERS.has(conversationId)) OFFERED_CONTAINERS.set(conversationId, new Set());
-  return OFFERED_CONTAINERS.get(conversationId);
-}
-
 // ============================================================
 // 3. SYSTEM PROMPT
 // ============================================================
+// The step-by-step scripted flow and its validation gate chain (name/location/email checks,
+// draft-pitch checks, position-distribution checks, etc.) were deliberately discarded here to make
+// room for a new conversation design — see the "Backup checkpoint before rewriting the chat flow
+// from scratch" commit for the full previous version if anything needs to be recovered from it.
 async function buildSystemPrompt(history, knownCustomerEmail) {
   const catalogLines = buildRelevantCatalogSlice(history).map(c =>
     `- [internal_id: ${c.Title || "Untitled"}] Notes: ${c.Notes || "no notes listed"}`
@@ -1212,64 +1206,34 @@ async function buildSystemPrompt(history, knownCustomerEmail) {
     ? `, often leaning toward ${regionalClassifications.join(" or ")}-style fragrances`
     : "";
   const regionalNotesLine = regionalNotes.length > 0
-    ? `\nReal past customers from this same region during ${currentSeason} have shown a taste for these notes: ${regionalNotes.join(", ")}${classificationClause}. Don't announce this as its own statement right after learning where they live — that read as a scripted data-dump instead of natural conversation. Instead, weave it in later, naturally, as part of step 4's taste question (e.g. "Since warm, woody notes tend to be popular where you are this time of year..."). Never frame it around age or gender ("people your age", "kids there", "women there") — it's a regional and seasonal signal about the place, nothing about the customer personally.\n`
+    ? `\nReal past customers from this same region during ${currentSeason} have shown a taste for these notes: ${regionalNotes.join(", ")}${classificationClause}.\n`
     : "";
   const emailAlreadyKnown = Boolean(knownCustomerEmail);
 
-  return `You are Scent Architect AI, a warm, friendly, and upbeat general assistant for a custom perfume store — happy to chat about everyday things (weather, their city, their day) as well as help build fragrances. Always reply with a positive, encouraging tone.
-You help customers build a personalized fragrance by combining note containers into layers (top, middle, base), purely by describing scent notes and character — never by internal product names.
+  return `You are Scent Architect AI, the voice of a real, experienced boutique perfumer — warm, observant, a little playful, genuinely curious about each customer. You help customers build a personalized fragrance by combining note containers into layers (top, middle, base), described only by their scent notes and character — never by internal product names.
 The current season is ${currentSeason}.
 ${regionalNotesLine}
 Internal catalog (for your reference only — see rules below on how to talk about these):
 ${catalogLines}
 
-CRITICAL RULE — never break this:
-- NEVER say, mention, or hint at the "internal_id" value (the container's Title/product name) in your conversational replies to the customer.
-- Only describe containers by their actual scent notes and character (e.g. "a blend of bergamot, cedar, and clove" or "a warm citrus-woody accord"). Speak like a perfumer describing a scent, not a catalog listing a SKU.
-- When suggesting a container for any layer, mention only 4-5 of its most distinctive notes — never dump its full note list.
-- The internal_id exists only so you can reference the correct container internally when calling the confirm_scent_combination tool. It must never appear in your visible text response.
-- When you call confirm_scent_combination, every internal_id must be copied EXACTLY (character for character) from a "[internal_id: ...]" bracket in the catalog above. Never use a note name (e.g. "Pink Pepper") as an internal_id — a note is only ever an ingredient inside a container's Notes list, never a container's own title.
-- Each layer must use a DIFFERENT container from every other layer in the same blend — never suggest or confirm the same container twice.
-- If a tool call gets rejected because you called it TOO EARLY (not enough info yet, or before name/location/a complete draft blend was actually pitched) — this means you jumped ahead by mistake. Do NOT retry the tool call again next turn. Instead, just continue the normal conversation from wherever it actually is (gathering preferences per step 4, searching and pitching a complete draft per step 5, etc.) across as many real turns as it takes — actually write out the real suggestions and questions the customer needs to see, don't stall with a placeholder line and don't attempt the tool again until a complete blend has genuinely been pitched and the customer has reacted to it.
-- If a tool call gets rejected for a small, correctable reason instead (a wrong/invented internal_id, a missing email, a mismatched note, etc.) — something you can realistically fix immediately with info you already have — call confirm_scent_combination again with corrected values on your VERY NEXT turn, retrying immediately and silently. Never mention "internal IDs", "catalog", "matching", "container", or anything technical about the retry to the customer. If you need to say anything while sorting it out, keep it as natural as "Just a moment while I finalize that for you!" — but only for this kind of small fix, never as a substitute for actually searching and pitching real containers per step 5.
-- If you genuinely can't find a good match for what the customer described (a note/style that isn't in the catalog), never say anything like "that internal ID doesn't exist" or reference IDs/catalog/matching at all. Just say something like "Those exact notes aren't available right now" and immediately suggest 3-4 notes from something close in the catalog instead.
-- When you name a container's notes to the customer, copy each note's spelling EXACTLY as it appears after "Notes:" in the catalog above (e.g. if the catalog says "Bergamot, Green Petitgrain", say those exact words) — never rename, reword, or invent a more "poetic" version of a note name. You can still write a natural sentence around them (e.g. "This one leans into Bergamot, Green Petitgrain, and Neroli Blossom"), but the note names themselves must be verbatim matches from the catalog, never paraphrased.
-- IMPORTANT — do not confuse the rule above with internal_id: that rule is ONLY about what you SAY to the customer. internal_id is a COMPLETELY SEPARATE field and must ALWAYS be the short TITLE from inside the "[internal_id: ...]" bracket (e.g. "The Opera") — NEVER the Notes list, and NEVER a comma-separated list of note names. If internal_id contains a comma-separated list of notes, that is always wrong.
-- If nothing in the catalog is a strong match for what the customer wants, still pick a REAL container from the list above (even an imperfect one) rather than inventing one that doesn't exist — an imperfect real match is always better than a fabricated title.
+How the conversation actually flows (natural, not a script — read the room and adapt):
 
-CONVERSATION FLOW — follow these steps in order:
+1. Your very first message (before the customer has said anything fragrance-related) is warm, in-character small talk — react to whatever they actually just said, don't just recite a script. Once that's flowed a beat, introduce yourself briefly and ask for their name in return — reciprocity, not an interrogation ("I'm here to help craft something just for you — who am I chatting with today?"). Wait for their answer. THEN, once you have their name, ask where they're based as its own separate question — wait for that answer too, and only then riff naturally on the real season/weather for their location given above. Every beat should acknowledge what they just said before moving on — never bundle multiple questions into one message; that reads as a form, not a conversation.
 
-0. On the customer's first message, greet them warmly and generally, e.g.: "Hi there! 😊 Welcome to Dua Scent Agent! How are you doing today?" Keep it a normal friendly greeting, not fragrance-consultant-sounding yet.
+2. Once that's flowed naturally, get genuinely curious about their actual life — ask what a typical day looks like for them (work, routine, what they're usually doing, what occasions they need this fragrance for), and have a REAL back-and-forth about it: ask a natural follow-up or two, react to specifics they mention, don't just check a box and move on. Only once that's had real substance, ask what kind of scent they're drawn to, in their own words — offer a few evocative example directions if it helps them articulate it (clean & minimal, rich & woody, bright & aquatic, warm & spicy, soft & floral, cozy & gourmand), but let THEM describe it, never a rigid multiple-choice quiz. If their answer is vague or one-word, don't move on yet — ask what that means to them, or what they don't like, until you actually have something specific to work with. If they volunteer personal or family context while explaining their taste (e.g. "my grandfather always wore vetiver," "we always leaned toward subtle scents"), warmly acknowledge it in the moment and let any specific notes they mention inform the blend — but never ask about their background, age, gender, or ethnicity directly, and never treat any of that as a factor you're tracking or looking anything up by. The customer's own stated style words, their real lifestyle/occasion, and their real location/season are the entire basis for what you recommend.
 
-1. Right after that, ask for their name only, e.g.: "Before we get going, what's your name?" Wait until they answer before moving on — you'll need their email too, but only later, once their blend is finalized.
+3. Only once you've had a genuinely substantial conversation — their lifestyle with real detail, AND their own stated style preference clearly articulated, not just a single vague exchange — CALL search_containers_for_layer for each distinct direction they've expressed. Rushing to search after only one or two short exchanges skips the part of the conversation that actually makes the recommendation feel personal — take the time first. Never invent or blend a note combination from memory — only ever use what the tool actually returns. From the real results, put together ONE complete draft blend (2-4 different containers, each assigned top/middle/base — a 4th container doubles into middle or base, never top) and present it all at once as a finished, named recommendation, the way a real perfumer would — give the blend a creative name, and narrate it warmly: what's on top, what's in the heart, what anchors the base, and briefly why each fits what they told you (their lifestyle, their stated style, the season). State every note exactly as the tool returned it — real note names, verbatim, never invented, never adjectives standing in for real notes.
 
-2. Once you have their name, continue the friendly conversation naturally: ask where they live, and respond with a warm, positive line about the weather there for the CURRENT SEASON given above (e.g. crisp and cool for Fall, warm and humid for Summer) — keep it a natural seasonal comment, not an exact invented temperature. Just chat about it like a normal conversation, don't jump straight to fragrance yet. Do NOT share the regional-notes data point here — that comes later, woven into step 4's taste question instead of dropped in as its own statement right after location.
+4. If (and only if) the customer asks follow-up questions about specific notes — their character, whether something leans sweet or green, how long it'll last, how it projects — answer genuinely and specifically, like someone who actually knows perfumery, the way you'd reassure a customer that "violet leaf here is green and watery, not a sweet floral" or that a heavier base note is what gives it staying power. Don't invent which notes are in the blend, but real descriptive/technical knowledge about a note's character is fine to share.
 
-3. Ask what occasion or purpose they want this fragrance for (e.g. everyday wear, a night out, a gift, a special event). If the customer doesn't answer or moves past it without saying, don't press — just continue to the next step anyway.
-   - Feel free to keep the conversation natural and let it flow — you're not limited to only fragrance topics, and it's fine to chat a bit more if the customer wants to.
-   - If the customer instead asks about order status, tracking, returns, exchanges, shipping, or store policies, politely let them know that capability isn't available yet in this chat, and suggest they contact the store directly — do not invent order details, policies, or tracking information.
+5. Once they're happy, ask if they have a name in mind for the fragrance (or want you to come up with one)${emailAlreadyKnown ? "" : ", and get their email so you can save this build under it"}. ${emailAlreadyKnown ? "Their email is already on file — don't ask for it again." : ""} Then call confirm_scent_combination with the confirmed containers/positions, the fragrance's own name, a short warm description, the customer's real name, and their email.
 
-4. Now get a feel for their taste, like a knowledgeable salesman getting to know a customer — NOT a rigid intake form. Ask what kind of scents they gravitate toward (fresh, floral, warm & woody, sweet/gourmand, spicy, etc.), weaving in the regional/seasonal signal given above and whatever occasion they mentioned so it reads as an informed observation, not a cold question, e.g.: "Since warm, woody notes tend to be popular where you are this time of year, and this is for a date night, are you drawn to something warm and sensual, or more fresh and citrusy?" Have a real back-and-forth here — ask natural follow-ups, let them describe things in their own words, don't rush to a number of layers or a rigid structure. There is no fixed "how many containers" question — you'll decide a sensible count (usually 2-3, up to 4) once you've actually searched and found what fits, based on how many distinct directions they've described.
-
-5. Once you have a real sense of their taste (not after just one or two words — actually listen and follow up if their answer was vague), search for what really fits:
-   - CALL search_containers_for_layer for each distinct direction they've expressed (e.g. one call for "woody", another for "vanilla" if they want both) — NEVER eyeball the catalog above and write out a note combination from memory; that has produced fabricated combinations that weren't any single container's real notes. Only ever use what the tool actually returns.
-   - From the REAL results (favor ones matching the regional/seasonal signal where there's a genuine fit), put together a complete draft blend — 2 to 4 DIFFERENT containers, each assigned a position (top/middle/base; a 4th container must double into middle or base, never top) — and pitch the WHOLE thing at once, like a salesman presenting a finished recommendation, not a series of quiz questions. State each layer's notes exactly as the tool returned them (4-5 notes each, verbatim, comma-separated — never adjectives like "creamy" standing in for real note names, never the internal_id), e.g.: "Based on what's popular in your area this time of year and what you've described, here's what I'd put together: a bright bergamot and pink pepper top, a warm amber and jasmine heart, and a soft sandalwood and musk base. How does that sound?"
-   - Let them react. If they want to swap a layer or adjust the direction, CALL search_containers_for_layer again for that specific change and re-pitch the updated draft — don't just silently change your own text without a fresh real search backing it.
-   - If they don't like the direction at all, don't just keep guessing — ask more directly: what fragrance CLASS do they usually wear (e.g. woody, oriental, fresh, floral, chypre), and are there specific perfumes/brands they already love? If they want something hybrid or layered between two distinct styles, that's exactly what the multi-container blend is for — search for real containers matching each style they name and combine them the same way.
-
-6. Once they're happy with the direction, ask if they have a name in mind for their fragrance (or if you should come up with a unique one for them)${emailAlreadyKnown ? "" : ", AND ask for their email so you can save this build under it"}. ${emailAlreadyKnown ? "Their email is already on file — do NOT ask for it again." : "Wait until you have both before continuing."}
-
-7. Only once the customer has clearly agreed to the pitched blend AND has given their email, call the confirm_scent_combination tool with: all confirmed containers and their assigned positions (each a different container, 2-4 total), a customName (the fragrance's own name, e.g. "Karachi Nights" — NOT the customer's personal name; make one up if they didn't give one), a short warm description, the customer's real name from step 1 (customerName), and their email from step 6 (customerEmail — never fabricate this, only use what they actually gave you). This is the only place internal_id should ever appear — never in your visible text.
-
-8. After the tool result comes back, reply with an enthusiastic, positive confirmation that their custom fragrance has been created and is ready.
-
-General guidelines:
-- Keep replies conversational, warm, positive, and concise (2-4 sentences per turn).
-- Never invent notes or containers from memory — always get them via search_containers_for_layer (step 5). A container that's real but was never actually returned by that tool will be rejected when you try to finalize.
-- This is a natural conversation, not a rigid script — but name (step 1), location (step 2), and a genuinely pitched complete draft blend (step 5) are still real requirements checked before anything can be finalized. Don't skip straight from a vague first message to a full pitch.
-- If the customer starts describing very specific notes before you've gathered enough to search intelligently, that's fine — use what they say, search for it, and fold it into the natural conversation rather than forcing them back through a script.
-- CRITICAL: Never say or imply that a fragrance "has been created", "is ready", or similar in your visible text unless you have ALREADY called confirm_scent_combination in this exact turn and are responding to its result. If the customer just confirmed, you must call the tool THIS turn — do not describe it as done in plain text instead of calling it.
-- There is no way to rename or modify a fragrance after confirm_scent_combination has been called — if the customer asks to rename it afterward, tell them you can't change it now, but they're welcome to start a new blend with that name.`;
+Rules:
+- NEVER say, mention, or hint at the "internal_id" value (the container's title) in your conversational replies to the customer. Only describe containers by their real scent notes.
+- When you call confirm_scent_combination, every internal_id must be copied EXACTLY from a "[internal_id: ...]" bracket in the catalog above — never a note name, never invented.
+- Each layer must use a DIFFERENT container.
+- Copy note names verbatim from the catalog when describing them to the customer — never paraphrase or invent a "poetic" version.
+- Keep replies warm and conversational — a real back-and-forth, not clinical, but don't ramble; let the customer drive the pace.`;
 }
 
 // ============================================================
@@ -1313,15 +1277,12 @@ const CONFIRM_COMBINATION_TOOL = {
 // actually any single container's real Notes (verified directly against the CSV: none of its
 // "Option 1/2/3" suggestions in a real transcript matched any real container's note set at all).
 // Giving it an actual tool call for this, instead of trusting free text, means the note lists it
-// can present are mechanically constrained to what a real search actually returns — and every
-// internal_id that comes back is recorded server-side (see OFFERED_CONTAINERS below) so the final
-// confirm_scent_combination call can be hard-checked against what was really searched, not just
-// against whether the title happens to exist anywhere in the catalog.
+// can present are mechanically constrained to what a real search actually returns.
 const SEARCH_CONTAINERS_TOOL = {
   type: "function",
   function: {
     name: "search_containers_for_layer",
-    description: "Search the REAL catalog for containers matching a scent direction or specific note the customer mentioned (e.g. 'woody', 'marshmallow', 'orange'). Returns real containers with their actual notes, copied straight from the catalog. You MUST call this before pitching any draft blend (step 5), or whenever the customer wants to swap in a more specific note — never invent, blend, or guess at notes from memory; only ever present what this tool actually returns.",
+    description: "Search the REAL catalog for containers matching a scent direction or specific note the customer mentioned (e.g. 'woody', 'marshmallow', 'orange'). Returns real containers with their actual notes, copied straight from the catalog — never invent, blend, or guess at notes from memory; only ever present what this tool actually returns.",
     parameters: {
       type: "object",
       properties: {
@@ -1335,7 +1296,7 @@ const SEARCH_CONTAINERS_TOOL = {
 // ============================================================
 // 5. OPENAI API CALL (with tool-use resolution loop)
 // ============================================================
-async function callOpenAIOnce(apiKey, messages, useTools, forceConfirmTool) {
+async function callOpenAIOnce(apiKey, messages, useTools) {
   const response = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -1345,10 +1306,7 @@ async function callOpenAIOnce(apiKey, messages, useTools, forceConfirmTool) {
     body: JSON.stringify({
       model: "gpt-4.1-nano",
       messages,
-      ...(useTools ? { tools: [CONFIRM_COMBINATION_TOOL, SEARCH_CONTAINERS_TOOL] } : {}),
-      ...(forceConfirmTool
-        ? { tool_choice: { type: "function", function: { name: "confirm_scent_combination" } } }
-        : {})
+      ...(useTools ? { tools: [CONFIRM_COMBINATION_TOOL, SEARCH_CONTAINERS_TOOL] } : {})
     })
   });
 
@@ -1359,15 +1317,6 @@ async function callOpenAIOnce(apiKey, messages, useTools, forceConfirmTool) {
   }
 
   return response.json();
-}
-
-// Cheap models sometimes narrate "your fragrance has been created!" without ever calling the
-// tool. When the customer's own message is a short, explicit go-ahead, force the tool call on
-// that turn instead of hoping the model complies — avoids claiming success with nothing created.
-function looksLikeCreateConfirmation(message) {
-  if (!message || typeof message !== "string") return false;
-  const wordCount = message.trim().split(/\s+/).length;
-  return wordCount <= 8 && /creat/i.test(message);
 }
 
 // Independent of whatever the model passes as customerEmail — scans the customer's own messages
@@ -1384,266 +1333,6 @@ function extractEmailFromHistory(history) {
   return null;
 }
 
-// The system prompt tells the model to ask about each layer individually until it reaches the
-// count the customer asked for in step 5 — but given a single vague answer ("some other like
-// modern"), a cheap model will sometimes just fabricate the rest of the layers itself and call
-// confirm_scent_combination early, silently delivering fewer layers than requested (e.g. customer
-// asks for 4, model finalizes with 3 — passes the plain 2-4 range check, so it isn't caught
-// otherwise). Scans short, direct user messages for a standalone 2-4 digit, taking the LAST one
-// found so a later correction (e.g. after being told 4 is the max) overrides an earlier ask.
-function extractRequestedLayerCount(history) {
-  let count = null;
-  for (const msg of history) {
-    if (msg.role !== "user" || typeof msg.content !== "string") continue;
-    const trimmed = msg.content.trim();
-    if (trimmed.split(/\s+/).length > 6) continue;
-    const match = trimmed.match(/\b([2-4])\b/);
-    if (match) count = parseInt(match[1], 10);
-  }
-  return count;
-}
-
-// Replaces the old "ask position once per layer" requirement — the new flow pitches a complete
-// draft blend in ONE natural message instead of a per-layer Q&A, so what needs verifying is "did
-// the customer actually see the complete blend (all its positions) together in a single pitch"
-// rather than "was a position question asked N times". A single assistant message must mention
-// EVERY distinct position actually used in the final containers, together — proof the customer
-// saw the whole proposal at once, not fragments of it scattered across separate messages.
-function wasDraftBlendPitched(containers, history) {
-  const positions = [...new Set(containers.map(c => c.position))];
-  return history.some(msg => {
-    if (msg.role !== "assistant" || typeof msg.content !== "string") return false;
-    const lower = msg.content.toLowerCase();
-    return positions.every(pos => new RegExp(`\\b${pos}\\b`).test(lower));
-  });
-}
-
-// Loose signal used only to decide whether a short "yes, create it" should be trusted as a
-// genuine final go-ahead (forceConfirmTool below) — not the strict per-container check above.
-// Doesn't know the specific positions yet at that point, so just checks that SOME real pitch
-// (mentioning at least 2 of the 3 position words together) has happened somewhere.
-function wasBlendPitchApparent(history) {
-  return history.some(msg => {
-    if (msg.role !== "assistant" || typeof msg.content !== "string") return false;
-    const lower = msg.content.toLowerCase();
-    return ["top", "middle", "base"].filter(p => new RegExp(`\\b${p}\\b`).test(lower)).length >= 2;
-  });
-}
-
-// Mirrors the email gate below: step 6 requires asking about the fragrance's name in the SAME
-// message as email, but nothing previously stopped the model from silently defaulting to
-// "Custom Blend" without ever actually asking. This checks the question itself was raised at
-// some point — not the authenticity of the answer, since the system prompt deliberately allows
-// the customer to delegate naming to the AI ("or should I come up with something unique for you").
-// Deliberately NOT proximity-constrained (e.g. "name.{0,N}fragrance") — real phrasing varies too
-// much in how far apart the two words land in a sentence; requiring both to just appear
-// somewhere in the same message is more robust, and "name" alone would false-positive on step 1's
-// separate "what's your name?" (the customer's own name), which never also mentions the fragrance.
-function wasNamingQuestionAsked(history) {
-  return history.some(msg =>
-    msg.role === "assistant" && typeof msg.content === "string" &&
-    /\bname\b/i.test(msg.content) &&
-    /fragrance|blend|scent|custom|unique/i.test(msg.content)
-  );
-}
-
-// Steps 1-2 ask for the customer's own name and their location/weather before ever getting into
-// layer-building — seen skipped entirely when the customer jumps straight to "want make some
-// scent special", with the model treating that as license to skip straight to step 5's layer
-// count question. Not the authenticity of what they answered, just that the question was raised.
-function wasCustomerNameAsked(history) {
-  return history.some(msg =>
-    msg.role === "assistant" && typeof msg.content === "string" &&
-    /what('?s| is) your name|your name\?/i.test(msg.content)
-  );
-}
-const LOCATION_QUESTION_PATTERN = /where (do|are) you (live|from|located|based)|which city|what'?s the weather/i;
-function wasLocationAsked(history) {
-  return history.some(msg =>
-    msg.role === "assistant" && typeof msg.content === "string" &&
-    LOCATION_QUESTION_PATTERN.test(msg.content)
-  );
-}
-
-// Descriptive-word matching (customerDescriptiveWords below) should only ever look at conversation
-// from the point the customer actually signaled they want to build a fragrance. Greeting, name,
-// and location small talk aren't about any specific layer — but were seen leaking generic words
-// (e.g. the region step's own "Fragrances with warm, WOODY notes tend to be popular" line putting
-// "woody" into the word pool) into the pool the mismatch check draws from, coincidentally matching
-// an unrelated container that happened to list "Woody Notes" among its real notes. Anchoring to
-// the same build-intent moment hasEnteredBuildPhase already detects removes that pollution.
-function findLayerBuildStartIndex(history) {
-  for (let i = 0; i < history.length; i++) {
-    const msg = history[i];
-    if (msg.role !== "user" || typeof msg.content !== "string") continue;
-    const trimmed = msg.content.trim();
-    if (BUILD_INTENT_PATTERN.test(trimmed)) return i;
-    if (trimmed.split(/\s+/).length <= 4 && SHORT_AFFIRMATIVE_PATTERN.test(trimmed)) {
-      const prevAssistant = [...history.slice(0, i)].reverse().find(m => m.role === "assistant");
-      if (prevAssistant && typeof prevAssistant.content === "string" && BUILD_INVITATION_PATTERN.test(prevAssistant.content)) {
-        return i;
-      }
-    }
-  }
-  return 0;
-}
-
-// Detects the moment the customer signals they want to start building a fragrance — however the
-// conversation got there (an unrelated detour into small talk, an emotional check-in, straight in
-// from the greeting, etc). Two shapes: an explicit "make/build/create a fragrance" statement, or a
-// short affirmative ("yes", "sure", "maybe") replying directly to the assistant's own invitation
-// to start building — both seen in practice skipping straight to layer count afterward. Scans the
-// whole history (not just the latest message) so it stays true for the rest of the conversation
-// once detected, even after the customer's next reply is just their name.
-const BUILD_INTENT_PATTERN = /\b(make|build|create|craft|design)\b.{0,20}\b(fragrance|scent|perfume|blend)\b/i;
-const BUILD_INVITATION_PATTERN = /\b(build|create|craft|start|design)\b.{0,30}\b(fragrance|scent|perfume|blend)\b/i;
-const SHORT_AFFIRMATIVE_PATTERN = /^(yes|yeah|yep|sure|ok(ay)?|alright|maybe|why not|let'?s( do it)?)\b/i;
-function hasEnteredBuildPhase(history) {
-  for (let i = 0; i < history.length; i++) {
-    const msg = history[i];
-    if (msg.role !== "user" || typeof msg.content !== "string") continue;
-    const trimmed = msg.content.trim();
-    if (BUILD_INTENT_PATTERN.test(trimmed)) return true;
-    if (trimmed.split(/\s+/).length <= 4 && SHORT_AFFIRMATIVE_PATTERN.test(trimmed)) {
-      const prevAssistant = [...history.slice(0, i)].reverse().find(m => m.role === "assistant");
-      if (prevAssistant && typeof prevAssistant.content === "string" && BUILD_INVITATION_PATTERN.test(prevAssistant.content)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
-// Prompting alone doesn't reliably stop a cheap model from narrating its own retry process
-// ("I need to double-check the exact internal IDs...") instead of retrying silently. This is a
-// safety net: if leaked implementation language slips through anyway, swap the whole reply for
-// a generic holding line rather than ever showing the customer internal jargon.
-const LEAKED_JARGON_PATTERN = /internal[\s_-]?id|catalog|match(ing|ed)? the (exact|correct)/i;
-function sanitizeCustomerFacingText(text) {
-  if (!text || !LEAKED_JARGON_PATTERN.test(text)) return text;
-  return "Just putting the finishing touches on your blend — one moment!";
-}
-
-// The model isn't reliable at following "apologize, don't claim success" once a combination has
-// actually been rejected — seen telling the customer their fragrance was "saved and ready" right
-// after a tool-call rejection, with no product ever created. Originally only guarded within the
-// SAME turn as a rejection (comboRejected), but comboRejected is a per-invocation local that
-// resets to false at the start of every fresh callAI call — so once a later turn didn't even
-// attempt a tool call (e.g. the customer just said "waiting"), the guard fell through completely
-// and the model claimed success with zero protection, in a conversation where nothing had ever
-// actually been created. Now applies whenever comboConfirmed is falsy for THIS turn, full stop —
-// that's the only thing that actually means a product was just created, regardless of what
-// happened (or didn't) earlier in the conversation.
-// Deliberately tolerant of interposed words ("has NOW been created", "is ALL set") — real
-// phrasing varies enough that a rigid literal-adjacency match missed the exact claims seen in
-// practice ("has now been created", "is all set") because of extra words breaking the match.
-const FALSE_SUCCESS_CLAIM_PATTERN = /\b(is (now |all )?(ready|set|created|saved|finalized)|has (now |already )?been (created|saved|finalized)|successfully (created|saved|finalized)|ready to (enchant|wear|enjoy|experience))\b/i;
-function guardAgainstFalseSuccessClaim(text, comboConfirmed) {
-  if (comboConfirmed || !text) return text;
-  if (!FALSE_SUCCESS_CLAIM_PATTERN.test(text)) return text;
-  return "I'm so sorry — that hasn't actually been finalized yet! Let's pick up right where we left off so I can get your blend created correctly.";
-}
-
-// Passing internal_id validation only proves the container is REAL — it says nothing about
-// whether it's actually the one the customer described for THAT layer. Seen picking a totally
-// unrelated container after a long, confusing conversation — e.g. customer asked for "orange with
-// vanilla and honey" on the top layer, and the model finalized that layer with a container whose
-// real notes were "Rose, Fruity Notes, Ambergris, Leather, Nutmeg, Cedar, Vanilla, Musk" — sharing
-// only the single, very generic word "vanilla" (present in a huge fraction of all containers) and
-// nothing else. A single shared word isn't enough evidence on its own — requiring 2 catches this
-// without over-rejecting a case where the customer only ever gave one truly specific word (e.g.
-// just "oud" for that layer), which is handled by adapting the requirement down to what's
-// actually available. Excludes generic conversation/domain filler that would trivially "match"
-// almost any container (e.g. "note"/"notes" appears constantly both in customer messages AND in
-// compound note-family names throughout the CSV like "Fruity Notes" or "Green Notes").
-const DESCRIPTIVE_STOPWORDS = new Set([
-  "note", "notes", "fragrance", "scent", "scents", "layer", "layers", "container", "containers",
-  "please", "would", "like", "want", "your", "with", "that", "this", "have", "know", "does",
-  "which", "type", "some", "good", "perfect", "suggest", "suggestion", "suggestions", "beautiful",
-  "always", "everyone", "unique", "taste", "email", "create", "build", "custom", "personalized",
-  "personalised", "combine", "combination", "blend", "style", "vibe", "mood", "format", "formate",
-  "properly", "specific", "specifically",
-  // Lowering the word-length filter to 3 (to catch real short note names like "oud") reintroduces
-  // a lot of generic filler that would otherwise have been excluded by length alone.
-  "the", "and", "for", "are", "you", "not", "but", "all", "can", "was", "its", "our", "his",
-  "her", "out", "get", "got", "one", "two", "day", "way", "new", "old", "big", "low", "yes",
-  "sure", "okay", "make", "more"
-]);
-// Includes BOTH the customer's own words AND the assistant's — the assistant presents a complete
-// draft blend as real, catalog-verified notes (step 5) and the customer can react tersely ("sounds
-// great", "swap the base"), which never repeats a note name in the customer's own text. Scoping
-// this to customer-only words made every container fail forever the moment a customer reacted that
-// way, since there was nothing real left to match against. The assistant's suggested note words are
-// just as valid a signal of "this was actually discussed" — they're already required (by other
-// rules) to be real, verbatim catalog notes.
-function customerDescriptiveWords(history) {
-  return [...new Set(
-    history
-      .slice(findLayerBuildStartIndex(history))
-      .filter(m => (m.role === "user" || m.role === "assistant") && typeof m.content === "string")
-      .map(m => m.content)
-      .join(" ")
-      .toLowerCase()
-      .split(/\W+/)
-      .filter(w => w.length >= 3 && !DESCRIPTIVE_STOPWORDS.has(w))
-  )];
-}
-
-// Whole-conversation check rather than per-position segmentation — the new flow pitches a complete
-// draft blend in one message instead of a per-layer Q&A, so there's no longer a reliable per-layer
-// boundary (like an individual "top/middle/base?" question and reply) to segment on. A container's
-// real notes must share at least 2 words with SOMETHING actually said anywhere since the customer
-// signaled they wanted to build a fragrance — catches a container that's real but was never
-// actually discussed in this conversation at all.
-function findUnrelatedContainer(containers, history) {
-  const globalWords = customerDescriptiveWords(history);
-  if (globalWords.length < 15) return null;
-  for (const item of containers) {
-    const container = findContainerByInternalId(item.internal_id);
-    if (!container) continue;
-    const notesLower = container.Notes.toLowerCase();
-    // Word-boundary match, not substring — plain .includes() let "amber" falsely match inside
-    // "ambergris" (a related-sounding but chemically distinct note).
-    const matchCount = globalWords.filter(w => new RegExp(`\\b${w}\\b`).test(notesLower)).length;
-    const requiredMatches = Math.min(2, globalWords.length);
-    if (matchCount < requiredMatches) return item;
-  }
-  return null;
-}
-
-// Recovering from a rejected tool call has been seen re-asking (and getting a NEW answer for) a
-// layer's position that was already confirmed earlier, silently changing it — e.g. a layer
-// confirmed as "top" gets re-asked and answered "middle" later, so the final blend ends up with
-// two containers in "middle" and none in "top" at all. Doubling up a position is only ever valid
-// for a genuine 4th accent layer (which itself still requires all 3 canonical positions to be
-// used); for 2-3 containers, each one must land on its own distinct position.
-function hasInvalidPositionDistribution(containers) {
-  const counts = {};
-  for (const c of containers) counts[c.position] = (counts[c.position] || 0) + 1;
-  const distinctPositions = Object.keys(counts).length;
-  if (containers.length <= 3) return distinctPositions !== containers.length;
-  if (distinctPositions !== 3 || Object.values(counts).some(n => n > 2)) return true;
-  // The 4th, doubled-up accent layer must always land on middle or base — never top.
-  return (counts.top || 0) > 1;
-}
-
-// Mirrors the email gate: customerName is a required schema field, so the model fabricates one
-// (seen deriving "Haseeb Faraz" purely from the local part of an email address, "haseebfaraz2000",
-// after the customer's own name was never actually captured — the question got asked, but the
-// customer's confused reply was treated as if it had answered it). Requires the submitted name (or
-// a real word from it) to actually appear somewhere in the customer's own messages.
-function wasRealNameProvided(history, submittedName) {
-  if (!submittedName) return false;
-  const nameWords = submittedName.toLowerCase().split(/\s+/).filter(w => w.length > 1);
-  if (nameWords.length === 0) return false;
-  const customerText = history
-    .filter(m => m.role === "user" && typeof m.content === "string")
-    .map(m => m.content)
-    .join(" ")
-    .toLowerCase();
-  return nameWords.some(w => new RegExp(`\\b${w}\\b`).test(customerText));
-}
-
 // knownCustomerEmail comes from the storefront itself — either the customer's real Shopify
 // account login (native `customer.email`, no OAuth flow needed) or the login-gate popup shown
 // when they're not logged in — and is trusted the same as an email extracted from their own chat
@@ -1655,46 +1344,6 @@ async function callAI(history, conversationId, knownCustomerEmail) {
     return { replyText: "Configuration error: missing API key.", comboConfirmed: null };
   }
 
-  // Checked BEFORE the "create" confirmation intercept below — steps 1-2 (name, location) always
-  // come first in the intended flow, so they must win even if the customer's message happens to
-  // also contain "creat" (e.g. "Create Fragrance with name of Rise & Fall" is an early aspirational
-  // statement, not a final go-ahead, but it used to trigger the name+email ask way too early,
-  // before the customer's own name or location had ever been requested).
-  if (hasEnteredBuildPhase(history) && !wasCustomerNameAsked(history)) {
-    const askText = "That sounds lovely! Before we get going, what's your name?";
-    return {
-      replyText: askText,
-      comboConfirmed: null,
-      updatedMessages: [...history, { role: "assistant", content: askText }]
-    };
-  }
-  if (hasEnteredBuildPhase(history) && !wasLocationAsked(history)) {
-    const askText = "Nice to meet you! Where do you live? Is the weather warm and humid, crisp and cold, or somewhere in between?";
-    return {
-      replyText: askText,
-      comboConfirmed: null,
-      updatedMessages: [...history, { role: "assistant", content: askText }]
-    };
-  }
-  const lastUserMessage = [...history].reverse().find(m => m.role === "user" && typeof m.content === "string");
-  // Also requires that some real draft pitch has already apparently happened — otherwise an early
-  // message that merely mentions "creat[e]" (like the example above) gets mistaken for a genuine
-  // final go-ahead before any blend has even been discussed.
-  const forceConfirmTool = looksLikeCreateConfirmation(lastUserMessage?.content) && wasBlendPitchApparent(history);
-
-  // Asking for name/email at final confirmation is a soft prompt instruction the model
-  // sometimes skips. Since we already hard-require email before creating anything, intercept
-  // deterministically here instead of hoping it remembers to ask — guarantees a clean, consistent
-  // question every time, with zero reliance on model behavior.
-  if (forceConfirmTool && !(knownCustomerEmail || extractEmailFromHistory(history))) {
-    const askText = "Wonderful! Before I create this, what would you like to name your fragrance (or should I come up with something unique for you), and what email should I save this build under?";
-    return {
-      replyText: askText,
-      comboConfirmed: null,
-      updatedMessages: [...history, { role: "assistant", content: askText }]
-    };
-  }
-
   let messages = [{ role: "system", content: await buildSystemPrompt(history, knownCustomerEmail) }, ...history];
   let comboConfirmed = null;
   let confirmedName = null;
@@ -1702,27 +1351,10 @@ async function callAI(history, conversationId, knownCustomerEmail) {
   let confirmedCustomerNotes = null;
   let confirmedCustomerName = null;
   let confirmedCustomerEmail = null;
-  let comboRejected = false;
   let finalText = "";
-  let invalidIdFailures = 0;
-  let forcedPlainTextNudge = false;
 
   for (let turn = 0; turn < 3; turn++) {
-    // After repeated invalid-ID failures, the model sometimes just keeps inventing fake titles
-    // instead of admitting no match exists (seen fabricating things like "Drowning in Vanilla By
-    // The Fireplace"). Prompting alone doesn't reliably stop that — force plain text so it
-    // physically cannot call the tool again until it's actually found a real match elsewhere
-    // in conversation.
-    const forcePlainText = invalidIdFailures >= 2;
-    if (forcePlainText && !forcedPlainTextNudge) {
-      forcedPlainTextNudge = true;
-      messages.push({
-        role: "user",
-        content: "You've tried twice and still haven't matched anything real in the catalog for what the customer described. Do NOT call any tool this turn. Instead, tell the customer warmly that those exact notes aren't available right now, and suggest 3-4 notes from something else in the catalog above that's close to what they asked for."
-      });
-    }
-
-    const data = await callOpenAIOnce(apiKey, messages, !forcePlainText, forceConfirmTool && turn === 0 && !forcePlainText);
+    const data = await callOpenAIOnce(apiKey, messages, true);
     if (!data) {
       return { replyText: "Sorry, I'm having trouble reaching the fragrance engine right now.", comboConfirmed: null };
     }
@@ -1735,150 +1367,41 @@ async function callAI(history, conversationId, knownCustomerEmail) {
       messages.push({ role: "assistant", content: message.content || null, tool_calls: toolCalls });
 
       for (const toolCall of toolCalls) {
-        let toolResultContent = "Combination noted internally. Do not call any more tools. Now respond directly to the customer in 2-3 warm sentences confirming their custom blend has been created and is ready.";
+        let toolResultContent = "Combination noted internally. Now respond directly to the customer in 2-3 warm sentences confirming their custom blend has been created and is ready.";
 
         if (toolCall.function.name === "confirm_scent_combination") {
           try {
             const args = JSON.parse(toolCall.function.arguments);
             const containers = args.containers || [];
-            const invalidIds = containers
-              .map(c => c.internal_id)
-              .filter(id => !findContainerByInternalId(id));
 
-            const offeredSet = getOfferedSet(conversationId);
-            const neverOfferedIds = containers
-              .map(c => c.internal_id)
-              .filter(id => findContainerByInternalId(id) && !offeredSet.has(id));
+            // The only hard requirement kept from the old gate chain: never create a product
+            // without a real name and real location actually present in the customer's OWN
+            // messages — not just whatever the model happened to fill into the tool call args.
+            const customerText = history
+              .filter(m => m.role === "user" && typeof m.content === "string")
+              .map(m => m.content)
+              .join(" ")
+              .toLowerCase();
+            const nameWords = (args.customerName || "").toLowerCase().split(/\s+/).filter(w => w.length > 1);
+            const hasRealName = nameWords.length > 0 && nameWords.some(w => new RegExp(`\\b${w}\\b`).test(customerText));
 
-            const normalizedIds = containers.map(c => normalizeForMatch(c.internal_id));
-            const duplicateIds = [...new Set(
-              normalizedIds.filter((id, i) => normalizedIds.indexOf(id) !== i)
-            )];
-            const requestedLayerCount = extractRequestedLayerCount(history);
-            const unrelatedContainer = findUnrelatedContainer(containers, history);
+            const regionMaps = await getRegionMaps();
+            const hasRealLocation = Boolean(extractRegionFromHistory(history, regionMaps));
 
-            if (containers.length < 2) {
-              // minItems is advisory too — the model sometimes calls this early, mid-layer,
-              // instead of waiting for final confirmation of the whole blend.
-              comboRejected = true;
-              toolResultContent = `Error: confirm_scent_combination was called with only ${containers.length} container(s). This tool is ONLY for the FINAL confirmed complete blend (at least 2 containers, all positioned) — not a single layer in isolation. Do NOT retry this tool call now — go back to plain conversation instead: search for real containers that fit what the customer has described (step 5), put together a complete draft blend, and pitch the WHOLE thing to them as one recommendation. Only call this tool again once a complete blend has actually been pitched and the customer has reacted to it.`;
-            } else if (containers.length > 4) {
-              // Function schemas (maxItems) are advisory for OpenAI, not enforced — a cheap model
-              // can still send more. Reject rather than silently truncating or overcharging later.
-              comboRejected = true;
-              toolResultContent = `Error: this blend has ${containers.length} containers, but the maximum is 4. Ask the customer to narrow it down to 4 or fewer, then call confirm_scent_combination again.`;
-            } else if (!wasCustomerNameAsked(history)) {
-              // Steps 1-2 got skipped entirely when the customer jumped straight into "I want a
-              // special scent" and the model treated that as license to skip to layer-building.
-              comboRejected = true;
-              toolResultContent = `Error: you never asked the customer for their own name (step 1 of the conversation flow). Do NOT call this tool yet. Go back, warmly ask for their name, and continue the flow from there before eventually returning to finalize this blend.`;
-            } else if (!wasLocationAsked(history)) {
-              comboRejected = true;
-              toolResultContent = `Error: you never asked the customer where they live (step 2 of the conversation flow). Do NOT call this tool yet. Go back, ask where they live and chat briefly about the weather there, and continue the flow from there before eventually returning to finalize this blend.`;
-            } else if (requestedLayerCount !== null && containers.length < requestedLayerCount) {
-              // Passes the plain 2-4 range check above but doesn't match what the customer
-              // actually asked for in step 5 — the model finalized early instead of asking about
-              // every remaining layer. Only rejects UNDER-delivery (fewer than requested) — a
-              // bot-initiated, customer-approved extra layer added later (e.g. "want to add a
-              // fourth layer?" / "make it musky") legitimately raises the real count without the
-              // customer ever typing a literal digit, so requestedLayerCount can be stale-low.
-              // Rejecting that case too caused an unrecoverable loop: every retry had more
-              // containers than the stale count, so this gate rejected every single attempt.
-              comboRejected = true;
-              toolResultContent = `Error: the customer asked for ${requestedLayerCount} containers, but this blend only has ${containers.length}. Do NOT call this tool yet. Search for and gather ${requestedLayerCount - containers.length} more real container(s) that fit the conversation so far, THEN pitch the complete, updated draft blend and get their reaction before calling confirm_scent_combination again.`;
-            } else if (!wasDraftBlendPitched(containers, history)) {
-              // Nothing stopped the model from silently deciding on a full blend (all containers +
-              // positions) without ever actually presenting it to the customer as one complete
-              // pitch — this requires a single assistant message to have mentioned every distinct
-              // position actually used, proving the customer saw the whole proposal at once.
-              comboRejected = true;
-              toolResultContent = `Error: you haven't actually pitched this complete draft blend (all its layers and positions together) to the customer in one message yet. Do NOT call this tool yet. Present the full blend as one natural recommendation and get their reaction before calling confirm_scent_combination again.`;
-            } else if (invalidIds.length > 0) {
-              // Model hallucinated a title (often a note name — or, since real titles almost
-              // never contain a comma, a whole notes LIST — mistaken for a container title).
-              // Reject and let it self-correct instead of crashing later during product creation.
-              invalidIdFailures++;
-              comboRejected = true;
-              const looksLikeNotesList = invalidIds.some(id => id.includes(","));
-              const notesListWarning = looksLikeNotesList
-                ? ` At least one of these looks like a comma-separated NOTES list, not a title — internal_id must be the short container TITLE (e.g. "The Opera"), never the Notes list.`
-                : "";
-              toolResultContent = `Error: these internal_id values don't exist in the catalog: ${invalidIds.join(", ")}.${notesListWarning} internal_id must be copied EXACTLY from a "[internal_id: ...]" bracket above — never a note name or invented title. Re-check the catalog and call confirm_scent_combination again with corrected values.`;
-            } else if (neverOfferedIds.length > 0) {
-              // Stronger than invalidIds above — a title can be a REAL container and still never
-              // have actually been searched/shown to this customer. Verified directly against the
-              // CSV that the model's live "Option 1/2/3" suggestions were sometimes blended from
-              // several different real containers' notes rather than being any single container's
-              // actual list — meaning whatever it eventually finalized with here could be a real
-              // title it merely recalled from the full catalog, not one it genuinely searched and
-              // presented. Requiring every finalized internal_id to have actually come back from a
-              // search_containers_for_layer call closes that gap at the source.
-              invalidIdFailures++;
-              comboRejected = true;
-              toolResultContent = `Error: these internal_id values are real catalog titles, but were never actually returned by a search_containers_for_layer call in this conversation: ${neverOfferedIds.join(", ")}. Do NOT guess a title from memory — call search_containers_for_layer with a query matching what the customer described for that layer, then use one of ITS real results, then call confirm_scent_combination again.`;
-            } else if (duplicateIds.length > 0) {
-              // Same container reused across two layers — each layer must be a distinct container.
-              comboRejected = true;
-              toolResultContent = `Error: the same container was used for more than one layer. Each layer must use a DIFFERENT container. Pick a different container for one of the duplicated layers and call confirm_scent_combination again.`;
-            } else if (hasInvalidPositionDistribution(containers)) {
-              // Re-asking (and getting a changed answer for) an already-confirmed layer's position
-              // can leave two containers sharing one position and none in another — only valid for
-              // a genuine 4th accent layer, never for a 2-3 container blend.
-              comboRejected = true;
-              if (containers.length <= 3) {
-                toolResultContent = `Error: this ${containers.length}-container blend has two containers sharing the same position, leaving another position unused. Each of the ${containers.length} containers must have its own distinct position (top/middle/base) — double-checking earlier positions you already confirmed, re-ask the customer to clarify which container goes in whichever position is missing, then call confirm_scent_combination again.`;
-              } else {
-                const posCounts = {};
-                for (const c of containers) posCounts[c.position] = (posCounts[c.position] || 0) + 1;
-                toolResultContent = (posCounts.top || 0) > 1
-                  ? `Error: this 4-container blend has two containers both assigned to "top". The 4th, accent container must always double up into "middle" or "base" — never "top". Re-ask the customer which of middle or base this extra layer should blend into, then call confirm_scent_combination again.`
-                  : `Error: this 4-container blend doesn't use all three positions (top/middle/base) correctly — exactly one position should have two containers (the accent layer, which must be middle or base, never top), the other two should have exactly one each. Re-check the positions with the customer and call confirm_scent_combination again.`;
-              }
-            } else if (unrelatedContainer) {
-              comboRejected = true;
-              toolResultContent = `Error: the container chosen for the ${unrelatedContainer.position} layer ("${unrelatedContainer.internal_id}") doesn't match anything the customer actually described wanting anywhere in this conversation. Do NOT call this tool yet. Re-read what the customer said they wanted for that specific layer, and pick a real container from the catalog above whose notes actually reflect that — call confirm_scent_combination again with a corrected internal_id for that layer.`;
-            } else if (!(knownCustomerEmail || extractEmailFromHistory(history))) {
-              // args.customerEmail is NOT trusted on its own — customerEmail is a required schema
-              // field, and a cheap model asked to always fill a required field will fabricate a
-              // plausible-looking one (e.g. "customer@example.com") rather than leave it blank or
-              // ask a question, exactly like it fabricates internal_id values elsewhere. The only
-              // trustworthy source is text the customer actually typed, so the email must be
-              // independently findable in their own messages — never taken from the tool args alone.
-              // Critically: tell it to STOP calling tools and ask a real question instead, or it
-              // just retries the same broken call forever ("just a moment" on loop).
-              comboRejected = true;
-              toolResultContent = `Error: no customer email found. Do NOT call this tool again yet. Instead, respond to the customer right now with a plain question asking for their email address, and wait for their reply. Only call confirm_scent_combination again once they've actually given you one.`;
-            } else if (!wasRealNameProvided(history, args.customerName)) {
-              // Unlike the fragrance's own name, there's no "or should I come up with one"
-              // delegation option for the CUSTOMER'S name — it must be something they actually
-              // typed. Seen the model treat a confused/deflecting reply to "what's your name?" as
-              // if it had answered, then fabricate a plausible name later derived from their email
-              // address instead (e.g. "Haseeb Faraz" from "haseebfaraz2000@gmail.com").
-              comboRejected = true;
-              toolResultContent = `Error: no real customer name was found anywhere in their own messages — "${args.customerName}" looks guessed rather than actually given. Do NOT call this tool again yet. Ask the customer plainly for their name, and wait for their actual reply before calling this again.`;
-            } else if (!wasNamingQuestionAsked(history)) {
-              // Without this, the model can silently default customName to something generic
-              // (e.g. "Custom Blend") without ever having asked — this doesn't require the name
-              // be customer-given (the system prompt allows delegating to the AI), just that the
-              // question was actually raised at some point.
-              comboRejected = true;
-              toolResultContent = `Error: you haven't asked the customer what they'd like to name their fragrance yet (or whether you should come up with one for them). Do NOT call this tool again yet. Ask them now, and wait for their reply.`;
+            if (!hasRealName) {
+              toolResultContent = `Error: no real customer name was found anywhere in their own messages — "${args.customerName}" looks guessed rather than actually given. Do NOT create the product yet. Ask the customer plainly for their name, wait for their real reply, then try again.`;
+            } else if (!hasRealLocation) {
+              toolResultContent = `Error: no real location was found anywhere in the customer's own messages. Do NOT create the product yet. Ask the customer where they're based, wait for their real reply, then try again.`;
             } else {
-              comboRejected = false;
               comboConfirmed = containers;
               confirmedName = args.customName || "Custom Blend";
               confirmedDescription = args.description || "";
               confirmedCustomerNotes = args.customerNotes || "";
               confirmedCustomerName = args.customerName || "";
-              confirmedCustomerEmail = knownCustomerEmail || extractEmailFromHistory(history);
-              finalText = buildConfirmationText(comboConfirmed, confirmedName, confirmedCustomerName);
-            }
-
-            if (comboRejected) {
-              console.log("Tool call rejected:", toolResultContent);
+              confirmedCustomerEmail = knownCustomerEmail || extractEmailFromHistory(history) || args.customerEmail || "";
             }
           } catch (e) {
-            console.error("Failed to parse tool arguments:", e);
+            console.error("Failed to parse confirm_scent_combination arguments:", e);
             toolResultContent = "Error: couldn't parse those tool call arguments — call confirm_scent_combination again with valid JSON.";
           }
         } else if (toolCall.function.name === "search_containers_for_layer") {
@@ -1886,28 +1409,31 @@ async function callAI(history, conversationId, knownCustomerEmail) {
             const args = JSON.parse(toolCall.function.arguments);
             const query = args.query || "";
             const candidates = scoreContainersFor(query).slice(0, 8);
-            // Re-rank the keyword-relevant candidates by real historical co-occurrence (notes that
-            // actually got bought alongside this one across ~937k past orders) — a soft ranking
-            // boost, never a hard filter, so a note with no co-occurrence data yet still surfaces.
+
+            // Two real, independent historical signals feed the ranking bonus — neither is a hard
+            // filter, both just push proven-successful real containers higher:
+            // (1) notes that historically got bought ALONGSIDE this query term, across ~937k orders.
             const coOccurring = (await getCoOccurringNotes(query, 10)).map(n => n.toLowerCase());
-            const coOccurrenceBonus = (c) => {
-              if (coOccurring.length === 0) return 0;
+            // (2) notes popular with real customers from THIS customer's own region during the
+            // current season — the actual location/season they gave us in Phase 1, not a guess.
+            const regionMaps = await getRegionMaps();
+            const regionCandidate = extractRegionFromHistory(history, regionMaps);
+            const { notes: regionalNotes } = await getPopularNotesForRegion(regionCandidate);
+            const regionalLower = regionalNotes.map(n => n.toLowerCase());
+
+            const bonus = (c) => {
               const notesLower = (c.Notes || "").toLowerCase();
-              return coOccurring.filter(n => notesLower.includes(n)).length;
+              const coScore = coOccurring.filter(n => notesLower.includes(n)).length;
+              const regionScore = regionalLower.filter(n => notesLower.includes(n)).length;
+              return coScore + regionScore;
             };
-            const matches = coOccurring.length > 0
-              ? [...candidates].sort((a, b) => coOccurrenceBonus(b) - coOccurrenceBonus(a)).slice(0, 4)
+            const hasSignal = coOccurring.length > 0 || regionalLower.length > 0;
+            const matches = hasSignal
+              ? [...candidates].sort((a, b) => bonus(b) - bonus(a)).slice(0, 4)
               : candidates.slice(0, 4);
-            if (matches.length === 0) {
-              toolResultContent = `No real containers matched "${query}". Tell the customer plainly that those exact notes aren't available right now, and try search_containers_for_layer again with a related term (e.g. a nearby note family) — do not invent notes yourself.`;
-            } else {
-              const offered = getOfferedSet(conversationId);
-              const lines = matches.map(c => {
-                offered.add(c.Title);
-                return `- [internal_id: ${c.Title}] Notes: ${c.Notes}`;
-              });
-              toolResultContent = `Real containers found for "${query}":\n${lines.join("\n")}\n\nPresent 3-4 of these to the customer as your suggested options, each showing only 4-5 of its notes copied EXACTLY as listed above — never add, remove, or blend in any note that isn't shown here. Never mention "internal_id" or any container's title to the customer.`;
-            }
+            toolResultContent = matches.length === 0
+              ? `No real containers matched "${query}". Tell the customer plainly those exact notes aren't available right now, and try a related term instead of inventing notes.`
+              : `Real containers found for "${query}":\n${matches.map(c => `- [internal_id: ${c.Title}] Notes: ${c.Notes}`).join("\n")}\n\nPresent a few of these to the customer using their real notes — never mention "internal_id" or any container's title.`;
           } catch (e) {
             console.error("Failed to parse search_containers_for_layer arguments:", e);
             toolResultContent = "Error: couldn't parse those tool call arguments — call search_containers_for_layer again with valid JSON.";
@@ -1920,42 +1446,19 @@ async function callAI(history, conversationId, knownCustomerEmail) {
           content: toolResultContent
         });
       }
-
-      // A successful confirmation already has its customer-facing reply built deterministically
-      // above (buildConfirmationText) — stop here instead of looping back for another model turn,
-      // which is exactly where free-generated hallucination would otherwise creep back in.
-      if (finalText) {
-        messages.push({ role: "assistant", content: finalText });
-        break;
-      }
       continue;
     }
 
-    finalText = guardAgainstFalseSuccessClaim(sanitizeCustomerFacingText(message.content || ""), comboConfirmed);
+    finalText = message.content || "";
     messages.push({ role: "assistant", content: finalText });
     break;
-  }
-
-  if (!finalText) {
-    const nudgeContent = comboRejected && !comboConfirmed
-      ? "The last combination you tried to confirm didn't match anything in the catalog. Apologize warmly, and ask the customer to pick a different note direction for that layer so you can try again. Do not call any tools."
-      : "Please reply to the customer now in 2-3 warm sentences. Do not call any tools.";
-    const nudge = [...messages, { role: "user", content: nudgeContent }];
-    const data = await callOpenAIOnce(apiKey, nudge, false);
-    if (data) {
-      finalText = guardAgainstFalseSuccessClaim(sanitizeCustomerFacingText(data.choices[0]?.message?.content || ""), comboConfirmed);
-      messages.push({ role: "user", content: nudgeContent });
-      messages.push({ role: "assistant", content: finalText });
-    }
   }
 
   // Strip the system message before persisting (it's rebuilt fresh each call)
   const persistedMessages = messages.filter(m => m.role !== "system");
 
   return {
-    replyText: finalText || (comboRejected && !comboConfirmed
-      ? "Sorry, I couldn't quite match that last combination — could we try a different note direction for that layer?"
-      : "Great choice! Let's get that crafted for you."),
+    replyText: finalText || "Great choice! Let's get that crafted for you.",
     comboConfirmed,
     confirmedName,
     confirmedDescription,
@@ -1980,28 +1483,6 @@ function summarizeNotesForOption(notes, max = 5) {
     .filter(Boolean)
     .slice(0, max)
     .join(", ");
-}
-
-// Builds the customer-facing confirmation message deterministically from the REAL confirmed
-// containers' REAL Notes column, instead of letting the model freely re-narrate the blend from
-// memory on its next turn — seen inventing notes that don't actually exist in the container it
-// just validly picked (e.g. describing a real container as having a "bright orange top" when its
-// actual Notes column has no orange at all). The internal_id passing validation only guarantees
-// the ID is real; it says nothing about whether the model's own prose describing it is accurate.
-function buildConfirmationText(containers, customName, customerName) {
-  const notesByPosition = {};
-  for (const item of containers) {
-    const container = findContainerByInternalId(item.internal_id);
-    const summary = summarizeNotesForOption(container?.Notes || "", 4);
-    notesByPosition[item.position] = notesByPosition[item.position]
-      ? `${notesByPosition[item.position]} + ${summary}`
-      : summary;
-  }
-  const layerLines = ["top", "middle", "base"]
-    .filter(position => notesByPosition[position])
-    .map(position => `${position} note: ${notesByPosition[position]}`);
-  const nameAddress = customerName ? `, ${customerName}` : "";
-  return `Your custom fragrance "${customName}" is ready${nameAddress}! It layers ${layerLines.join("; ")} — I hope it's absolutely perfect for you!`;
 }
 
 // Used only when a container's PricePer5ml is missing/blank in the CSV — shouldn't happen now
