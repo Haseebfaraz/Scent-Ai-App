@@ -857,6 +857,7 @@ import prisma from "../db.server";
 // 1. DATASET ENGINE LAYER
 // ============================================================
 let SCENT_CONTAINERS = [];
+let DATASET_LOAD_ERROR = null;
 try {
   const csvPath = path.join(process.cwd(), "data", "Notes-Extraction-Separated.csv");
   if (fs.existsSync(csvPath)) {
@@ -866,12 +867,23 @@ try {
       skip_empty_lines: true,
       trim: true
     });
-    console.log(`[Dataset Engine] Successfully indexed ${SCENT_CONTAINERS.length} fragrance profiles.`);
+    if (SCENT_CONTAINERS.length === 0) {
+      DATASET_LOAD_ERROR = `CSV at ${csvPath} parsed to 0 rows — file may be empty or malformed.`;
+    } else if (!("Title" in SCENT_CONTAINERS[0])) {
+      DATASET_LOAD_ERROR = `CSV at ${csvPath} has no "Title" column (found columns: ${Object.keys(SCENT_CONTAINERS[0]).join(", ")}). Container lookups will fail for every product.`;
+    }
+    if (DATASET_LOAD_ERROR) {
+      console.error(`[Dataset Engine] ${DATASET_LOAD_ERROR}`);
+    } else {
+      console.log(`[Dataset Engine] Successfully indexed ${SCENT_CONTAINERS.length} fragrance profiles.`);
+    }
   } else {
-    console.warn(`[Dataset Engine] CSV file not found at: ${csvPath}`);
+    DATASET_LOAD_ERROR = `CSV file not found at: ${csvPath}. Product creation will fail until this file is added.`;
+    console.error(`[Dataset Engine] ${DATASET_LOAD_ERROR}`);
   }
 } catch (error) {
-  console.error("Dataset generation lookup failure:", error);
+  DATASET_LOAD_ERROR = `Dataset generation lookup failure: ${error.message}`;
+  console.error(`[Dataset Engine] ${DATASET_LOAD_ERROR}`, error);
 }
 
 function normalizeForMatch(str) {
@@ -1999,6 +2011,10 @@ function withRatioSuffix(baseValue, pct) {
 
 async function createDynamicProduct(admin, shopDomain, comboConfirmed, customName, description, customerNotes, customerName, customerEmail) {
   const perLayerMl = (BOTTLE_SIZE_ML * CONCENTRATE_RATIO) / comboConfirmed.length;
+
+  if (DATASET_LOAD_ERROR) {
+    throw new Error(`Scent catalog is not loaded: ${DATASET_LOAD_ERROR}`);
+  }
 
   const layerDetails = comboConfirmed.map(item => {
     const container = findContainerByInternalId(item.internal_id);
