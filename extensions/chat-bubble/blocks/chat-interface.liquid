@@ -75,6 +75,9 @@
   window.shopId = {{ shop.id }};
   window.shopDomain = {{ shop.permanent_domain | json }};
   window.appBaseUrl = {{ block.settings.app_base_url | json }};
+  // Native Shopify storefront login state — null if the customer isn't logged in. Used to skip
+  // the email-capture popup entirely when we already know who they are.
+  window.shopCustomerEmail = {{ customer.email | json }};
 </script>
 
 {% schema %}

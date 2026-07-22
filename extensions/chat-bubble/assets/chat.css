@@ -335,3 +335,62 @@ span.scent-pill {
 .shop-ai-product-title, .shop-ai-product-header h4 {
   color: #e7e5e4;
 }
+
+/* Login/email gate — shown when the customer isn't logged in, before chat is usable */
+.shop-ai-email-gate-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(16, 13, 24, 0.92);
+  border-radius: inherit;
+}
+.shop-ai-email-gate-box {
+  width: 85%;
+  max-width: 320px;
+  background: linear-gradient(180deg, #16121f 0%, #100d18 100%);
+  border: 1px solid #2a2440;
+  border-radius: 12px;
+  padding: 24px;
+  text-align: center;
+}
+.shop-ai-email-gate-title {
+  color: #f4f2fa;
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 0 6px;
+}
+.shop-ai-email-gate-subtitle {
+  color: #8b8598;
+  font-size: 13px;
+  margin: 0 0 16px;
+}
+.shop-ai-email-gate-input {
+  width: 100%;
+  box-sizing: border-box;
+  background: #221c33;
+  color: #e7e5f0;
+  border: 1px solid #322a4a;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+.shop-ai-email-gate-error {
+  color: #f87171;
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+.shop-ai-email-gate-submit {
+  width: 100%;
+  background: linear-gradient(135deg, #8b5cf6, #ec4899);
+  color: #fff;
+  border: none;
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}

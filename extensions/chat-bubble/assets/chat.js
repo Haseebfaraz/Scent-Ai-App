@@ -11,6 +11,62 @@
    * Application namespace to prevent global scope pollution
    */
   const ShopAIChat = {
+    // Known once either the customer is logged into the store (window.shopCustomerEmail, set by
+    // the Liquid block) or they've submitted the email gate below — sent with every chat request.
+    customerEmail: null,
+
+    /**
+     * Login/email gate — blocks chat until we know who the customer is. Skipped entirely for
+     * customers already logged into the storefront (native Shopify login, no OAuth needed).
+     * NOT named "Auth" — there's already an unrelated `Auth` object further down (the dormant
+     * OAuth popup mechanism) and object literals silently let a later duplicate key win, which
+     * clobbered this whole object and crashed init() with "this.Auth.getKnownEmail is not a
+     * function" the first time this was named the same.
+     */
+    EmailGate: {
+      EMAIL_PATTERN: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
+
+      getKnownEmail: function() {
+        return window.shopCustomerEmail || sessionStorage.getItem('shopAiCustomerEmail') || null;
+      },
+
+      showEmailGate: function(container, onContinue) {
+        const overlay = document.createElement('div');
+        overlay.className = 'shop-ai-email-gate-overlay';
+        overlay.innerHTML = [
+          '<div class="shop-ai-email-gate-box">',
+          '<p class="shop-ai-email-gate-title">Welcome! What\'s your email?</p>',
+          '<p class="shop-ai-email-gate-subtitle">We\'ll use this to save your custom fragrance.</p>',
+          '<input type="email" class="shop-ai-email-gate-input" placeholder="you@example.com">',
+          '<p class="shop-ai-email-gate-error" style="display:none;">Please enter a valid email.</p>',
+          '<button type="button" class="shop-ai-email-gate-submit">Continue</button>',
+          '</div>'
+        ].join('');
+        container.appendChild(overlay);
+
+        const input = overlay.querySelector('.shop-ai-email-gate-input');
+        const error = overlay.querySelector('.shop-ai-email-gate-error');
+        const submit = overlay.querySelector('.shop-ai-email-gate-submit');
+
+        const trySubmit = () => {
+          const value = input.value.trim();
+          if (!this.EMAIL_PATTERN.test(value)) {
+            error.style.display = 'block';
+            return;
+          }
+          sessionStorage.setItem('shopAiCustomerEmail', value);
+          overlay.remove();
+          onContinue(value);
+        };
+
+        submit.addEventListener('click', trySubmit);
+        input.addEventListener('keypress', (e) => {
+          if (e.key === 'Enter') trySubmit();
+        });
+        input.focus();
+      }
+    },
+
     /**
      * UI-related elements and functionality
      */
@@ -526,7 +582,8 @@
             message: userMessage,
             conversation_id: conversationId,
             prompt_type: promptType,
-            shop_domain: window.shopDomain
+            shop_domain: window.shopDomain,
+            customer_email: ShopAIChat.customerEmail || null
           });
 
           const streamUrl = (window.appBaseUrl || 'https://localhost:3458') + '/chat';
@@ -985,13 +1042,30 @@
     },
 
     /**
-     * Initialize the chat application
+     * Initialize the chat application — gated on knowing the customer's email first (native
+     * Shopify login if they have one, otherwise the email-gate popup) before any chat UI is set up.
      */
     init: function() {
-      // Initialize UI
       const container = document.querySelector('.shop-ai-chat-container');
       if (!container) return;
 
+      const known = this.EmailGate.getKnownEmail();
+      if (known) {
+        this.customerEmail = known;
+        this.start(container);
+      } else {
+        this.EmailGate.showEmailGate(container, (email) => {
+          this.customerEmail = email;
+          this.start(container);
+        });
+      }
+    },
+
+    /**
+     * Proceed with normal chat setup once the customer's email is known.
+     * @param {HTMLElement} container - The main container element
+     */
+    start: function(container) {
       this.UI.init(container);
 
       // Check for existing conversation
