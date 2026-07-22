@@ -80,3 +80,30 @@ model CustomerAccountUrls {
   createdAt        DateTime  @default(now())
   updatedAt        DateTime  @updatedAt
 }
+
+model Note {
+  id        String    @id @default(cuid())
+  name      String    @unique
+  position  String
+  density   Float
+  family    String?
+  createdAt DateTime  @default(now())
+}
+
+model OrderHistory {
+  id             String    @id @default(cuid())
+  orderDate      String?
+  season         String?
+  classification String?
+  notes          String
+  // Region columns only — deliberately not restoring Name/Race/Gender from the source CSV,
+  // matching the original seed script's privacy-conscious scope (see scripts/seed-notes.cjs).
+  city           String?
+  stateName      String?
+  countryName    String?
+  createdAt      DateTime  @default(now())
+
+  @@index([city])
+  @@index([stateName])
+  @@index([countryName])
+}

@@ -33,17 +33,16 @@
           
           <div class="scent-interface-header">
             <div class="header-left-meta">
-              <div class="meta-icon-square">
-                <span class="square-dot-pattern"></span>
-              </div>
+              <div class="meta-icon-square">✦</div>
               <div class="meta-text-lines">
-                <span class="meta-label-top">ACTIVE SYNTHESIS</span>
-                <span class="meta-label-sub">Session ID: #AURA-9921</span>
+                <span class="meta-label-top">Scent AI</span>
+                <span class="meta-label-sub"><span class="status-pulse-dot"></span>Active session</span>
               </div>
             </div>
             <div class="header-right-status">
-              <span class="status-pulse-dot"></span>
-              <span class="status-text-slug">SYSTEM READY</span>
+              <span class="traffic-dot traffic-dot-red"></span>
+              <span class="traffic-dot traffic-dot-yellow"></span>
+              <span class="traffic-dot traffic-dot-green"></span>
             </div>
             <button class="shop-ai-chat-close" style="display: none !important;">✕</button>
           </div>
@@ -74,6 +73,8 @@
     welcomeMessage: {{ block.settings.welcome_message | json }}
   };
   window.shopId = {{ shop.id }};
+  window.shopDomain = {{ shop.permanent_domain | json }};
+  window.appBaseUrl = {{ block.settings.app_base_url | json }};
 </script>
 
 {% schema %}
@@ -108,6 +109,13 @@
         }
       ],
       "default": "standardAssistant"
+    },
+    {
+      "type": "text",
+      "id": "app_base_url",
+      "label": "App Base URL (dev only)",
+      "info": "Your app's current backend URL, e.g. https://localhost:3458 or your current ngrok/tunnel URL. Update this whenever your local dev port or tunnel changes — no code redeploy needed.",
+      "default": "https://localhost:3458"
     }
   ]
 }

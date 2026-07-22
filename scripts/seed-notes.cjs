@@ -87,7 +87,7 @@ async function main() {
   }
   console.log(`Seeded ${noteCount} notes.`);
 
-  // ---------- Step 3: seed cleaned order history (no demographic data) ----------
+  // ---------- Step 3: seed cleaned order history (region kept, Name/Race/Gender dropped) ----------
   // Clear old rows first so re-running this script doesn't duplicate them.
   await prisma.orderHistory.deleteMany({});
 
@@ -97,6 +97,10 @@ async function main() {
     classification:
       (row['Classification'] || '').replace(/^CLASSIFICATION:\s*/i, '').trim() || null,
     notes: (row['Notes'] || '').trim(),
+    // Region only — deliberately still not seeding Name/Race/Gender from the source CSV.
+    city: (row['City'] || '').trim() || null,
+    stateName: (row['State Name'] || '').trim() || null,
+    countryName: (row['Country Name'] || '').trim() || null,
   }));
 
   const BATCH_SIZE = 1000;
@@ -107,7 +111,7 @@ async function main() {
     orderCount += batch.length;
     console.log(`  ...${orderCount} / ${cleanedOrders.length} order rows seeded`);
   }
-  console.log(`Seeded ${orderCount} order history rows (demographic columns dropped).`);
+  console.log(`Seeded ${orderCount} order history rows (city/state/country kept, Name/Race/Gender dropped).`);
 }
 
 main()

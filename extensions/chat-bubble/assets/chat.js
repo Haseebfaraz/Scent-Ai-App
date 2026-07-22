@@ -185,6 +185,53 @@
       },
 
       /**
+       * Show the perfume bottle filling animation while a custom product is being created
+       */
+      showProductCreatingAnimation: function() {
+        const { messagesContainer } = this.elements;
+
+        if (messagesContainer.querySelector('.shop-ai-bottle-loader')) return;
+
+        const loader = document.createElement('div');
+        loader.classList.add('shop-ai-bottle-loader');
+        loader.innerHTML = `
+          <svg viewBox="0 0 120 200" width="70" height="110">
+            <defs>
+              <linearGradient id="shopAiScentFluid" x1="0" y1="1" x2="0" y2="0">
+                <stop offset="0%" stop-color="#c9832c"/>
+                <stop offset="50%" stop-color="#e08fa0"/>
+                <stop offset="100%" stop-color="#f2e07a"/>
+              </linearGradient>
+              <clipPath id="shopAiBottleClip">
+                <rect x="15" y="35" width="90" height="150" rx="18"/>
+              </clipPath>
+            </defs>
+            <rect x="45" y="0" width="30" height="14" rx="4" fill="#2e2a24"/>
+            <rect x="50" y="10" width="20" height="25" fill="#2e2a24" opacity="0.6"/>
+            <g clip-path="url(#shopAiBottleClip)">
+              <rect class="shop-ai-bottle-fluid" x="15" y="35" width="90" height="150" fill="url(#shopAiScentFluid)"/>
+            </g>
+            <rect x="15" y="35" width="90" height="150" rx="18" fill="none" stroke="#57534e" stroke-width="3"/>
+          </svg>
+          <p class="shop-ai-bottle-caption">Blending your fragrance…</p>
+        `;
+        messagesContainer.appendChild(loader);
+        this.scrollToBottom();
+      },
+
+      /**
+       * Remove the perfume bottle filling animation
+       */
+      removeProductCreatingAnimation: function() {
+        const { messagesContainer } = this.elements;
+
+        const loader = messagesContainer.querySelector('.shop-ai-bottle-loader');
+        if (loader) {
+          loader.remove();
+        }
+      },
+
+      /**
        * Display product results in the chat
        * @param {Array} products - Array of product data objects
        */
@@ -478,10 +525,11 @@
           const requestBody = JSON.stringify({
             message: userMessage,
             conversation_id: conversationId,
-            prompt_type: promptType
+            prompt_type: promptType,
+            shop_domain: window.shopDomain
           });
 
-          const streamUrl = 'https://localhost:3458/chat';
+          const streamUrl = (window.appBaseUrl || 'https://localhost:3458') + '/chat';
           const shopId = window.shopId;
 
           const response = await fetch(streamUrl, {
@@ -489,7 +537,11 @@
             headers: {
               'Content-Type': 'application/json',
               'Accept': 'text/event-stream',
-              'X-Shopify-Shop-Id': shopId
+              'X-Shopify-Shop-Id': shopId,
+              // Skips ngrok's browser-warning interstitial page when the tunnel is a free
+              // ngrok URL — without this, ngrok intercepts the request before it ever reaches
+              // the app, and this fetch gets an HTML warning page back instead of the stream.
+              'ngrok-skip-browser-warning': 'true'
             },
             body: requestBody
           });
@@ -580,16 +632,26 @@
             currentMessageElement.textContent = "Sorry, our servers are currently busy. Please try again later.";
             break;
 
+          case 'product_creating':
+            ShopAIChat.UI.removeTypingIndicator();
+            ShopAIChat.UI.showProductCreatingAnimation();
+            break;
+
           case 'product_created':
+            ShopAIChat.UI.removeProductCreatingAnimation();
             ShopAIChat.UI.removeTypingIndicator();
             if (data.url) {
+              // Longer than before (was 1500ms) — Shopify's storefront can take a few seconds to
+              // start actually serving a brand-new product even after publishing succeeds, and a
+              // too-fast redirect was hitting a transient 404 before that finished propagating.
               setTimeout(() => {
                 window.location.href = data.url;
-              }, 1500);
+              }, 4000);
             }
             break;
 
           case 'product_error':
+            ShopAIChat.UI.removeProductCreatingAnimation();
             ShopAIChat.UI.removeTypingIndicator();
             console.error('Product creation error:', data.error);
             ShopAIChat.Message.add(
@@ -648,14 +710,15 @@
           messagesContainer.appendChild(loadingMessage);
 
           // Fetch history from the server
-          const historyUrl = `https://localhost:3458/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
+          const historyUrl = `${window.appBaseUrl || 'https://localhost:3458'}/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
           console.log('Fetching history from:', historyUrl);
 
           const response = await fetch(historyUrl, {
             method: 'GET',
             headers: {
               'Accept': 'application/json',
-              'Content-Type': 'application/json'
+              'Content-Type': 'application/json',
+              'ngrok-skip-browser-warning': 'true'
             },
             mode: 'cors'
           });
@@ -797,9 +860,11 @@
           attemptCount++;
 
           try {
-            const tokenUrl = 'https://localhost:3458/auth/token-status?conversation_id=' +
+            const tokenUrl = (window.appBaseUrl || 'https://localhost:3458') + '/auth/token-status?conversation_id=' +
               encodeURIComponent(conversationId);
-            const response = await fetch(tokenUrl);
+            const response = await fetch(tokenUrl, {
+              headers: { 'ngrok-skip-browser-warning': 'true' }
+            });
 
             if (!response.ok) {
               throw new Error('Token status check failed: ' + response.status);

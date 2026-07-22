@@ -14,10 +14,17 @@ api_version = "2025-04"
 
 [access_scopes]
 # Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
-scopes = "read_products, write_products, unauthenticated_read_product_listings"
+scopes = "read_products, write_products, write_inventory, read_publications, write_publications, unauthenticated_read_product_listings"
 
 [auth]
 redirect_urls = [ "https://shop-chat-agent.com/api/auth" ]
+
+# [app_proxy] requires a public tunnel, which conflicts with plain localhost dev mode.
+# Re-enable with a fresh ngrok URL only when specifically testing the customer library:
+# [app_proxy]
+# url = "https://<your-ngrok-url>/api"
+# subpath = "scent-library"
+# prefix = "apps"
 
 [pos]
 embedded = false
