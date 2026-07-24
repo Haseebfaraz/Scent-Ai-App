@@ -991,9 +991,6 @@ async function getRegionMaps() {
   }
   return cachedRegionMaps;
 }
-// Fire-and-forget warm-up so this DB scan runs once at server startup instead of blocking
-// whichever request happens to arrive first.
-getRegionMaps();
 
 // Scans the customer's own messages for a known city, state, OR country name (whichever is
 // most specific) — checking 1-4 word windows so multi-word names like "New York" or "United
@@ -2090,6 +2087,15 @@ export async function loader({ request }) {
 // 8. ACTION — handles incoming chat messages (POST)
 // ============================================================
 export async function action({ request }) {
+  // Fire-and-forget warm-up so this DB scan starts on the first real request instead of
+  // blocking it — getRegionMaps() caches internally, so this is a cheap no-op on every request
+  // after the first. Deliberately called here (inside action, not at module top-level) — React
+  // Router's production build only allows server-only imports like ../db.server to be referenced
+  // from loader/action/middleware/headers; a bare top-level call at module scope broke the
+  // Vite/Docker build with "Server-only module referenced by client" (verified locally via
+  // `npm run build`).
+  getRegionMaps();
+
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, Authorization",
