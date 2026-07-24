@@ -11,60 +11,20 @@
    * Application namespace to prevent global scope pollution
    */
   const ShopAIChat = {
-    // Known once either the customer is logged into the store (window.shopCustomerEmail, set by
-    // the Liquid block) or they've submitted the email gate below — sent with every chat request.
+    // Real, verified Shopify account info — set directly from window globals the Liquid block
+    // only ever renders inside its {% if customer %} branch (see chat-interface.liquid). There's
+    // no client-side gate here anymore: an unauthenticated visitor never receives chat.js's
+    // markup or this script at all, so by the time this file runs, login is already guaranteed.
     customerEmail: null,
+    customerName: null,
 
     /**
-     * Login/email gate — blocks chat until we know who the customer is. Skipped entirely for
-     * customers already logged into the storefront (native Shopify login, no OAuth needed).
-     * NOT named "Auth" — there's already an unrelated `Auth` object further down (the dormant
-     * OAuth popup mechanism) and object literals silently let a later duplicate key win, which
-     * clobbered this whole object and crashed init() with "this.Auth.getKnownEmail is not a
-     * function" the first time this was named the same.
+     * Single letter shown in the user message avatar — prefers their real name, falls back to
+     * email, falls back to a generic mark only in the brief window before either is set.
      */
-    EmailGate: {
-      EMAIL_PATTERN: /^[^\s@]+@[^\s@]+\.[^\s@]+$/,
-
-      getKnownEmail: function() {
-        return window.shopCustomerEmail || sessionStorage.getItem('shopAiCustomerEmail') || null;
-      },
-
-      showEmailGate: function(container, onContinue) {
-        const overlay = document.createElement('div');
-        overlay.className = 'shop-ai-email-gate-overlay';
-        overlay.innerHTML = [
-          '<div class="shop-ai-email-gate-box">',
-          '<p class="shop-ai-email-gate-title">Welcome! What\'s your email?</p>',
-          '<p class="shop-ai-email-gate-subtitle">We\'ll use this to save your custom fragrance.</p>',
-          '<input type="email" class="shop-ai-email-gate-input" placeholder="you@example.com">',
-          '<p class="shop-ai-email-gate-error" style="display:none;">Please enter a valid email.</p>',
-          '<button type="button" class="shop-ai-email-gate-submit">Continue</button>',
-          '</div>'
-        ].join('');
-        container.appendChild(overlay);
-
-        const input = overlay.querySelector('.shop-ai-email-gate-input');
-        const error = overlay.querySelector('.shop-ai-email-gate-error');
-        const submit = overlay.querySelector('.shop-ai-email-gate-submit');
-
-        const trySubmit = () => {
-          const value = input.value.trim();
-          if (!this.EMAIL_PATTERN.test(value)) {
-            error.style.display = 'block';
-            return;
-          }
-          sessionStorage.setItem('shopAiCustomerEmail', value);
-          overlay.remove();
-          onContinue(value);
-        };
-
-        submit.addEventListener('click', trySubmit);
-        input.addEventListener('keypress', (e) => {
-          if (e.key === 'Enter') trySubmit();
-        });
-        input.focus();
-      }
+    getUserInitial: function() {
+      const source = this.customerName || this.customerEmail;
+      return source ? source.trim().charAt(0).toUpperCase() : '•';
     },
 
     /**
@@ -143,16 +103,6 @@
 
         // Handle window resize to adjust scrolling
         window.addEventListener('resize', () => this.scrollToBottom());
-
-        // Add global click handler for auth links
-        document.addEventListener('click', function(event) {
-          if (event.target && event.target.classList.contains('shop-auth-trigger')) {
-            event.preventDefault();
-            if (window.shopAuthUrl) {
-              ShopAIChat.Auth.openAuthPopup(window.shopAuthUrl);
-            }
-          }
-        });
       },
 
       /**
@@ -373,6 +323,7 @@
           ShopAIChat.Formatting.formatMessageContent(messageElement);
         } else {
           messageElement.textContent = text;
+          messageElement.dataset.initial = ShopAIChat.getUserInitial();
         }
 
         messagesContainer.appendChild(messageElement);
@@ -474,16 +425,8 @@
         // Process Markdown links
         const markdownLinkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
         processedText = processedText.replace(markdownLinkRegex, (match, text, url) => {
-          // Check if it's an auth URL
-          if (url.includes('shopify.com/authentication') &&
-             (url.includes('oauth/authorize') || url.includes('authentication'))) {
-            // Store the auth URL in a global variable for later use - this avoids issues with onclick handlers
-            window.shopAuthUrl = url;
-            // Just return normal link that will be handled by the document click handler
-            return '<a href="#auth" class="shop-auth-trigger">' + text + '</a>';
-          }
           // If it's a checkout link, replace the text
-          else if (url.includes('/cart') || url.includes('checkout')) {
+          if (url.includes('/cart') || url.includes('checkout')) {
             return '<a href="' + url + '" target="_blank" rel="noopener noreferrer">click here to proceed to checkout</a>';
           } else {
             // For normal links, preserve the original text
@@ -583,7 +526,8 @@
             conversation_id: conversationId,
             prompt_type: promptType,
             shop_domain: window.shopDomain,
-            customer_email: ShopAIChat.customerEmail || null
+            customer_email: ShopAIChat.customerEmail || null,
+            customer_name: ShopAIChat.customerName || null
           });
 
           const streamUrl = (window.appBaseUrl || 'https://localhost:3458') + '/chat';
@@ -792,7 +736,7 @@
 
           // No messages, show welcome message
           if (!data.messages || data.messages.length === 0) {
-            const welcomeMessage = window.shopChatConfig?.welcomeMessage || "👋 Hi there! How can I help you today?";
+            const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
             ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
             return;
           }
@@ -824,138 +768,12 @@
           }
 
           // Show error and welcome message
-          const welcomeMessage = window.shopChatConfig?.welcomeMessage || "👋 Hi there! How can I help you today?";
+          const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
           ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
 
           // Clear the conversation ID since we couldn't fetch this conversation
           sessionStorage.removeItem('shopAiConversationId');
         }
-      }
-    },
-
-    /**
-     * Authentication-related functionality
-     */
-    Auth: {
-      /**
-       * Opens an authentication popup window
-       * @param {string|HTMLElement} authUrlOrElement - The auth URL or link element that was clicked
-       */
-      openAuthPopup: function(authUrlOrElement) {
-        let authUrl;
-        if (typeof authUrlOrElement === 'string') {
-          // If a string URL was passed directly
-          authUrl = authUrlOrElement;
-        } else {
-          // If an element was passed
-          authUrl = authUrlOrElement.getAttribute('data-auth-url');
-          if (!authUrl) {
-            console.error('No auth URL found in element');
-            return;
-          }
-        }
-
-        // Open the popup window centered in the screen
-        const width = 600;
-        const height = 700;
-        const left = (window.innerWidth - width) / 2 + window.screenX;
-        const top = (window.innerHeight - height) / 2 + window.screenY;
-
-        const popup = window.open(
-          authUrl,
-          'ShopifyAuth',
-          `width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`
-        );
-
-        // Focus the popup window
-        if (popup) {
-          popup.focus();
-        } else {
-          // If popup was blocked, show a message
-          alert('Please allow popups for this site to authenticate with Shopify.');
-        }
-
-        // Start polling for token availability
-        const conversationId = sessionStorage.getItem('shopAiConversationId');
-        if (conversationId) {
-          const messagesContainer = document.querySelector('.shop-ai-chat-messages');
-
-          // Add a message to indicate authentication is in progress
-          ShopAIChat.Message.add("Authentication in progress. Please complete the process in the popup window.",
-            'assistant', messagesContainer);
-
-          this.startTokenPolling(conversationId, messagesContainer);
-        }
-      },
-
-      /**
-       * Start polling for token availability
-       * @param {string} conversationId - Conversation ID
-       * @param {HTMLElement} messagesContainer - The messages container
-       */
-      startTokenPolling: function(conversationId, messagesContainer) {
-        if (!conversationId) return;
-
-        console.log('Starting token polling for conversation:', conversationId);
-        const pollingId = 'polling_' + Date.now();
-        sessionStorage.setItem('shopAiTokenPollingId', pollingId);
-
-        let attemptCount = 0;
-        const maxAttempts = 30;
-
-        const poll = async () => {
-          if (sessionStorage.getItem('shopAiTokenPollingId') !== pollingId) {
-            console.log('Another polling session has started, stopping this one');
-            return;
-          }
-
-          if (attemptCount >= maxAttempts) {
-            console.log('Max polling attempts reached, stopping');
-            return;
-          }
-
-          attemptCount++;
-
-          try {
-            const tokenUrl = (window.appBaseUrl || 'https://localhost:3458') + '/auth/token-status?conversation_id=' +
-              encodeURIComponent(conversationId);
-            const response = await fetch(tokenUrl, {
-              headers: { 'ngrok-skip-browser-warning': 'true' }
-            });
-
-            if (!response.ok) {
-              throw new Error('Token status check failed: ' + response.status);
-            }
-
-            const data = await response.json();
-
-            if (data.status === 'authorized') {
-              console.log('Token available, resuming conversation');
-              const message = sessionStorage.getItem('shopAiLastMessage');
-
-              if (message) {
-                sessionStorage.removeItem('shopAiLastMessage');
-                setTimeout(() => {
-                  ShopAIChat.Message.add("Authorization successful! I'm now continuing with your request.",
-                    'assistant', messagesContainer);
-                  ShopAIChat.API.streamResponse(message, conversationId, messagesContainer);
-                  ShopAIChat.UI.showTypingIndicator();
-                }, 500);
-              }
-
-              sessionStorage.removeItem('shopAiTokenPollingId');
-              return;
-            }
-
-            console.log('Token not available yet, polling again in 10s');
-            setTimeout(poll, 10000);
-          } catch (error) {
-            console.error('Error polling for token status:', error);
-            setTimeout(poll, 10000);
-          }
-        };
-
-        setTimeout(poll, 2000);
       }
     },
 
@@ -1042,23 +860,16 @@
     },
 
     /**
-     * Initialize the chat application — gated on knowing the customer's email first (native
-     * Shopify login if they have one, otherwise the email-gate popup) before any chat UI is set up.
+     * Initialize the chat application. This script only ever loads for a logged-in customer (see
+     * the {% if customer %} gate in chat-interface.liquid) — no client-side login check needed.
      */
     init: function() {
       const container = document.querySelector('.shop-ai-chat-container');
       if (!container) return;
 
-      const known = this.EmailGate.getKnownEmail();
-      if (known) {
-        this.customerEmail = known;
-        this.start(container);
-      } else {
-        this.EmailGate.showEmailGate(container, (email) => {
-          this.customerEmail = email;
-          this.start(container);
-        });
-      }
+      this.customerEmail = window.shopCustomerEmail || null;
+      this.customerName = window.shopCustomerName || null;
+      this.start(container);
     },
 
     /**
@@ -1075,8 +886,13 @@
         // Fetch conversation history
         this.API.fetchChatHistory(conversationId, this.UI.elements.messagesContainer);
       } else {
-        // No previous conversation, show welcome message
-        const welcomeMessage = window.shopChatConfig?.welcomeMessage || "👋 Hi there! How can I help you today?";
+        // No previous conversation — show the date divider once, then the welcome message
+        const divider = document.createElement('div');
+        divider.className = 'shop-ai-date-divider';
+        divider.textContent = 'Today';
+        this.UI.elements.messagesContainer.appendChild(divider);
+
+        const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
         this.Message.add(welcomeMessage, 'assistant', this.UI.elements.messagesContainer);
       }
     }

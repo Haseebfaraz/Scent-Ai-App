@@ -1,5 +1,27 @@
 :root {
   --viewport-height: 100vh;
+  /* Falls back to the original brand purple only if the Liquid block somehow never sets
+     --scent-accent inline — in normal operation this is always overridden by
+     block.settings.chat_bubble_color, so the widget always follows the merchant's own theme
+     color instead of a hardcoded one. */
+  --scent-accent: #ab9372;
+  --scent-accent-text: #ffffff;
+
+  /* Warm cream instead of pure white for the window/header/page — the assistant bubble is a
+     touch deeper so it still reads as a distinct bubble against the softer page behind it, and
+     the input field stays crisp white so it's unmistakably the place to type. */
+  --scent-bg: #faf8f3;
+  --scent-header-bg: #faf8f3;
+  --scent-border: #e6e0d3;
+  --scent-text: #29261f;
+  --scent-muted: #948d7d;
+
+  --scent-assistant-bubble: #f0ebe0;
+  --scent-assistant-text: #29261f;
+  --scent-user-avatar-bg: #e6e1d6;
+  --scent-user-avatar-text: #5c5646;
+
+  --scent-input-bg: #ffffff;
 }
 
 /* 1. Core Container - Converted from Fixed to Standard Flow Element */
@@ -55,10 +77,10 @@ span.scent-pill {
   width: 100%;
   max-width: 100%; /* Locks structure size precisely like your reference mock */
   height: 550px; /* Fixed section height layout */
-  background: linear-gradient(180deg, #16121f 0%, #100d18 100%);
-  border: 1px solid #2a2440;
+  background: var(--scent-bg);
+  border: 1px solid var(--scent-border);
   border-radius: 16px;
-  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 4px 24px rgba(41, 38, 31, 0.08);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -87,19 +109,19 @@ span.scent-pill {
     bottom: auto;
     right: auto;
   }
-  
+
   body.shop-ai-chat-open {
     overflow: auto !important; /* Retain global touch scroll tracking */
     position: relative !important;
   }
 }
 
-/* 5. Header Component - Styling Overrides for Dark Section Palette */
+/* 5. Header Component */
 .scent-interface-header {
   padding: 14px 16px;
-  background: rgba(255, 255, 255, 0.02);
-  color: #f4f2fa;
-  border-bottom: 1px solid #2a2440;
+  background: var(--scent-header-bg);
+  color: var(--scent-text);
+  border-bottom: 1px solid var(--scent-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -115,12 +137,12 @@ span.scent-pill {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #8b5cf6, #ec4899);
+  background: var(--scent-accent);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 14px;
-  color: #fff;
+  color: var(--scent-accent-text);
   flex-shrink: 0;
 }
 
@@ -133,7 +155,7 @@ span.scent-pill {
 .meta-label-top {
   font-weight: 600;
   font-size: 14px;
-  color: #f4f2fa;
+  color: var(--scent-text);
 }
 
 .meta-label-sub {
@@ -141,7 +163,7 @@ span.scent-pill {
   align-items: center;
   gap: 5px;
   font-size: 12px;
-  color: #8b8598;
+  color: var(--scent-muted);
 }
 
 .status-pulse-dot {
@@ -193,6 +215,19 @@ span.scent-pill {
   -webkit-overflow-scrolling: touch;
 }
 
+/* Date divider ("Today") shown once at the start of a fresh conversation */
+.shop-ai-date-divider {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--scent-muted);
+  margin: 4px 0;
+}
+
 /* Message Node Bubble Adaptations */
 .shop-ai-message {
   position: relative;
@@ -206,84 +241,92 @@ span.scent-pill {
 .shop-ai-message.assistant {
   align-self: flex-start;
   margin-left: 40px;
-  background: #221c33;
-  color: #e7e5f0;
-  border: 1px solid #322a4a;
+  background: var(--scent-assistant-bubble);
+  color: var(--scent-assistant-text);
+  border: 1px solid var(--scent-border);
 }
 
 .shop-ai-message.assistant::before {
-  content: '✦';
+  /* A background-image (not `content: url(...)`) so the 28px circle sizing stays reliable —
+     content:url() images follow replaced-element sizing rules that don't consistently respect
+     the box's own width/height across browsers. */
+  content: "";
   position: absolute;
   top: 0;
   left: -40px;
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: linear-gradient(135deg, #8b5cf6, #ec4899);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: #fff;
+  background-color: var(--scent-accent);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='white'%3E%3Crect x='9' y='2' width='6' height='3' rx='1'/%3E%3Crect x='10' y='5' width='4' height='3'/%3E%3Crect x='6' y='8' width='12' height='13' rx='3'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 13px 13px;
 }
 
 .shop-ai-message.assistant strong {
-  color: #4ade80;
+  color: var(--scent-accent);
   font-weight: 600;
 }
 
 .shop-ai-message.user {
   align-self: flex-end;
   margin-right: 40px;
-  background: #1d2b3a;
-  color: #e7e5f0;
+  background: var(--scent-accent);
+  color: var(--scent-accent-text);
 }
 
 .shop-ai-message.user::before {
-  content: 'U';
+  /* Real initial set per-message via data-initial (see chat.js) — falls back to "U" only if
+     that attribute is ever missing. */
+  content: attr(data-initial);
   position: absolute;
   top: 0;
   right: -40px;
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #2563eb;
+  background: var(--scent-user-avatar-bg);
   display: flex;
   align-items: center;
   justify-content: center;
   font-size: 12px;
   font-weight: 600;
-  color: #fff;
+  color: var(--scent-user-avatar-text);
 }
 
 /* 7. Input Control Strip Area */
 .shop-ai-chat-input {
-  border-top: 1px solid #2a2440;
+  border-top: 1px solid var(--scent-border);
   padding: 16px;
   display: flex;
   gap: 8px;
   align-items: center;
-  background: rgba(255, 255, 255, 0.02);
+  background: var(--scent-header-bg);
 }
 
 .shop-ai-chat-input input {
   flex: 1;
   padding: 10px 14px;
-  background-color: #1a1626;
-  border: 1px solid #322a4a;
-  color: #fff;
+  background-color: var(--scent-input-bg);
+  border: 1px solid var(--scent-border);
+  color: var(--scent-text);
   border-radius: 20px;
   font-size: 14px;
   outline: none;
 }
 
+.shop-ai-chat-input input::placeholder {
+  color: var(--scent-muted);
+}
+
 .shop-ai-chat-input input:focus {
-  border-color: #8b5cf6;
+  border-color: var(--scent-accent);
 }
 
 .shop-ai-chat-send {
-  background: linear-gradient(135deg, #8b5cf6, #ec4899);
-  color: #fff;
+  background: var(--scent-accent);
+  color: var(--scent-accent-text);
   border: none;
   border-radius: 50%;
   width: 38px;
@@ -319,78 +362,60 @@ span.scent-pill {
 
 .shop-ai-bottle-caption {
   font-size: 13px;
-  color: #a8a29e;
+  color: var(--scent-muted);
   margin: 0;
 }
 
 /* Product Component Alignment Overrides */
 .shop-ai-product-section {
-  border-top: 1px solid #2e2a24;
-  border-bottom: 1px solid #2e2a24;
+  border-top: 1px solid var(--scent-border);
+  border-bottom: 1px solid var(--scent-border);
 }
 .shop-ai-product-card {
-  background: #1c1917;
-  border: 1px solid #2e2a24;
+  background: var(--scent-assistant-bubble);
+  border: 1px solid var(--scent-border);
 }
 .shop-ai-product-title, .shop-ai-product-header h4 {
-  color: #e7e5e4;
+  color: var(--scent-text);
 }
 
-/* Login/email gate — shown when the customer isn't logged in, before chat is usable */
-.shop-ai-email-gate-overlay {
-  position: absolute;
-  inset: 0;
-  z-index: 10;
+/* Strict login gate — rendered server-side by Liquid instead of the chat window when
+   {% if customer %} is false; chat.js/chat-input never even load in this branch. */
+.shop-ai-login-gate {
+  height: auto;
+  min-height: 320px;
+}
+.shop-ai-login-gate-body {
+  flex: 1;
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  background: rgba(16, 13, 24, 0.92);
-  border-radius: inherit;
-}
-.shop-ai-email-gate-box {
-  width: 85%;
-  max-width: 320px;
-  background: linear-gradient(180deg, #16121f 0%, #100d18 100%);
-  border: 1px solid #2a2440;
-  border-radius: 12px;
-  padding: 24px;
   text-align: center;
+  padding: 32px 24px;
 }
-.shop-ai-email-gate-title {
-  color: #f4f2fa;
-  font-size: 16px;
+.shop-ai-login-gate-title {
+  color: var(--scent-text);
+  font-size: 18px;
   font-weight: 600;
-  margin: 0 0 6px;
-}
-.shop-ai-email-gate-subtitle {
-  color: #8b8598;
-  font-size: 13px;
-  margin: 0 0 16px;
-}
-.shop-ai-email-gate-input {
-  width: 100%;
-  box-sizing: border-box;
-  background: #221c33;
-  color: #e7e5f0;
-  border: 1px solid #322a4a;
-  border-radius: 8px;
-  padding: 10px 12px;
-  font-size: 14px;
-  margin-bottom: 8px;
-}
-.shop-ai-email-gate-error {
-  color: #f87171;
-  font-size: 12px;
   margin: 0 0 8px;
 }
-.shop-ai-email-gate-submit {
-  width: 100%;
-  background: linear-gradient(135deg, #8b5cf6, #ec4899);
-  color: #fff;
+.shop-ai-login-gate-subtitle {
+  color: var(--scent-muted);
+  font-size: 14px;
+  line-height: 1.5;
+  margin: 0 0 20px;
+  max-width: 320px;
+}
+.shop-ai-login-gate-button {
+  display: inline-block;
+  background: var(--scent-accent);
+  color: var(--scent-accent-text);
   border: none;
   border-radius: 8px;
-  padding: 10px 12px;
+  padding: 12px 24px;
   font-size: 14px;
   font-weight: 600;
+  text-decoration: none;
   cursor: pointer;
 }

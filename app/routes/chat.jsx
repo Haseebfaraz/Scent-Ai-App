@@ -851,7 +851,8 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { unauthenticated } from "../shopify.server";
-import prisma from "../db.server";
+import prisma, { createOrUpdateConversation, saveMessage } from "../db.server";
+import { generate3x3Pyramid } from "../utils/scentEngine.server";
 
 // ============================================================
 // 1. DATASET ENGINE LAYER
@@ -990,6 +991,9 @@ async function getRegionMaps() {
   }
   return cachedRegionMaps;
 }
+// Fire-and-forget warm-up so this DB scan runs once at server startup instead of blocking
+// whichever request happens to arrive first.
+getRegionMaps();
 
 // Scans the customer's own messages for a known city, state, OR country name (whichever is
 // most specific) — checking 1-4 word windows so multi-word names like "New York" or "United
@@ -1015,6 +1019,53 @@ function extractRegionFromHistory(history, regionMaps) {
     }
   }
   return null;
+}
+
+// Catches a customer naming a city AND a country that don't actually belong together per the real
+// order-history region data (e.g. "Paris" as their city but "USA" as their country) — scans for
+// BOTH independently (not just the single highest-priority match extractRegionFromHistory
+// returns), then checks the city's real country against what they said. A soft signal for the
+// prompt to politely double-check, never a hard block — a legitimate city (Paris, Texas exists)
+// or a customer just being imprecise shouldn't be treated as an error.
+async function findCityCountryContradiction(history, regionMaps) {
+  let mentionedCity = null;
+  let mentionedCountry = null;
+  for (const msg of history) {
+    if (msg.role !== "user" || typeof msg.content !== "string") continue;
+    const words = normalizeRegionText(msg.content).split(" ").filter(Boolean);
+    for (let i = 0; i < words.length; i++) {
+      for (let len = 4; len >= 1; len--) {
+        const candidate = words.slice(i, i + len).join(" ");
+        if (!mentionedCity && regionMaps.city.has(candidate)) mentionedCity = regionMaps.city.get(candidate);
+        if (!mentionedCountry && regionMaps.countryName.has(candidate)) mentionedCountry = regionMaps.countryName.get(candidate);
+      }
+    }
+  }
+  if (!mentionedCity || !mentionedCountry) return null;
+  try {
+    const cityMatch = await prisma.orderHistory.findFirst({
+      where: { city: mentionedCity },
+      select: { countryName: true }
+    });
+    if (cityMatch?.countryName && cityMatch.countryName !== mentionedCountry) {
+      return { city: mentionedCity, statedCountry: mentionedCountry, actualCountry: cityMatch.countryName };
+    }
+  } catch (err) {
+    console.error("Failed to check city/country contradiction:", err.message);
+  }
+  return null;
+}
+
+// Used by the deterministic city-enforcement intercept in callAI — once we've asked this once, we
+// don't force it again even if the customer's answer still doesn't resolve to a real city in our
+// data. Our city list is only whatever distinct cities happen to appear in order_history, not an
+// exhaustive world database, so a customer's real city genuinely might not be recognized — asking
+// exactly once is a hard guarantee without risking an unsatisfiable, endless loop for them.
+const CITY_QUESTION_PATTERN = /which (specific )?city|what city/i;
+function wasCityAsked(history) {
+  return history.some(msg =>
+    msg.role === "assistant" && typeof msg.content === "string" && CITY_QUESTION_PATTERN.test(msg.content)
+  );
 }
 
 function tallyNotes(orders, limit) {
@@ -1051,6 +1102,59 @@ function getCurrentSeason() {
   return SEASON_BY_MONTH[new Date().getMonth()];
 }
 
+// WMO weather-code -> plain description, per Open-Meteo's documented code table (the only codes
+// its forecast endpoint ever returns).
+const WMO_WEATHER_DESCRIPTIONS = {
+  0: "clear sky", 1: "mostly clear", 2: "partly cloudy", 3: "overcast",
+  45: "foggy", 48: "foggy with rime",
+  51: "light drizzle", 53: "drizzle", 55: "dense drizzle",
+  56: "light freezing drizzle", 57: "freezing drizzle",
+  61: "light rain", 63: "rain", 65: "heavy rain",
+  66: "light freezing rain", 67: "freezing rain",
+  71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains",
+  80: "light rain showers", 81: "rain showers", 82: "violent rain showers",
+  85: "light snow showers", 86: "snow showers",
+  95: "a thunderstorm", 96: "a thunderstorm with light hail", 99: "a thunderstorm with heavy hail"
+};
+
+// Real current conditions for wherever the customer says they live — Open-Meteo needs no API key:
+// geocode the place name to coordinates, then pull the current forecast. Cached briefly per place
+// since weather doesn't meaningfully change turn-to-turn within one conversation. Now that a real
+// city is strictly enforced (see the callAI gate), this should resolve reliably far more often
+// than it did the first time this was tried, when the location could still be country-level only.
+const WEATHER_CACHE = new Map(); // normalized place -> { data, fetchedAt }
+const WEATHER_CACHE_TTL_MS = 30 * 60 * 1000;
+async function getLiveWeather(placeName) {
+  if (!placeName) return null;
+  const cacheKey = placeName.toLowerCase().trim();
+  const cached = WEATHER_CACHE.get(cacheKey);
+  if (cached && Date.now() - cached.fetchedAt < WEATHER_CACHE_TTL_MS) return cached.data;
+
+  try {
+    const geoRes = await fetch(`https://geocoding-api.open-meteo.com/v1/search?count=1&name=${encodeURIComponent(placeName)}`);
+    if (!geoRes.ok) return null;
+    const geoData = await geoRes.json();
+    const place = geoData.results?.[0];
+    if (!place) return null;
+
+    const forecastRes = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`);
+    if (!forecastRes.ok) return null;
+    const forecastData = await forecastRes.json();
+    const current = forecastData.current;
+    if (!current) return null;
+
+    const result = {
+      tempF: Math.round(current.temperature_2m),
+      description: WMO_WEATHER_DESCRIPTIONS[current.weather_code] || "typical weather"
+    };
+    WEATHER_CACHE.set(cacheKey, { data: result, fetchedAt: Date.now() });
+    return result;
+  } catch (err) {
+    console.error("Failed to fetch live weather:", err.message);
+    return null;
+  }
+}
+
 // The raw "Updated Season" column turned out to be inconsistently labeled (verified directly
 // against the real DB: "Fall" and "Autumn Months" both exist as distinct values, likewise "Spring
 // Months", "Winter Months", "Summer Months", alongside junk like "Not Found"/"#N/A"/"0"/null).
@@ -1070,81 +1174,117 @@ const SEASON_ALIASES = {
 // season-narrowed sample is too thin to be meaningful. Returns classification (style) popularity
 // alongside notes — both already sit in the DB but were previously unused.
 const MIN_SAMPLE_SIZE = 20;
-async function getPopularNotesForRegion(region, limit = 8) {
-  if (!region) return { notes: [], classifications: [] };
-  const { field, value } = region;
-  const seasonValues = SEASON_ALIASES[getCurrentSeason()];
+// Three-tier fallback: (1) region + current season, cascading city -> state -> country as each
+// level is tried, (2) region alone (any season) at the same cascade, (3) a genuinely global,
+// location-free tally (season-first, then unrestricted) when there's no region at all yet or the
+// real regional sample is too thin to mean anything. Tier 3 is real data, not a guess — it answers
+// "what's popular overall" instead of leaving the customer with zero data-backed signal just
+// because their specific city/state/country combination doesn't have enough orders on its own.
+// Callers can tell tier 3 happened via `isGlobalFallback` and should phrase it as "customers
+// overall" rather than implying it's specific to their region.
+async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null) {
+  const seasonValues = SEASON_ALIASES[seasonOverride] || SEASON_ALIASES[getCurrentSeason()];
 
   try {
-    let attempts;
-    if (field === "city") {
-      const cityMatch = await prisma.orderHistory.findFirst({
-        where: { city: value },
-        select: { stateName: true, countryName: true }
-      });
-      attempts = [
-        { city: value },
-        cityMatch?.stateName && { stateName: cityMatch.stateName },
-        cityMatch?.countryName && { countryName: cityMatch.countryName }
-      ];
-    } else if (field === "stateName") {
-      const stateMatch = await prisma.orderHistory.findFirst({
-        where: { stateName: value },
-        select: { countryName: true }
-      });
-      attempts = [
-        { stateName: value },
-        stateMatch?.countryName && { countryName: stateMatch.countryName }
-      ];
-    } else {
-      attempts = [{ countryName: value }];
-    }
-    attempts = attempts.filter(Boolean);
+    if (region) {
+      const { field, value } = region;
+      let attempts;
+      if (field === "city") {
+        const cityMatch = await prisma.orderHistory.findFirst({
+          where: { city: value },
+          select: { stateName: true, countryName: true }
+        });
+        attempts = [
+          { city: value },
+          cityMatch?.stateName && { stateName: cityMatch.stateName },
+          cityMatch?.countryName && { countryName: cityMatch.countryName }
+        ];
+      } else if (field === "stateName") {
+        const stateMatch = await prisma.orderHistory.findFirst({
+          where: { stateName: value },
+          select: { countryName: true }
+        });
+        attempts = [
+          { stateName: value },
+          stateMatch?.countryName && { countryName: stateMatch.countryName }
+        ];
+      } else {
+        attempts = [{ countryName: value }];
+      }
+      attempts = attempts.filter(Boolean);
 
-    for (const where of attempts) {
-      const seasonalOrders = await prisma.orderHistory.findMany({
-        where: { ...where, season: { in: seasonValues } },
-        select: { notes: true, classification: true },
-        take: 3000 // cap the scan for performance on a ~937k row table
-      });
-      if (seasonalOrders.length >= MIN_SAMPLE_SIZE) {
-        return { notes: tallyNotes(seasonalOrders, limit), classifications: tallyClassifications(seasonalOrders, 3) };
+      for (const where of attempts) {
+        const seasonalOrders = await prisma.orderHistory.findMany({
+          where: { ...where, season: { in: seasonValues } },
+          select: { notes: true, classification: true },
+          take: 3000 // cap the scan for performance on a ~937k row table
+        });
+        if (seasonalOrders.length >= MIN_SAMPLE_SIZE) {
+          return { notes: tallyNotes(seasonalOrders, limit), classifications: tallyClassifications(seasonalOrders, 3), isGlobalFallback: false };
+        }
+      }
+      for (const where of attempts) {
+        const orders = await prisma.orderHistory.findMany({
+          where,
+          select: { notes: true, classification: true },
+          take: 3000
+        });
+        if (orders.length >= MIN_SAMPLE_SIZE) {
+          return { notes: tallyNotes(orders, limit), classifications: tallyClassifications(orders, 3), isGlobalFallback: false };
+        }
       }
     }
-    for (const where of attempts) {
-      const orders = await prisma.orderHistory.findMany({
-        where,
-        select: { notes: true, classification: true },
-        take: 3000
-      });
-      if (orders.length >= MIN_SAMPLE_SIZE) {
-        return { notes: tallyNotes(orders, limit), classifications: tallyClassifications(orders, 3) };
-      }
+
+    // Tier 3 — no region yet, or the regional sample never cleared the bar. Season-only first,
+    // then fully unrestricted, both still real aggregate order-history data.
+    const seasonalGlobal = await prisma.orderHistory.findMany({
+      where: { season: { in: seasonValues } },
+      select: { notes: true, classification: true },
+      take: 3000
+    });
+    if (seasonalGlobal.length >= MIN_SAMPLE_SIZE) {
+      return { notes: tallyNotes(seasonalGlobal, limit), classifications: tallyClassifications(seasonalGlobal, 3), isGlobalFallback: true };
+    }
+    const global = await prisma.orderHistory.findMany({
+      select: { notes: true, classification: true },
+      take: 3000
+    });
+    if (global.length >= MIN_SAMPLE_SIZE) {
+      return { notes: tallyNotes(global, limit), classifications: tallyClassifications(global, 3), isGlobalFallback: true };
     }
   } catch (err) {
     console.error("Failed to look up regional notes:", err.message);
   }
-  return { notes: [], classifications: [] };
+  return { notes: [], classifications: [], isGlobalFallback: false };
 }
 
 // The historical-order equivalent of "customers who bought X also had Y in their blend" — used to
 // bias search_containers_for_layer toward combinations with real, proven success in the order
 // history, rather than just a plain keyword match. Deliberately a soft ranking signal, not a hard
 // filter — a note with no historical co-occurrence data yet should never become unsuggestable.
-async function getCoOccurringNotes(noteWord, limit = 10) {
-  if (!noteWord) return [];
+// Tokenizes the query the same way scoreContainersFor does, rather than treating the WHOLE query
+// as one literal substring — the model is now encouraged to send richer queries combining style
+// with lifestyle context (e.g. "fresh energetic for an active mom on the go"), and a real order's
+// notes column is just a plain ingredient list that would never literally contain that phrase, so
+// a single-substring match would silently return zero rows for any query beyond one clean word.
+// Matching on ANY significant word (OR) degrades gracefully: lifestyle words like "mom" or
+// "active" simply won't match anything and contribute nothing, while real scent words like
+// "fresh" or "energetic" still drive a genuine match.
+async function getCoOccurringNotes(queryText, limit = 10) {
+  const words = (queryText || "").toLowerCase().split(/\W+/).filter(w => w.length > 3);
+  if (words.length === 0) return [];
   try {
     const orders = await prisma.orderHistory.findMany({
-      where: { notes: { contains: noteWord } },
+      where: { OR: words.map(w => ({ notes: { contains: w } })) },
       select: { notes: true },
       take: 2000
     });
     const tally = {};
-    const targetLower = noteWord.toLowerCase();
     for (const order of orders) {
       const notes = order.notes.split(",").map(n => n.trim()).filter(Boolean);
       for (const note of notes) {
-        if (note.toLowerCase().includes(targetLower)) continue;
+        const noteLower = note.toLowerCase();
+        if (words.some(w => noteLower.includes(w))) continue;
         tally[note] = (tally[note] || 0) + 1;
       }
     }
@@ -1193,47 +1333,92 @@ function getConversation(conversationId) {
 // draft-pitch checks, position-distribution checks, etc.) were deliberately discarded here to make
 // room for a new conversation design — see the "Backup checkpoint before rewriting the chat flow
 // from scratch" commit for the full previous version if anything needs to be recovered from it.
-async function buildSystemPrompt(history, knownCustomerEmail) {
+async function buildSystemPrompt(history, knownCustomerEmail, knownCustomerName) {
   const catalogLines = buildRelevantCatalogSlice(history).map(c =>
     `- [internal_id: ${c.Title || "Untitled"}] Notes: ${c.Notes || "no notes listed"}`
   ).join("\n");
 
   const regionMaps = await getRegionMaps();
   const regionCandidate = extractRegionFromHistory(history, regionMaps);
-  const { notes: regionalNotes, classifications: regionalClassifications } = await getPopularNotesForRegion(regionCandidate);
+  const { notes: regionalNotes, classifications: regionalClassifications, isGlobalFallback } = await getPopularNotesForRegion(regionCandidate);
   const currentSeason = getCurrentSeason();
   const classificationClause = regionalClassifications.length > 0
     ? `, often leaning toward ${regionalClassifications.join(" or ")}-style fragrances`
     : "";
+  // isGlobalFallback means there wasn't enough real data for their specific city/state/country —
+  // this is still real order-history data, just not specific to their region, so the phrasing must
+  // say "overall" rather than falsely implying it's local to them.
   const regionalNotesLine = regionalNotes.length > 0
-    ? `\nReal past customers from this same region during ${currentSeason} have shown a taste for these notes: ${regionalNotes.join(", ")}${classificationClause}.\n`
+    ? isGlobalFallback
+      ? `\nReal customers overall (not specific to their exact region — there wasn't enough regional data yet) have shown a taste for these notes during ${currentSeason}: ${regionalNotes.join(", ")}${classificationClause}. Weave this in naturally during Turn 3 — phrase it as a general trend ("a lot of people tend to go for...") never as something specific to their city, since it isn't.\n`
+      : `\nReal past customers from this same region during ${currentSeason} have shown a taste for these notes: ${regionalNotes.join(", ")}${classificationClause}. Weave this in naturally during Turn 3, as validating color commentary while they're describing their lifestyle or taste — the way a real perfumer would affirm a choice by mentioning it's popular locally ("that tracks — a lot of people around here lean that way this time of year"). Don't just leave this sitting unused; find a natural moment for it before you get to Phase 4's recommendation.\n`
     : "";
-  const emailAlreadyKnown = Boolean(knownCustomerEmail);
+  // Chat is now strictly gated behind Shopify account login (see chat-interface.liquid's
+  // {% if customer %}), so knownCustomerEmail is expected on every real request. knownCustomerName
+  // is genuinely null fairly often though — accounts created via New Customer Accounts' email+OTP
+  // sign-in have no name field at all — so step 1 below branches on whether it's known instead of
+  // assuming it always is.
+  const displayName = knownCustomerName || null;
 
-  return `You are Scent Architect AI, the voice of a real, experienced boutique perfumer — warm, observant, a little playful, genuinely curious about each customer. You help customers build a personalized fragrance by combining note containers into layers (top, middle, base), described only by their scent notes and character — never by internal product names.
+  const cityCountryContradiction = await findCityCountryContradiction(history, regionMaps);
+  const contradictionLine = cityCountryContradiction
+    ? `\nHeads up: they mentioned "${cityCountryContradiction.city}" as their city and "${cityCountryContradiction.statedCountry}" as their country, but real regional data has that city in ${cityCountryContradiction.actualCountry} instead. Politely double-check which is right, without sounding accusatory — e.g. "just to make sure I've got it right, is that the ${cityCountryContradiction.city} in ${cityCountryContradiction.actualCountry}?" People do live in similarly-named cities in different countries, so this might be completely correct — just confirm rather than assuming they made a mistake.\n`
+    : "";
+
+  // Real current conditions for their actual city — only attempted once we have a real city
+  // (not just a country/state), since that's what the strict city gate in callAI now guarantees
+  // and what geocoding actually needs to resolve reliably.
+  const liveWeather = regionCandidate?.field === "city" ? await getLiveWeather(regionCandidate.value) : null;
+  const liveWeatherLine = liveWeather
+    ? `\nReal current weather where they live: ${liveWeather.tempF}°F, ${liveWeather.description}. Use this to inform your weather comment, but TRANSLATE it into casual, descriptive language a high-end perfumer would actually say — NEVER state the raw degrees or repeat the technical phrase verbatim. E.g. ${liveWeather.tempF}°F and "${liveWeather.description}" becomes something like "${liveWeather.tempF >= 80 ? "It sounds like a proper warm one over there!" : liveWeather.tempF <= 45 ? "Sounds like a real crisp chill in the air over there!" : "It sounds like a pleasantly mild day over there!"}" — never the number, never the exact phrase, just the feeling of it. Still never invent or guess a DIFFERENT condition than what's given here — only change how it's phrased, not what it says.\n`
+    : "";
+
+  return `You are Dua Scent Agent, a high-end, empathetic, and knowledgeable fragrance expert — the voice of a real, experienced perfumer with the warmth and conversational flair of a passionate expert at a high-end counter — observant, a little playful, genuinely curious about each customer. You help customers build a personalized fragrance by combining note containers into layers (top, middle, base), described only by their scent notes and character — never by internal product names. (That "counter" description is about your tone and expertise only — you are having a text conversation, not standing anywhere physical, so never actually tell the customer you're located somewhere or that they've walked into a shop.)
 The current season is ${currentSeason}.
-${regionalNotesLine}
+${regionalNotesLine}${contradictionLine}${liveWeatherLine}
 Internal catalog (for your reference only — see rules below on how to talk about these):
 ${catalogLines}
 
-How the conversation actually flows (natural, not a script — read the room and adapt):
+You are a real person having a real conversation, not a form, questionnaire, or automated script — never sound like one. The flow below is a persona guideline describing the general arc of what you need to learn and roughly when, as a guide for judgment, NOT a rigid state machine or a fixed sequence of exact lines to recite. Read what the customer actually wrote — including typos, slang, abbreviations, casual banter, and short or offhand replies (e.g. "idk", "lol yeah", "kinda busy tbh") — and respond to the real meaning and tone of it, the way a sharp, attentive human would, instead of getting stuck, asking them to rephrase, or defaulting to a generic clarifying line. If their reply also asks something of you, teases you, or makes small talk, always answer that like a warm human first — briefly and in character — before continuing on with whatever comes next; never ignore something directed at you just because it doesn't fit the expected shape of the step you're on. Answering something directed at you (a reciprocal question, banter, a reaction) and then continuing into the SAME next beat can live together in one warm, natural message (e.g. answering "and you?" and then introducing yourself and asking their name, all in one message) — that's blending small talk into onboarding, not skipping a step. This is different from bundling two genuinely separate pieces of information you still need (like name and city, or city and email) into one message — those still each get their own message and their own wait, exactly as laid out below, since collapsing those specifically is what has made this feel like a rigid form in the past.
 
-1. Your very first message (before the customer has said anything fragrance-related) is warm, in-character small talk — react to whatever they actually just said, don't just recite a script. Once that's flowed a beat, introduce yourself briefly and ask for their name in return — reciprocity, not an interrogation ("I'm here to help craft something just for you — who am I chatting with today?"). Wait for their answer. THEN, once you have their name, ask where they're based as its own separate question — wait for that answer too, and only then riff naturally on the real season/weather for their location given above. Every beat should acknowledge what they just said before moving on — never bundle multiple questions into one message; that reads as a form, not a conversation.
+How the conversation actually flows (a guideline for the general arc and judgment calls, not a strict script — read the room and adapt; the numbered steps below are what to accomplish and roughly in what order, not exact lines to recite verbatim):
 
-2. Once that's flowed naturally, get genuinely curious about their actual life — ask what a typical day looks like for them (work, routine, what they're usually doing, what occasions they need this fragrance for), and have a REAL back-and-forth about it: ask a natural follow-up or two, react to specifics they mention, don't just check a box and move on. Only once that's had real substance, ask what kind of scent they're drawn to, in their own words — offer a few evocative example directions if it helps them articulate it (clean & minimal, rich & woody, bright & aquatic, warm & spicy, soft & floral, cozy & gourmand), but let THEM describe it, never a rigid multiple-choice quiz. If their answer is vague or one-word, don't move on yet — ask what that means to them, or what they don't like, until you actually have something specific to work with. If they volunteer personal or family context while explaining their taste (e.g. "my grandfather always wore vetiver," "we always leaned toward subtle scents"), warmly acknowledge it in the moment and let any specific notes they mention inform the blend — but never ask about their background, age, gender, or ethnicity directly, and never treat any of that as a factor you're tracking or looking anything up by. The customer's own stated style words, their real lifestyle/occasion, and their real location/season are the entire basis for what you recommend.
+CRITICAL: this customer is already signed in to their Shopify account, so their email is already on file — Do NOT ask for their email, ever, under any circumstance.
 
-3. Only once you've had a genuinely substantial conversation — their lifestyle with real detail, AND their own stated style preference clearly articulated, not just a single vague exchange — CALL search_containers_for_layer for each distinct direction they've expressed. Rushing to search after only one or two short exchanges skips the part of the conversation that actually makes the recommendation feel personal — take the time first. Never invent or blend a note combination from memory — only ever use what the tool actually returns. From the real results, put together ONE complete draft blend (2-4 different containers, each assigned top/middle/base — a 4th container doubles into middle or base, never top) and present it all at once as a finished, named recommendation, the way a real perfumer would — give the blend a creative name, and narrate it warmly: what's on top, what's in the heart, what anchors the base, and briefly why each fits what they told you (their lifestyle, their stated style, the season). State every note exactly as the tool returned it — real note names, verbatim, never invented, never adjectives standing in for real notes.
+${displayName ? `Their name is already known too: ${displayName}. Do NOT ask for their name.` : `Their account has no name on file (this happens — some sign-in methods only collect an email, never a name). Since you genuinely don't know it, your very first message is a warm greeting that asks for their name AS ITS OWN QUESTION — e.g. "Hey there! Hope you're having a good day. What should I call you?" NEVER invent or guess a name from their email address or anything else — a guessed name (e.g. turning an email like "haseebfaraz2000@..." into "Haseebfaraz2000") reads worse than just asking. Wait for their real reply. Read it for what it actually is — if it doesn't look like a real name, gently clarify instead of guessing.`}
 
-4. If (and only if) the customer asks follow-up questions about specific notes — their character, whether something leans sweet or green, how long it'll last, how it projects — answer genuinely and specifically, like someone who actually knows perfumery, the way you'd reassure a customer that "violet leaf here is green and watery, not a sweet floral" or that a heavier base note is what gives it staying power. Don't invent which notes are in the blend, but real descriptive/technical knowledge about a note's character is fine to share.
+Do NOT describe yourself as physically located anywhere (no "stepping into the shop/studio," no venue framing at all). Wait for their reply before moving on.
 
-5. Once they're happy, ask if they have a name in mind for the fragrance (or want you to come up with one)${emailAlreadyKnown ? "" : ", and get their email so you can save this build under it"}. ${emailAlreadyKnown ? "Their email is already on file — don't ask for it again." : ""} Then call confirm_scent_combination with the confirmed containers/positions, the fragrance's own name, a short warm description, the customer's real name, and their email.
+STRICT ONE-QUESTION-PER-TURN RULE for everything below: every message you send contains exactly ONE question (or, where noted, a brief acknowledgment plus exactly one question) — never two questions stacked in the same message, no matter how related they feel to you. That's the #1 way this has read like a form instead of a conversation in the past.
+
+TURN 1 — Greeting, day only. CRITICAL: do NOT mention fragrance, vibe, notes, perfume, or city anywhere in this turn — that all comes later, never here. ${displayName ? `Your very first message greets ${displayName} by name warmly and asks ONLY how their day is going or how they're doing — e.g. "Nice to meet you, ${displayName}! How's your day going so far?"` : `Once you have their real name, greet them warmly and ask ONLY how their day is going or how they're doing — e.g. "Nice to meet you, {name}! How's your day going so far?"`} This is the ONE question in this message — nothing else. Wait for their reply.
+
+TURN 2 — Casual lifestyle chat, STILL no fragrance talk. Once they've replied to the day/feelings question, briefly acknowledge what they actually said (e.g. "Glad to hear that!", "Hope it gets better from here!" — vary this and react to their real answer, not a generic reflex), THEN in that SAME message ask ONE open question about their day or routine in plain human terms — e.g. "So what's on your schedule today?" or "What's a typical day look like for you?" NOT about scent, vibe, or preferences — this is still just two friends catching up. If they mention a concrete activity (e.g. "going to the gym," "big meeting today," "just relaxing at home"), that's exactly the material Turn 3 needs — don't rush past it. This acknowledgment-plus-one-question is the only exception to strict one-thing-per-message — the acknowledgment isn't a second question, just a reaction. Wait for their reply.
+
+TURN 3+ — Genuine follow-up, then a natural bridge into scent, then location. Keep this friendly and human, like catching up with a friend who happens to be a perfumer, not an intake form. Each message here still carries only ONE question (or, for the bridge below, a warm observation with no question at all, followed later by the city ask as its own separate message):
+   a. React specifically to whatever activity or routine detail they just shared — actually talk about it like a friend would (e.g. if they said "going to the gym," ask how their workout routine's going, or react to it genuinely) — ask ONE real follow-up before moving on. If their first answer was already rich with detail, one follow-up is enough — but there must be at least one genuine back-and-forth about their actual life BEFORE scent ever comes up.
+   b. CRITICAL — ABSOLUTELY NEVER ask a choice question that hands the customer options to pick between, in ANY form — not a category list, and not a binary either/or question. This means things like "do you prefer warm or fresh?", "cozy or lively?", "would you say clean & minimal or rich & woody?" are all banned outright, exactly as much as a longer multiple-choice list is. If you're ever about to phrase a question with "or" between two scent-style words, stop — that's the exact failure pattern to avoid. This applies to the bridge in (c) below too — it's phrased as an observation with example directions, never as a forced pick between two.
+   c. Bridge into scent — as your own observation, not a question. Once you have a real, concrete activity/lifestyle/occasion detail from (a), connect it to a scent direction yourself, the way an attentive perfumer naturally would, e.g. "Since you're hitting the gym today, fresh, invigorating, or aquatic profiles usually keep the energy up without feeling heavy." Offer this as a genuine suggestion grounded in what they actually told you — never invent an activity they didn't mention. If they've already shared ANY real context by now — a clear occasion, mood, personal vibe, occupation, daily routine, or even just an evocative phrase like "special moments at home" (e.g. "I want to make this memorable for my wife at our wedding," "something confident for a big presentation," "just want to feel put-together for work," "I'm a developer, mostly working morning shifts," "just started a new job," "just want something nice for cozy nights in") — that IS enough to bridge from. Only fall back to directly asking an open, non-either/or vibe question (e.g. "What kind of vibe are you hoping to capture today?") if they've given you truly nothing to bridge from at all (e.g. just "nice," "good," "whatever," with zero real context). If they volunteer personal or family context while sharing any of this (e.g. "my grandfather always wore vetiver," "we always leaned toward subtle scents"), warmly acknowledge it in the moment and let any specific notes they mention inform the blend — but never ask about their background, age, gender, or ethnicity directly, and never treat any of that as a factor you're tracking or looking anything up by.
+   d. Only once you've completed the lifestyle follow-up in (a) and the bridge (or fallback vibe question) in (c) — never earlier — naturally ask for their city, in its OWN message with no other question attached, framed around climate/weather tuning rather than as a cold data-collection question, e.g. "That sounds awesome! By the way, to make sure I pick notes that project well in your local climate, what city are you based in?" Not just "where are you based" (too vague, invites a country-only answer that's far less useful). A country or region alone isn't enough — if they answer with only a country or a vague region, warmly ask which city specifically. If their answer isn't a place at all (e.g. "gym," "work," "home," something off-topic), don't treat it as a city and don't just coldly re-ask — acknowledge what they actually said with warmth first (e.g. "Oh, getting a workout in? Nice!"), then gently steer back to asking specifically which city they're in — still just the one question. Wait for a real city answer before moving on. THEN, once you have their city, send a message that ONLY riffs on the weather for that location given above — a genuine comment, not a question about anything else. If a real current weather reading is given above, base your comment on THAT real condition, but translate it into warm, casual, descriptive language — NEVER state the exact degrees or repeat a technical phrase like "clear sky" verbatim; say something like "sounds like a pleasantly crisp day over there!" instead. Never guess or invent a DIFFERENT condition than what's given, just phrase it naturally. Only fall back to a general seasonal comment if no real reading was given at all. STOP there and wait for their reply to that specific comment before doing anything else. Every one of these is its own separate message, each waiting for a real reply before the next — never bundle two of them together; that reads as a form, not a conversation.
+
+PHASE 4 — Recommendation. As soon as you have real, specific detail from Turns 1-3 to work with — a genuine occasion, mood, or personal vibe (e.g. "for my wife at our wedding," "confident for a big presentation"), real occupation/routine detail (e.g. "developer, mostly morning shifts," "just started a new job"), a specific descriptive style answer (e.g. "elevated and cozy, a little woody or spicy"), or any combination of these — that is enough, AND you've completed Turn 3d (have their city, or they've dodged it after a genuine attempt). Do NOT ask another follow-up question at that point, and do NOT keep circling back for more detail once they've given you something real to build from — take ownership and move straight to suggesting. Only keep the conversation going longer if everything they've given you so far is genuinely just one vague word with nothing to grab onto (e.g. "nice," "good," "whatever"). Once you're moving: if you want an explicit real trend data point beyond what's already given above (e.g. to double-check a direction, or to check a different season than the current one), you can CALL query_order_history — it's safe to call with only some or none of its params filled in, it always returns real data rather than erroring. Then CALL generate_scent_pyramid ONCE, passing everything you know as one combined vibe description — not just a bare style word in isolation, combine whatever style, occasion, occupation/routine, and mood context you have (e.g. not just "fresh", but "fresh energetic for an active mom on the go", or "warm and romantic for an evening wedding celebration"). It returns a real, complete top/middle/base pyramid already boosted by order-history trends for their region and season — never invent or blend a note combination from memory, only ever present what it actually returns. Present it as a finished, named recommendation, following this structure:
+   - Acknowledge & personalize: open by tying the blend directly to what they told you — their occasion, mood, occupation, or daily routine, whichever they actually gave you — framing it as something you've curated specifically for them and briefly explaining WHY this direction suits that context, e.g. "Based on [their occasion/vibe], I've put together a custom blend for you featuring [key notes]," or "Since you're coding through morning shifts, I've leaned into fresh, clean notes to help you stay sharp and focused — featuring [key notes]." Name the actual standout notes from the real results here, not vague adjectives.
+   - Weave in the regional trend naturally: if the regional-notes data point given above is available, fold it in as a real perfumer would when validating a direction, e.g. "People in [their city/region] often gravitate toward warm, alluring profiles like this for evening celebrations this time of year." Never invent a regional claim that isn't backed by the data given above — if there's no regional data, skip this line rather than making one up.
+   - Narrate the blend itself warmly as a clean pyramid — up to 3 real notes under Top, up to 3 under Middle, up to 3 under Base, briefly saying why each layer fits what they told you. State every note exactly as the tool returned it — real note names, verbatim, never invented, never adjectives standing in for real notes. If a layer's real container has more than 3 notes, pick the 3 most defining ones to name rather than listing all of them; if it genuinely has fewer than 3, just present what's real — never pad the count with an invented note.
+   - Feedback check-in: close by explicitly inviting their reaction AND asking if there's anything they dislike — e.g. "How does this combination sound to you? And are there any notes here you'd rather I leave out?" Make it easy and natural for them to name specific notes they don't want, so you can drop those and adjust the blend — never a rigid multiple-choice, just a genuine open question.
+
+PHASE 5 — Note Q&A and refinement. If (and only if) the customer asks follow-up questions about specific notes — their character, whether something leans sweet or green, how long it'll last, how it projects — answer genuinely and specifically, like someone who actually knows perfumery, the way you'd reassure a customer that "violet leaf here is green and watery, not a sweet floral" or that a heavier base note is what gives it staying power. Don't invent which notes are in the blend, but real descriptive/technical knowledge about a note's character is fine to share. If they name a note or ingredient they dislike, take that seriously — drop it and CALL search_containers_for_layer again for that layer to find a real replacement direction (never just remove the note and leave an invented gap, and never keep a container in the presented blend once they've said they don't want something in it), then present the adjusted blend the same warm way as before.
+
+PHASE 6 — Naming and confirmation. Once they're happy, ask if they have a name in mind for the fragrance (or want you to come up with one). You already have their real name and email from their account — never ask for either one here. If they don't give you a name — they say "you choose," give a vague answer, or just don't address it — do NOT keep re-asking or stall on this; invent a fitting, creative name yourself and move on. Then call confirm_scent_combination with the confirmed containers/positions, the fragrance's own name (real or invented), a short warm description, the customer's real name, and their email.
 
 Rules:
 - NEVER say, mention, or hint at the "internal_id" value (the container's title) in your conversational replies to the customer. Only describe containers by their real scent notes.
 - When you call confirm_scent_combination, every internal_id must be copied EXACTLY from a "[internal_id: ...]" bracket in the catalog above — never a note name, never invented.
 - Each layer must use a DIFFERENT container.
 - Copy note names verbatim from the catalog when describing them to the customer — never paraphrase or invent a "poetic" version.
-- Keep replies warm and conversational — a real back-and-forth, not clinical, but don't ramble; let the customer drive the pace.`;
+- Keep replies warm and conversational — a real back-and-forth, not clinical, but don't ramble; let the customer drive the pace.
+- Act like a real salesperson who talks to many different customers, each one differently — never fall back on the exact same fixed wording every conversation. Vary your phrasing, your examples, and your reactions based on what THIS specific customer actually said. Reusing identical questions and phrases verbatim across conversations is exactly what makes a chat feel like a prebuilt bot running a fixed script instead of a real person.
+- Read each reply for what it actually says before responding to it. If someone's answer doesn't seem to match what you just asked, that means they answered something else or got confused — don't force it to fit (e.g. never treat a mood/feeling as if it were a name, or vice versa). Gently clarify instead of guessing.`;
 }
 
 // ============================================================
@@ -1293,30 +1478,93 @@ const SEARCH_CONTAINERS_TOOL = {
   }
 };
 
+// Gives the model an explicit way to ask "what's actually trending for this customer" as its own
+// action, separate from searching the note catalog. Backed by the same real order-history data and
+// tiered city -> state -> country -> global fallback already used to compute the regional-notes
+// line in the system prompt — this just exposes it as an on-demand tool instead of only injecting
+// it automatically. All params are optional: passing none at all still returns real global/seasonal
+// data rather than erroring, since a customer's location or season is often unknown.
+const QUERY_ORDER_HISTORY_TOOL = {
+  type: "function",
+  function: {
+    name: "query_order_history",
+    description: "Look up what real customers historically ordered — optionally scoped by city/country and season, optionally weighted toward a scent direction — to back up a recommendation with actual trend data. Safe to call with any subset of params empty; falls back to global data rather than failing.",
+    parameters: {
+      type: "object",
+      properties: {
+        city: { type: "string", description: "The customer's city, only if they've actually given it. Leave empty if unknown." },
+        country: { type: "string", description: "The customer's country, only if they've actually given it (and city is unknown). Leave empty if unknown." },
+        season: { type: "string", enum: ["Winter", "Spring", "Summer", "Fall"], description: "Leave empty to use the current real-world season." },
+        notePreference: { type: "string", description: "A scent direction, vibe, or note the customer mentioned (e.g. 'woody', 'romantic evening'), to find real notes historically ordered alongside it. Leave empty for pure regional/seasonal trends with no direction filter." }
+      }
+    }
+  }
+};
+
+// Builds a real, catalog-backed 3-note-top / 3-note-middle / 3-note-base pyramid deterministically
+// in code (see app/utils/scentEngine.server.js), instead of leaving "pick 2-4 containers and cap
+// each layer at 3 notes" entirely up to the model's own narration — one call replaces what used to
+// take several search_containers_for_layer calls plus careful prompt-following for the initial
+// pitch. search_containers_for_layer is still there for later single-layer swaps (e.g. the
+// customer dislikes one note and just that layer needs a real replacement).
+const GENERATE_SCENT_PYRAMID_TOOL = {
+  type: "function",
+  function: {
+    name: "generate_scent_pyramid",
+    description: "Generate a real, complete 3x3 fragrance pyramid (up to 3 real notes each for top/middle/base) matched from the actual catalog, boosted by real order-history trends for the customer's region/season. Use this ONCE to build the initial recommendation. Returns real containers and real notes only — never invents anything.",
+    parameters: {
+      type: "object",
+      properties: {
+        vibe: { type: "string", description: "The customer's stated style, occasion, mood, or routine, combined into one description, e.g. 'warm and romantic for an evening wedding' or 'fresh and clean for morning coding shifts'." }
+      },
+      required: ["vibe"]
+    }
+  }
+};
+
 // ============================================================
 // 5. OPENAI API CALL (with tool-use resolution loop)
 // ============================================================
+// A dead network connection or an OpenAI outage that hangs instead of erroring would otherwise
+// leave this fetch waiting forever with no timeout — the customer's chat bubble would just sit
+// there indefinitely. The 30s AbortController bound below, plus wrapping the whole call in
+// try/catch, means every failure mode (bad status, network error, timeout, malformed JSON) ends
+// the same way: a clean `null` return, which callAI already turns into a warm, visible fallback
+// message instead of an unhandled rejection.
+const OPENAI_REQUEST_TIMEOUT_MS = 30000;
 async function callOpenAIOnce(apiKey, messages, useTools) {
-  const response = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${apiKey}`
-    },
-    body: JSON.stringify({
-      model: "gpt-4.1-nano",
-      messages,
-      ...(useTools ? { tools: [CONFIRM_COMBINATION_TOOL, SEARCH_CONTAINERS_TOOL] } : {})
-    })
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OPENAI_REQUEST_TIMEOUT_MS);
 
-  if (!response.ok) {
-    const errText = await response.text();
-    console.error("OpenAI API error:", response.status, errText);
+  try {
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${apiKey}`
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages,
+        temperature: 0.3,
+        ...(useTools ? { tools: [CONFIRM_COMBINATION_TOOL, SEARCH_CONTAINERS_TOOL, QUERY_ORDER_HISTORY_TOOL, GENERATE_SCENT_PYRAMID_TOOL] } : {})
+      }),
+      signal: controller.signal
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      console.error("OpenAI API error:", response.status, errText);
+      return null;
+    }
+
+    return await response.json();
+  } catch (err) {
+    console.error("OpenAI request failed:", err.name === "AbortError" ? "timed out after " + OPENAI_REQUEST_TIMEOUT_MS + "ms" : err.message);
     return null;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  return response.json();
 }
 
 // Independent of whatever the model passes as customerEmail — scans the customer's own messages
@@ -1333,18 +1581,34 @@ function extractEmailFromHistory(history) {
   return null;
 }
 
-// knownCustomerEmail comes from the storefront itself — either the customer's real Shopify
-// account login (native `customer.email`, no OAuth flow needed) or the login-gate popup shown
-// when they're not logged in — and is trusted the same as an email extracted from their own chat
-// messages, since it originates the same way: something the customer actually provided, not a
-// model guess.
-async function callAI(history, conversationId, knownCustomerEmail) {
+// knownCustomerEmail/knownCustomerName come straight from the customer's real, logged-in Shopify
+// account (the theme extension strictly gates chat behind {% if customer %} now — see
+// chat-interface.liquid) — trusted as verified account data, not a self-reported or model guess.
+async function callAI(history, conversationId, knownCustomerEmail, knownCustomerName) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return { replyText: "Configuration error: missing API key.", comboConfirmed: null };
   }
 
-  let messages = [{ role: "system", content: await buildSystemPrompt(history, knownCustomerEmail) }, ...history];
+  // Strict city enforcement — this has repeatedly failed to hold as just a soft prompt
+  // instruction (e.g. a customer saying "United Kingdom" got accepted as sufficient location data
+  // instead of prompting for a city). Deterministically forces the city question once a
+  // country/state-only match is detected, guaranteeing it happens instead of hoping the model
+  // remembers — but only ONCE (see wasCityAsked), since our city list is just whatever appears in
+  // order_history, not an exhaustive database, and a real city that isn't recognized should never
+  // trap the customer in an endless re-ask.
+  const regionMapsForGate = await getRegionMaps();
+  const regionCandidateForGate = extractRegionFromHistory(history, regionMapsForGate);
+  if (regionCandidateForGate && regionCandidateForGate.field !== "city" && !wasCityAsked(history)) {
+    const askText = `${regionCandidateForGate.value} — lovely! Which specific city are you in? That'll help me give you the best local recommendations.`;
+    return {
+      replyText: askText,
+      comboConfirmed: null,
+      updatedMessages: [...history, { role: "assistant", content: askText }]
+    };
+  }
+
+  let messages = [{ role: "system", content: await buildSystemPrompt(history, knownCustomerEmail, knownCustomerName) }, ...history];
   let comboConfirmed = null;
   let confirmedName = null;
   let confirmedDescription = null;
@@ -1375,15 +1639,18 @@ async function callAI(history, conversationId, knownCustomerEmail) {
             const containers = args.containers || [];
 
             // The only hard requirement kept from the old gate chain: never create a product
-            // without a real name and real location actually present in the customer's OWN
-            // messages — not just whatever the model happened to fill into the tool call args.
+            // without a real name and real location — not just whatever the model happened to
+            // fill into the tool call args. A verified account name (knownCustomerName, from the
+            // Shopify login gate) satisfies this on its own, same as a name the customer actually
+            // typed in chat — both are real, neither is a model guess.
             const customerText = history
               .filter(m => m.role === "user" && typeof m.content === "string")
               .map(m => m.content)
               .join(" ")
               .toLowerCase();
             const nameWords = (args.customerName || "").toLowerCase().split(/\s+/).filter(w => w.length > 1);
-            const hasRealName = nameWords.length > 0 && nameWords.some(w => new RegExp(`\\b${w}\\b`).test(customerText));
+            const hasRealName = Boolean(knownCustomerName) ||
+              (nameWords.length > 0 && nameWords.some(w => new RegExp(`\\b${w}\\b`).test(customerText)));
 
             const regionMaps = await getRegionMaps();
             const hasRealLocation = Boolean(extractRegionFromHistory(history, regionMaps));
@@ -1397,7 +1664,7 @@ async function callAI(history, conversationId, knownCustomerEmail) {
               confirmedName = args.customName || "Custom Blend";
               confirmedDescription = args.description || "";
               confirmedCustomerNotes = args.customerNotes || "";
-              confirmedCustomerName = args.customerName || "";
+              confirmedCustomerName = knownCustomerName || args.customerName || "";
               confirmedCustomerEmail = knownCustomerEmail || extractEmailFromHistory(history) || args.customerEmail || "";
             }
           } catch (e) {
@@ -1437,6 +1704,66 @@ async function callAI(history, conversationId, knownCustomerEmail) {
           } catch (e) {
             console.error("Failed to parse search_containers_for_layer arguments:", e);
             toolResultContent = "Error: couldn't parse those tool call arguments — call search_containers_for_layer again with valid JSON.";
+          }
+        } else if (toolCall.function.name === "query_order_history") {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            const regionMaps = await getRegionMaps();
+
+            // Resolve whatever city/country text the model passed to the real casing stored in
+            // the DB (same normalization used everywhere else) — city takes priority if both are
+            // given, matching how every other region lookup in this file already prioritizes it.
+            let region = null;
+            if (args.city) {
+              const normalized = normalizeRegionText(args.city);
+              if (regionMaps.city.has(normalized)) region = { field: "city", value: regionMaps.city.get(normalized) };
+            }
+            if (!region && args.country) {
+              const normalized = normalizeRegionText(args.country);
+              if (regionMaps.countryName.has(normalized)) region = { field: "countryName", value: regionMaps.countryName.get(normalized) };
+            }
+
+            const [{ notes: regionalNotes, classifications, isGlobalFallback }, coOccurring] = await Promise.all([
+              getPopularNotesForRegion(region, 8, args.season || null),
+              args.notePreference ? getCoOccurringNotes(args.notePreference, 8) : Promise.resolve([])
+            ]);
+
+            const parts = [];
+            parts.push(isGlobalFallback || !region
+              ? `Real order-history data (no specific-enough region matched, so this is overall customer data): trending notes — ${regionalNotes.join(", ") || "none found"}; trending styles — ${classifications.join(", ") || "none found"}.`
+              : `Real order-history data for ${region.value}: trending notes — ${regionalNotes.join(", ") || "none found"}; trending styles — ${classifications.join(", ") || "none found"}.`);
+            if (args.notePreference) {
+              parts.push(coOccurring.length > 0
+                ? `Notes historically ordered alongside "${args.notePreference}": ${coOccurring.join(", ")}.`
+                : `No real historical co-occurrence data found for "${args.notePreference}".`);
+            }
+            toolResultContent = `${parts.join("\n")}\n\nUse this to back up your recommendation with a real data point — never invent a regional/trend claim beyond what's given here.`;
+          } catch (e) {
+            console.error("Failed to parse query_order_history arguments:", e);
+            toolResultContent = "Error: couldn't parse those tool call arguments — call query_order_history again with valid JSON.";
+          }
+        } else if (toolCall.function.name === "generate_scent_pyramid") {
+          try {
+            const args = JSON.parse(toolCall.function.arguments);
+            const regionMaps = await getRegionMaps();
+            const regionCandidate = extractRegionFromHistory(history, regionMaps);
+            const [{ notes: regionalNotes }, coOccurring] = await Promise.all([
+              getPopularNotesForRegion(regionCandidate),
+              getCoOccurringNotes(args.vibe || "", 10)
+            ]);
+
+            const pyramid = generate3x3Pyramid({ vibe: args.vibe || "", coOccurringNotes: coOccurring, regionalNotes });
+
+            toolResultContent = pyramid.error
+              ? `Error: catalog unavailable (${pyramid.error}). Tell the customer plainly you're having trouble pulling up the catalog right now, don't invent a blend.`
+              : `Real 3x3 pyramid generated for "${args.vibe}":\n` +
+                `Top [internal_id: ${pyramid.top.internal_id}]: ${pyramid.top.notes.join(", ")}\n` +
+                `Middle [internal_id: ${pyramid.middle.internal_id}]: ${pyramid.middle.notes.join(", ")}\n` +
+                `Base [internal_id: ${pyramid.base.internal_id}]: ${pyramid.base.notes.join(", ")}\n\n` +
+                `Present these exact notes to the customer under Top/Middle/Base — never mention "internal_id" or any container's title. When you later call confirm_scent_combination, use these exact internal_id/position pairs unless the customer asks to swap a layer out.`;
+          } catch (e) {
+            console.error("Failed to parse generate_scent_pyramid arguments:", e);
+            toolResultContent = "Error: couldn't parse those tool call arguments — call generate_scent_pyramid again with valid JSON.";
           }
         }
 
@@ -1802,16 +2129,33 @@ export async function action({ request }) {
 
     history.push({ role: "user", content: userMessage });
 
-    // Provided by the storefront widget — either the customer's real logged-in account email
-    // (native Shopify login, no OAuth needed) or what they entered in the login-gate popup shown
-    // when not logged in. Trusted the same as an email the customer typed in chat.
+    // Provided by the storefront widget from the customer's real, logged-in Shopify account —
+    // the theme extension now strictly gates chat behind {% if customer %}, so both of these
+    // are expected to be present on every real request; the null fallbacks here are just
+    // defensive, not an expected path.
     const knownCustomerEmail = typeof body.customer_email === "string" && body.customer_email.includes("@")
       ? body.customer_email.trim()
       : null;
+    const knownCustomerName = typeof body.customer_name === "string" && body.customer_name.trim()
+      ? body.customer_name.trim()
+      : null;
 
-    const { replyText, comboConfirmed, confirmedName, confirmedDescription, confirmedCustomerNotes, confirmedCustomerName, confirmedCustomerEmail, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail);
+    const { replyText, comboConfirmed, confirmedName, confirmedDescription, confirmedCustomerNotes, confirmedCustomerName, confirmedCustomerEmail, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail, knownCustomerName);
 
     CONVERSATIONS.set(conversationId, updatedMessages || history);
+
+    // Durable copy in the DB alongside the in-memory CONVERSATIONS map that actually drives the
+    // live conversation — conversationId is already the customer-facing session id (generated in
+    // getConversation, returned to the widget via the "id" SSE event below, and sent back on every
+    // subsequent request), so no separate sessionId is needed. Never let a DB hiccup break the
+    // customer's actual reply.
+    try {
+      await createOrUpdateConversation(conversationId, knownCustomerEmail, knownCustomerName);
+      await saveMessage(conversationId, "user", userMessage);
+      await saveMessage(conversationId, "assistant", replyText);
+    } catch (persistErr) {
+      console.error("Failed to persist chat log:", persistErr.message);
+    }
 
     const stream = new ReadableStream({
       async start(controller) {

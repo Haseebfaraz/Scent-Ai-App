@@ -137,9 +137,12 @@ export async function getCustomerToken(conversationId) {
 /**
  * Create or update a conversation in the database
  * @param {string} conversationId - The conversation ID
+ * @param {string} [customerEmail] - The customer's email, if known. Only ever written when
+ *   truthy — an omitted/falsy value here never clears an email already saved on this conversation.
+ * @param {string} [customerName] - The customer's name, if known. Same never-clears rule as email.
  * @returns {Promise<Object>} - The created or updated conversation
  */
-export async function createOrUpdateConversation(conversationId) {
+export async function createOrUpdateConversation(conversationId, customerEmail, customerName) {
   try {
     const existingConversation = await prisma.conversation.findUnique({
       where: { id: conversationId }
@@ -149,14 +152,18 @@ export async function createOrUpdateConversation(conversationId) {
       return await prisma.conversation.update({
         where: { id: conversationId },
         data: {
-          updatedAt: new Date()
+          updatedAt: new Date(),
+          ...(customerEmail ? { customerEmail } : {}),
+          ...(customerName ? { customerName } : {})
         }
       });
     }
 
     return await prisma.conversation.create({
       data: {
-        id: conversationId
+        id: conversationId,
+        customerEmail: customerEmail || null,
+        customerName: customerName || null
       }
     });
   } catch (error) {

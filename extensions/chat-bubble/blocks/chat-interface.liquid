@@ -9,7 +9,7 @@
         <div class="inner-brand-symbol"></div>
       </div>
       
-      <h2 class="scent-architect-title">Scent Architect AI</h2>
+      <h2 class="scent-architect-title">Dua Scent Agent</h2>
       <p class="scent-architect-description">
         Our intelligence engine analyzes your aesthetic preferences, memories, and desired mood to synthesize a one-of-a-kind molecular fragrance profile.
       </p>
@@ -25,18 +25,25 @@
     </div>
 
     <div class="scent-architect-interface-col">
-      <div class="shop-ai-chat-container">
-        
+      {% if customer %}
+      <div class="shop-ai-chat-container" style="--scent-accent: {{ block.settings.chat_bubble_color }};">
+
         <div class="shop-ai-chat-bubble" style="display: none !important;"></div>
 
         <div class="shop-ai-chat-window">
-          
+
           <div class="scent-interface-header">
             <div class="header-left-meta">
-              <div class="meta-icon-square">✦</div>
+              <div class="meta-icon-square">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                  <rect x="9" y="2" width="6" height="3" rx="1"/>
+                  <rect x="10" y="5" width="4" height="3"/>
+                  <rect x="6" y="8" width="12" height="13" rx="3"/>
+                </svg>
+              </div>
               <div class="meta-text-lines">
-                <span class="meta-label-top">Scent AI</span>
-                <span class="meta-label-sub"><span class="status-pulse-dot"></span>Active session</span>
+                <span class="meta-label-top">Dua Scent Agent</span>
+                <span class="meta-label-sub"><span class="status-pulse-dot"></span>Online · Fragrance Expert</span>
               </div>
             </div>
             <div class="header-right-status">
@@ -58,27 +65,68 @@
               </svg>
             </button>
           </div>
-          
+
         </div>
       </div>
+
+      <script src="{{ 'chat.js' | asset_url }}" defer></script>
+      <script>
+        window.shopChatConfig = {
+          promptType: {{ block.settings.system_prompt | json }},
+          welcomeMessage: {{ block.settings.welcome_message | json }}
+        };
+        window.shopId = {{ shop.id }};
+        window.shopDomain = {{ shop.permanent_domain | json }};
+        window.appBaseUrl = {{ block.settings.app_base_url | json }};
+        // Real, verified Shopify account info — only ever rendered inside the logged-in branch
+        // above, so chat.js (loaded only here) can trust these directly with no client-side gate
+        // of its own. Logged-out visitors never receive this script or chat.js at all. Name falls
+        // back first_name -> full name -> null (never guessed from the email — accounts created
+        // via New Customer Accounts' email+OTP sign-in have no name field at all, and a guess like
+        // "Haseebfaraz2000" from the email's local part reads worse than just asking in chat).
+        window.shopCustomerEmail = {% if customer %}{{ customer.email | json }}{% else %}null{% endif %};
+        window.shopCustomerName = {%- if customer -%}
+          {%- if customer.first_name != blank -%}
+            {{ customer.first_name | json }}
+          {%- elsif customer.name != blank -%}
+            {{ customer.name | json }}
+          {%- else -%}
+            null
+          {%- endif -%}
+        {%- else -%}
+          null
+        {%- endif -%};
+      </script>
+      {% else %}
+      <div class="shop-ai-chat-container">
+        <div class="shop-ai-chat-window shop-ai-login-gate">
+          <div class="scent-interface-header">
+            <div class="header-left-meta">
+              <div class="meta-icon-square">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="15" height="15" fill="currentColor">
+                  <rect x="9" y="2" width="6" height="3" rx="1"/>
+                  <rect x="10" y="5" width="4" height="3"/>
+                  <rect x="6" y="8" width="12" height="13" rx="3"/>
+                </svg>
+              </div>
+              <div class="meta-text-lines">
+                <span class="meta-label-top">Dua Scent Agent</span>
+                <span class="meta-label-sub">Sign in required</span>
+              </div>
+            </div>
+          </div>
+          <div class="shop-ai-login-gate-body">
+            <p class="shop-ai-login-gate-title">Sign in to chat</p>
+            <p class="shop-ai-login-gate-subtitle">Create your custom fragrance by chatting with Dua Scent Agent — sign in to your account first so we can save your build.</p>
+            <a class="shop-ai-login-gate-button" href="/customer_authentication/login?return_to={{ routes.root_url | url_encode }}">Sign In to Chat</a>
+          </div>
+        </div>
+      </div>
+      {% endif %}
     </div>
 
   </div>
 </div>
-
-<script src="{{ 'chat.js' | asset_url }}" defer></script>
-<script>
-  window.shopChatConfig = {
-    promptType: {{ block.settings.system_prompt | json }},
-    welcomeMessage: {{ block.settings.welcome_message | json }}
-  };
-  window.shopId = {{ shop.id }};
-  window.shopDomain = {{ shop.permanent_domain | json }};
-  window.appBaseUrl = {{ block.settings.app_base_url | json }};
-  // Native Shopify storefront login state — null if the customer isn't logged in. Used to skip
-  // the email-capture popup entirely when we already know who they are.
-  window.shopCustomerEmail = {{ customer.email | json }};
-</script>
 
 {% schema %}
 {
@@ -89,13 +137,13 @@
       "type": "color",
       "id": "chat_bubble_color",
       "label": "Chat Bubble Color",
-      "default": "#5046e4"
+      "default": "#ab9372"
     },
     {
       "type": "text",
       "id": "welcome_message",
       "label": "Welcome Message",
-      "default": "Welcome in! Step out of wherever you've been and take a moment. How's your day going so far?"
+      "default": "Hi there! How's your day going so far?"
     },
     {
       "type": "select",
@@ -143,7 +191,7 @@
 
     function attachStreamRedirectListener() {
       if (window.appChatEventSource) {
-        console.log("Scent Architect Stream detected. Registering redirection listeners...");
+        console.log("Dua Scent Agent stream detected. Registering redirection listeners...");
         
         window.appChatEventSource.addEventListener('message', (event) => {
           try {
