@@ -2098,7 +2098,11 @@ export async function action({ request }) {
 
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    // Must list every custom header the actual POST in chat.js's streamResponse sends
+    // (X-Shopify-Shop-Id, ngrok-skip-browser-warning) — otherwise the preflight OPTIONS
+    // succeeds but the browser silently refuses to send the real POST at all, which looks
+    // exactly like a network failure client-side with zero trace server-side.
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Shopify-Shop-Id, ngrok-skip-browser-warning",
     "Access-Control-Allow-Methods": "POST, OPTIONS"
   };
 
