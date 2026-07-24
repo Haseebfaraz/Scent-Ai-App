@@ -2057,7 +2057,22 @@ async function createDynamicProduct(admin, shopDomain, comboConfirmed, customNam
 // ============================================================
 // 7. LOADER — handles history fetch (GET) requests
 // ============================================================
+// Every response below must carry the full CORS header set, not just Access-Control-Allow-Origin
+// — verified directly against the live server (curl'd its real OPTIONS response) that React
+// Router routes OPTIONS preflight requests to loader(), not action(), even though action() also
+// has its own (dead-in-production) OPTIONS branch. Without Access-Control-Allow-Headers here,
+// the browser's preflight silently fails and the actual POST to action() never gets sent at all.
+const CHAT_CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Shopify-Shop-Id, ngrok-skip-browser-warning",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS"
+};
+
 export async function loader({ request }) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CHAT_CORS_HEADERS });
+  }
+
   const url = new URL(request.url);
   const isHistoryRequest = url.searchParams.get("history") === "true";
   const conversationId = url.searchParams.get("conversation_id");
@@ -2073,13 +2088,13 @@ export async function loader({ request }) {
 
     return new Response(JSON.stringify({ messages }), {
       status: 200,
-      headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      headers: { ...CHAT_CORS_HEADERS, "Content-Type": "application/json" }
     });
   }
 
   return new Response(JSON.stringify({ messages: [] }), {
     status: 200,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+    headers: { ...CHAT_CORS_HEADERS, "Content-Type": "application/json" }
   });
 }
 
@@ -2096,15 +2111,10 @@ export async function action({ request }) {
   // `npm run build`).
   getRegionMaps();
 
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    // Must list every custom header the actual POST in chat.js's streamResponse sends
-    // (X-Shopify-Shop-Id, ngrok-skip-browser-warning) — otherwise the preflight OPTIONS
-    // succeeds but the browser silently refuses to send the real POST at all, which looks
-    // exactly like a network failure client-side with zero trace server-side.
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Shopify-Shop-Id, ngrok-skip-browser-warning",
-    "Access-Control-Allow-Methods": "POST, OPTIONS"
-  };
+  // Kept in sync with loader()'s CHAT_CORS_HEADERS — this OPTIONS branch is dead in production
+  // (React Router routes OPTIONS to loader, not action; verified via direct curl against the
+  // live server), but left here as a harmless fallback in case that routing behavior changes.
+  const corsHeaders = CHAT_CORS_HEADERS;
 
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
