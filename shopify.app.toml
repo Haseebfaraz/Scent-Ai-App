@@ -1,9 +1,9 @@
 # Learn more about configuring your app at https://shopify.dev/docs/apps/tools/cli/configuration
 
-client_id = "YOUR_CLIENT_ID"
+client_id = "YOUR_CLIENT_ID" # Keep your real Client ID here
 name = "shop-chat-agent"
 handle = "shop-chat-agent"
-application_url = "https://shop-chat-agent.com"
+application_url = "https://scent-ai-app.onrender.com"
 embedded = true
 
 [build]
@@ -13,23 +13,25 @@ include_config_on_deploy = true
 api_version = "2025-04"
 
 [access_scopes]
-# Learn more at https://shopify.dev/docs/apps/tools/cli/configuration#access_scopes
 scopes = "read_products, write_products, write_inventory, read_publications, write_publications, unauthenticated_read_product_listings"
 
 [auth]
-redirect_urls = [ "https://shop-chat-agent.com/api/auth" ]
+redirect_urls = [
+  "https://scent-ai-app.onrender.com/auth/callback",
+  "https://scent-ai-app.onrender.com/auth/shopify/callback",
+  "https://scent-ai-app.onrender.com/api/auth/callback"
+]
 
-# [app_proxy] requires a public tunnel, which conflicts with plain localhost dev mode.
-# Re-enable with a fresh ngrok URL only when specifically testing the customer library:
-# [app_proxy]
-# url = "https://<your-ngrok-url>/api"
-# subpath = "scent-library"
-# prefix = "apps"
+# Enable App Proxy when using storefront widget calls
+[app_proxy]
+url = "https://scent-ai-app.onrender.com/api"
+subpath = "scent-library"
+prefix = "apps"
 
 [pos]
 embedded = false
 
 [customer_authentication]
 redirect_uris = [
-  "https://shop-chat-agent.com/callback"
+  "https://scent-ai-app.onrender.com/auth/callback"
 ]
