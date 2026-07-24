@@ -32,3 +32,8 @@ shopify.*.toml
 
 
 data/*.csv
+# Notes-Extraction-Separated.csv is the exception — the live server reads it directly off disk
+# on every request (SCENT_CONTAINERS in chat.jsx, the Fuse.js catalog in scentEngine.server.js),
+# so it must actually ship with deployed builds, unlike order_history.csv/notes.csv which are
+# one-time seed inputs only ever read locally by scripts/seed-notes.cjs.
+!data/Notes-Extraction-Separated.csv
