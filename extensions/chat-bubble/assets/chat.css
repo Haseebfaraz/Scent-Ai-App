@@ -76,7 +76,9 @@ span.scent-pill {
   right: auto;
   width: 100%;
   max-width: 100%; /* Locks structure size precisely like your reference mock */
-  height: 550px; /* Fixed section height layout */
+  /* min() instead of a flat px value so tablets/short-viewport desktops (landscape tablets,
+     small laptop screens) never get a window taller than the actual visible viewport. */
+  height: min(650px, 80vh);
   background: var(--scent-bg);
   border: 1px solid var(--scent-border);
   border-radius: 16px;
@@ -89,25 +91,54 @@ span.scent-pill {
   transform: translateY(0) !important;
 }
 
-/* 4. Adaptive Adjustments - Override Mobile Overlay Takeovers */
-@media (max-width: 480px) {
+/* 4. Mobile — the widget stays inline (no fixed/overlay positioning, matching the deliberate
+   move away from a floating popup earlier in this project), but claims close to the full
+   viewport height and drops its card chrome so there's no wasted mobile screen space. */
+@media (max-width: 767px) {
   .shop-ai-chat-window {
     position: relative !important;
     width: 100% !important;
-    height: 500px !important;
+    height: 100vh !important;
+    height: 100dvh !important; /* dvh accounts for mobile browser chrome (address bar) showing/hiding */
     top: auto !important;
     left: auto !important;
     right: auto !important;
     bottom: auto !important;
     max-width: none !important;
     min-height: auto !important;
-    border-radius: 8px !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
     transform: translateY(0) !important;
   }
 
   .shop-ai-chat-container {
     bottom: auto;
     right: auto;
+  }
+
+  .shop-ai-chat-input {
+    /* Keeps the input bar clear of the iOS home-indicator / Android gesture bar. */
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+
+  .shop-ai-chat-input input {
+    /* Below 16px, iOS Safari auto-zooms the page on focus — this is the actual fix, not just a
+       style preference. */
+    font-size: 16px;
+  }
+
+  .shop-ai-chat-send {
+    /* 44x44 minimum touch target. */
+    width: 44px;
+    height: 44px;
+  }
+
+  .shop-ai-message {
+    font-size: 15px;
+    max-width: 82%;
+    overflow-wrap: break-word;
+    word-break: break-word;
   }
 
   body.shop-ai-chat-open {
@@ -338,32 +369,109 @@ span.scent-pill {
   flex-shrink: 0;
 }
 
-/* Perfume bottle filling animation, shown while a custom product is being created */
-.shop-ai-bottle-loader {
+/* Full-screen immersive overlay shown while a custom product is actually being created via the
+   Admin API — appended directly to <body> (see chat.js), not the chat message list, so it dims
+   the entire storefront including the chat widget itself behind it. */
+.shop-ai-product-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  z-index: 999999;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 12px;
-  align-self: center;
+  justify-content: center;
+  gap: 32px;
+  background: rgba(20, 16, 12, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  opacity: 0;
+  transition: opacity 0.5s ease;
+}
+.shop-ai-product-overlay.is-visible {
+  opacity: 1;
+}
+/* Prevents the dimmed storefront page from scrolling behind the overlay while it's up. */
+body.shop-ai-overlay-open {
+  overflow: hidden;
 }
 
-.shop-ai-bottle-fluid {
+.shop-ai-product-overlay-bottle svg {
+  width: min(220px, 45vw);
+  height: auto;
+  filter: drop-shadow(0 12px 32px rgba(0, 0, 0, 0.4));
+}
+
+.shop-ai-product-overlay-status {
+  margin: 0;
+  color: #f6f1ea;
+  font-size: 19px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  text-align: center;
+  animation: shop-ai-status-pulse-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes shop-ai-status-pulse-glow {
+  0%, 100% { opacity: 0.65; text-shadow: 0 0 0 rgba(246, 241, 234, 0); }
+  50% { opacity: 1; text-shadow: 0 0 18px rgba(246, 241, 234, 0.55); }
+}
+
+/* Sequential fill: three real, non-overlapping bands (top/middle/base thirds of the bottle,
+   see chat.js) reveal one at a time — top first, then middle, then base — each scaling in from
+   its own bottom edge. An 8s loop synced to the 4 status-text phases in chat.js (2s each): top
+   fills during phase 1, middle during phase 2, base during phase 3, and the whole group gets a
+   brightening pulse during phase 4 ("Finalizing…"). Loops indefinitely until
+   removeProductCreatingAnimation() stops it once the real API call resolves. */
+.shop-ai-fluid-band {
   transform-box: fill-box;
   transform-origin: bottom;
-  animation: shop-ai-bottle-fill 2.2s ease-in-out infinite;
+  animation-duration: 8s;
+  animation-iteration-count: infinite;
+  animation-timing-function: ease-out;
+}
+.shop-ai-fluid-top {
+  animation-name: shop-ai-fill-top;
+}
+.shop-ai-fluid-middle {
+  animation-name: shop-ai-fill-middle;
+}
+.shop-ai-fluid-base {
+  animation-name: shop-ai-fill-base;
 }
 
-@keyframes shop-ai-bottle-fill {
-  0% { transform: scaleY(0.05); }
-  50% { transform: scaleY(0.85); }
-  100% { transform: scaleY(0.05); }
+@keyframes shop-ai-fill-top {
+  0% { transform: scaleY(0); }
+  20%, 100% { transform: scaleY(1); }
+}
+@keyframes shop-ai-fill-middle {
+  0%, 25% { transform: scaleY(0); }
+  45%, 100% { transform: scaleY(1); }
+}
+@keyframes shop-ai-fill-base {
+  0%, 50% { transform: scaleY(0); }
+  70%, 100% { transform: scaleY(1); }
 }
 
-.shop-ai-bottle-caption {
-  font-size: 13px;
-  color: var(--scent-muted);
-  margin: 0;
+.shop-ai-fluid-group {
+  animation: shop-ai-fluid-glow 8s ease-out infinite;
+}
+@keyframes shop-ai-fluid-glow {
+  0%, 75% { filter: brightness(1); }
+  87.5% { filter: brightness(1.3); }
+  100% { filter: brightness(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shop-ai-fluid-band, .shop-ai-fluid-group, .shop-ai-product-overlay-status {
+    animation: none !important;
+  }
+  .shop-ai-fluid-top, .shop-ai-fluid-middle, .shop-ai-fluid-base {
+    transform: scaleY(1) !important;
+  }
 }
 
 /* Product Component Alignment Overrides */

@@ -190,51 +190,99 @@
         }
       },
 
+      // Cycled while the full-screen creation overlay is up — order matches the visual fill
+      // sequence below (top band, then middle, then base, then a finishing glow across all three).
+      PRODUCT_OVERLAY_STATUS_PHASES: [
+        'Infusing Top Notes…',
+        'Blending Heart Notes…',
+        'Fixing Base Notes…',
+        'Finalizing your custom blend…'
+      ],
+      PRODUCT_OVERLAY_PHASE_MS: 2000, // 4 phases x 2s = one 8s loop, matching the CSS animation-duration below
+
       /**
-       * Show the perfume bottle filling animation while a custom product is being created
+       * Show a full-screen immersive overlay (not an inline chat message) while a custom product
+       * is actually being created via the Admin API — appended to <body>, not the messages list,
+       * so it dims the entire storefront (including the chat widget itself) behind it. Loops
+       * indefinitely since real product-creation timing varies; removeProductCreatingAnimation()
+       * stops it once the "product_created"/"product_error" SSE event actually arrives.
        */
       showProductCreatingAnimation: function() {
-        const { messagesContainer } = this.elements;
+        if (document.querySelector('.shop-ai-product-overlay')) return;
 
-        if (messagesContainer.querySelector('.shop-ai-bottle-loader')) return;
-
-        const loader = document.createElement('div');
-        loader.classList.add('shop-ai-bottle-loader');
-        loader.innerHTML = `
-          <svg viewBox="0 0 120 200" width="70" height="110">
-            <defs>
-              <linearGradient id="shopAiScentFluid" x1="0" y1="1" x2="0" y2="0">
-                <stop offset="0%" stop-color="#c9832c"/>
-                <stop offset="50%" stop-color="#e08fa0"/>
-                <stop offset="100%" stop-color="#f2e07a"/>
-              </linearGradient>
-              <clipPath id="shopAiBottleClip">
-                <rect x="15" y="35" width="90" height="150" rx="18"/>
-              </clipPath>
-            </defs>
-            <rect x="45" y="0" width="30" height="14" rx="4" fill="#2e2a24"/>
-            <rect x="50" y="10" width="20" height="25" fill="#2e2a24" opacity="0.6"/>
-            <g clip-path="url(#shopAiBottleClip)">
-              <rect class="shop-ai-bottle-fluid" x="15" y="35" width="90" height="150" fill="url(#shopAiScentFluid)"/>
-            </g>
-            <rect x="15" y="35" width="90" height="150" rx="18" fill="none" stroke="#57534e" stroke-width="3"/>
-          </svg>
-          <p class="shop-ai-bottle-caption">Blending your fragrance…</p>
+        const overlay = document.createElement('div');
+        overlay.classList.add('shop-ai-product-overlay');
+        overlay.innerHTML = `
+          <div class="shop-ai-product-overlay-bottle">
+            <svg viewBox="0 0 120 200">
+              <defs>
+                <linearGradient id="shopAiFluidTop" x1="0" y1="1" x2="0" y2="0">
+                  <stop offset="0%" stop-color="#c7d94a"/>
+                  <stop offset="100%" stop-color="#f2e07a"/>
+                </linearGradient>
+                <linearGradient id="shopAiFluidMiddle" x1="0" y1="1" x2="0" y2="0">
+                  <stop offset="0%" stop-color="#c9832c"/>
+                  <stop offset="100%" stop-color="#e08fa0"/>
+                </linearGradient>
+                <linearGradient id="shopAiFluidBase" x1="0" y1="1" x2="0" y2="0">
+                  <stop offset="0%" stop-color="#4a2f1c"/>
+                  <stop offset="100%" stop-color="#8c5a34"/>
+                </linearGradient>
+                <clipPath id="shopAiBottleClip">
+                  <rect x="15" y="35" width="90" height="150" rx="18"/>
+                </clipPath>
+              </defs>
+              <rect x="45" y="0" width="30" height="14" rx="4" fill="#2e2a24"/>
+              <rect x="50" y="10" width="20" height="25" fill="#2e2a24" opacity="0.6"/>
+              <g class="shop-ai-fluid-group" clip-path="url(#shopAiBottleClip)">
+                <!-- Three real, non-overlapping bands (top/middle/base thirds of the bottle),
+                     each scaling in independently from its own bottom edge — a true sequential
+                     reveal, not one gradient rect standing in for three layers. -->
+                <rect class="shop-ai-fluid-band shop-ai-fluid-top" x="15" y="35" width="90" height="50" fill="url(#shopAiFluidTop)"/>
+                <rect class="shop-ai-fluid-band shop-ai-fluid-middle" x="15" y="85" width="90" height="50" fill="url(#shopAiFluidMiddle)"/>
+                <rect class="shop-ai-fluid-band shop-ai-fluid-base" x="15" y="135" width="90" height="50" fill="url(#shopAiFluidBase)"/>
+              </g>
+              <rect x="15" y="35" width="90" height="150" rx="18" fill="none" stroke="#57534e" stroke-width="3"/>
+            </svg>
+          </div>
+          <p class="shop-ai-product-overlay-status"></p>
         `;
-        messagesContainer.appendChild(loader);
-        this.scrollToBottom();
+        document.body.appendChild(overlay);
+        // Prevents the dimmed storefront from scrolling behind the overlay while it's up.
+        document.body.classList.add('shop-ai-overlay-open');
+        // Force a layout pass before adding is-visible so the opacity transition actually
+        // animates in, instead of the overlay just snapping straight to fully visible.
+        requestAnimationFrame(() => requestAnimationFrame(() => overlay.classList.add('is-visible')));
+
+        const statusEl = overlay.querySelector('.shop-ai-product-overlay-status');
+        const phases = this.PRODUCT_OVERLAY_STATUS_PHASES;
+        let phaseIndex = 0;
+        const advancePhase = () => {
+          statusEl.textContent = phases[phaseIndex % phases.length];
+          phaseIndex++;
+        };
+        advancePhase();
+        this._productOverlayInterval = setInterval(advancePhase, this.PRODUCT_OVERLAY_PHASE_MS);
+        this._productOverlayEl = overlay;
       },
 
       /**
-       * Remove the perfume bottle filling animation
+       * Fade out and remove the full-screen creation overlay once the API call actually resolves
+       * (success or error) — never yanked away instantly, so the transition reads as deliberate.
        */
       removeProductCreatingAnimation: function() {
-        const { messagesContainer } = this.elements;
+        const overlay = this._productOverlayEl || document.querySelector('.shop-ai-product-overlay');
+        if (!overlay) return;
 
-        const loader = messagesContainer.querySelector('.shop-ai-bottle-loader');
-        if (loader) {
-          loader.remove();
-        }
+        clearInterval(this._productOverlayInterval);
+        this._productOverlayInterval = null;
+        this._productOverlayEl = null;
+
+        overlay.classList.remove('is-visible');
+        document.body.classList.remove('shop-ai-overlay-open');
+        // Matches the CSS opacity transition duration — only detach the node once it's actually
+        // finished fading, not before.
+        setTimeout(() => overlay.remove(), 500);
       },
 
       /**
