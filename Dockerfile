@@ -1,4 +1,4 @@
-FROM node:18-alpine
+FROM node:20-alpinegit add Dockerfile
 RUN apk add --no-cache openssl
 
 EXPOSE 3000
