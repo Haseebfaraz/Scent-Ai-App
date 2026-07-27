@@ -853,6 +853,7 @@ import crypto from "crypto";
 import { unauthenticated } from "../shopify.server";
 import prisma, { createOrUpdateConversation, saveMessage, getConversationHistory } from "../db.server";
 import { generate3x3Pyramid } from "../utils/scentEngine.server";
+import Fuse from "fuse.js";
 
 // ============================================================
 // 1. DATASET ENGINE LAYER
@@ -1179,7 +1180,27 @@ const MIN_SAMPLE_SIZE = 20;
 // because their specific city/state/country combination doesn't have enough orders on its own.
 // Callers can tell tier 3 happened via `isGlobalFallback` and should phrase it as "customers
 // overall" rather than implying it's specific to their region.
-async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null) {
+// When a vibe is given, fuzzy-ranks a region+season-matched batch by relevance to it BEFORE
+// tallying notes — otherwise a broadly-popular-but-irrelevant regional note (e.g. a heavy amber
+// base that's popular locally but has nothing to do with a customer asking for "fruity") can drown
+// out the one signal that actually matters: what they just told you they want. Falls back to the
+// full unfiltered batch if fuzzy-matching the vibe against real order rows turns up too little to
+// tally meaningfully — a thin/no match here shouldn't leave the customer with zero regional signal.
+// A narrowed subset of an already-region-validated batch doesn't need to clear the same bar as
+// the regional batch itself (MIN_SAMPLE_SIZE=20 exists to validate a whole city/state/country
+// slice, not a further vibe-relevant refinement of one) — verified directly against real data
+// that requiring 20 caused this to silently no-op on a 51-row Karachi sample (only 19 rows
+// matched "fruity"), even though those 19 rows contained real, meaningfully different signal
+// (Apple, Grapefruit, Pineapple, Blackcurrant) that the unfiltered 51-row tally buried entirely.
+const MIN_VIBE_MATCH_SIZE = 5;
+function narrowOrdersByVibe(orders, vibe) {
+  if (!vibe) return orders;
+  const fuse = new Fuse(orders, { keys: ["notes", "classification"], threshold: 0.4, ignoreLocation: true });
+  const matched = fuse.search(vibe).map(r => r.item);
+  return matched.length >= MIN_VIBE_MATCH_SIZE ? matched : orders;
+}
+
+async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null, vibe = null) {
   const seasonValues = SEASON_ALIASES[seasonOverride] || SEASON_ALIASES[getCurrentSeason()];
 
   try {
@@ -1217,7 +1238,8 @@ async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null
           take: 3000 // cap the scan for performance on a ~937k row table
         });
         if (seasonalOrders.length >= MIN_SAMPLE_SIZE) {
-          return { notes: tallyNotes(seasonalOrders, limit), classifications: tallyClassifications(seasonalOrders, 3), isGlobalFallback: false };
+          const relevant = narrowOrdersByVibe(seasonalOrders, vibe);
+          return { notes: tallyNotes(relevant, limit), classifications: tallyClassifications(relevant, 3), isGlobalFallback: false };
         }
       }
       for (const where of attempts) {
@@ -1227,7 +1249,8 @@ async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null
           take: 3000
         });
         if (orders.length >= MIN_SAMPLE_SIZE) {
-          return { notes: tallyNotes(orders, limit), classifications: tallyClassifications(orders, 3), isGlobalFallback: false };
+          const relevant = narrowOrdersByVibe(orders, vibe);
+          return { notes: tallyNotes(relevant, limit), classifications: tallyClassifications(relevant, 3), isGlobalFallback: false };
         }
       }
     }
@@ -1240,14 +1263,16 @@ async function getPopularNotesForRegion(region, limit = 8, seasonOverride = null
       take: 3000
     });
     if (seasonalGlobal.length >= MIN_SAMPLE_SIZE) {
-      return { notes: tallyNotes(seasonalGlobal, limit), classifications: tallyClassifications(seasonalGlobal, 3), isGlobalFallback: true };
+      const relevant = narrowOrdersByVibe(seasonalGlobal, vibe);
+      return { notes: tallyNotes(relevant, limit), classifications: tallyClassifications(relevant, 3), isGlobalFallback: true };
     }
     const global = await prisma.orderHistory.findMany({
       select: { notes: true, classification: true },
       take: 3000
     });
     if (global.length >= MIN_SAMPLE_SIZE) {
-      return { notes: tallyNotes(global, limit), classifications: tallyClassifications(global, 3), isGlobalFallback: true };
+      const relevant = narrowOrdersByVibe(global, vibe);
+      return { notes: tallyNotes(relevant, limit), classifications: tallyClassifications(relevant, 3), isGlobalFallback: true };
     }
   } catch (err) {
     console.error("Failed to look up regional notes:", err.message);
@@ -1703,7 +1728,7 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
             // current season — the actual location/season they gave us in Phase 1, not a guess.
             const regionMaps = await getRegionMaps();
             const regionCandidate = extractRegionFromHistory(history, regionMaps);
-            const { notes: regionalNotes } = await getPopularNotesForRegion(regionCandidate);
+            const { notes: regionalNotes } = await getPopularNotesForRegion(regionCandidate, 8, null, query);
             const regionalLower = regionalNotes.map(n => n.toLowerCase());
 
             const bonus = (c) => {
@@ -1742,7 +1767,7 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
             }
 
             const [{ notes: regionalNotes, classifications, isGlobalFallback }, coOccurring] = await Promise.all([
-              getPopularNotesForRegion(region, 8, args.season || null),
+              getPopularNotesForRegion(region, 8, args.season || null, args.notePreference || null),
               args.notePreference ? getCoOccurringNotes(args.notePreference, 8) : Promise.resolve([])
             ]);
 
@@ -1766,7 +1791,7 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
             const regionMaps = await getRegionMaps();
             const regionCandidate = extractRegionFromHistory(history, regionMaps);
             const [{ notes: regionalNotes }, coOccurring] = await Promise.all([
-              getPopularNotesForRegion(regionCandidate),
+              getPopularNotesForRegion(regionCandidate, 8, null, args.vibe || null),
               getCoOccurringNotes(args.vibe || "", 10)
             ]);
 
