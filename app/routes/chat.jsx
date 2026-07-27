@@ -851,7 +851,7 @@ import fs from "fs";
 import path from "path";
 import crypto from "crypto";
 import { unauthenticated } from "../shopify.server";
-import prisma, { createOrUpdateConversation, saveMessage } from "../db.server";
+import prisma, { createOrUpdateConversation, saveMessage, getConversationHistory } from "../db.server";
 import { generate3x3Pyramid } from "../utils/scentEngine.server";
 
 // ============================================================
@@ -1315,11 +1315,28 @@ function getContainerPricing(internal_id) {
 // ============================================================
 const CONVERSATIONS = new Map();
 
-function getConversation(conversationId) {
-  const id = conversationId && CONVERSATIONS.has(conversationId)
-    ? conversationId
-    : crypto.randomUUID();
-  if (!CONVERSATIONS.has(id)) CONVERSATIONS.set(id, []);
+// CONVERSATIONS is wiped on every server restart (routine on Render's free tier — cold starts,
+// redeploys) even though every message is also durably saved to Postgres via saveMessage(). When
+// a returning customer's id isn't in memory, this rehydrates from the DB instead of silently
+// starting a blank conversation — otherwise the customer would see their old messages returned by
+// the history endpoint while the AI itself had no memory of any of it (a real correctness bug,
+// not just a display one, since callAI builds on this same history).
+async function getConversation(conversationId) {
+  if (conversationId && CONVERSATIONS.has(conversationId)) {
+    return { id: conversationId, history: CONVERSATIONS.get(conversationId) };
+  }
+
+  if (conversationId) {
+    const dbMessages = await getConversationHistory(conversationId);
+    if (dbMessages.length > 0) {
+      const history = dbMessages.map(m => ({ role: m.role, content: m.content }));
+      CONVERSATIONS.set(conversationId, history);
+      return { id: conversationId, history };
+    }
+  }
+
+  const id = crypto.randomUUID();
+  CONVERSATIONS.set(id, []);
   return { id, history: CONVERSATIONS.get(id) };
 }
 
@@ -2078,9 +2095,9 @@ export async function loader({ request }) {
   const conversationId = url.searchParams.get("conversation_id");
 
   if (isHistoryRequest) {
-    const history = conversationId && CONVERSATIONS.has(conversationId)
-      ? CONVERSATIONS.get(conversationId)
-      : [];
+    // Reuses the same DB-rehydration path as the AI's own conversation lookup, so a page reload
+    // after a server restart shows the same history the AI itself will actually remember.
+    const { history } = conversationId ? await getConversation(conversationId) : { history: [] };
 
     const messages = history
       .filter(m => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim() !== "")
@@ -2145,7 +2162,7 @@ export async function action({ request }) {
     }
 
     const userMessage = body.message || "";
-    const { id: conversationId, history } = getConversation(body.conversation_id);
+    const { id: conversationId, history } = await getConversation(body.conversation_id);
 
     history.push({ role: "user", content: userMessage });
 
