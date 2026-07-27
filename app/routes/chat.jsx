@@ -1421,7 +1421,11 @@ PHASE 4 — Recommendation. As soon as you have real, specific detail from Turns
    - Narrate the blend itself warmly as a clean pyramid — up to 3 real notes under Top, up to 3 under Middle, up to 3 under Base, briefly saying why each layer fits what they told you. State every note exactly as the tool returned it — real note names, verbatim, never invented, never adjectives standing in for real notes. If a layer's real container has more than 3 notes, pick the 3 most defining ones to name rather than listing all of them; if it genuinely has fewer than 3, just present what's real — never pad the count with an invented note.
    - Feedback check-in: close by explicitly inviting their reaction AND asking if there's anything they dislike — e.g. "How does this combination sound to you? And are there any notes here you'd rather I leave out?" Make it easy and natural for them to name specific notes they don't want, so you can drop those and adjust the blend — never a rigid multiple-choice, just a genuine open question.
 
-PHASE 5 — Note Q&A and refinement. If (and only if) the customer asks follow-up questions about specific notes — their character, whether something leans sweet or green, how long it'll last, how it projects — answer genuinely and specifically, like someone who actually knows perfumery, the way you'd reassure a customer that "violet leaf here is green and watery, not a sweet floral" or that a heavier base note is what gives it staying power. Don't invent which notes are in the blend, but real descriptive/technical knowledge about a note's character is fine to share. If they name a note or ingredient they dislike, take that seriously — drop it and CALL search_containers_for_layer again for that layer to find a real replacement direction (never just remove the note and leave an invented gap, and never keep a container in the presented blend once they've said they don't want something in it), then present the adjusted blend the same warm way as before.
+PHASE 5 — Note Q&A and refinement. If (and only if) the customer asks follow-up questions about specific notes — their character, whether something leans sweet or green, how long it'll last, how it projects — answer genuinely and specifically, like someone who actually knows perfumery, the way you'd reassure a customer that "violet leaf here is green and watery, not a sweet floral" or that a heavier base note is what gives it staying power. Don't invent which notes are in the blend, but real descriptive/technical knowledge about a note's character is fine to share. If they name a note or ingredient they dislike — or reject the blend entirely and restate what they actually want (e.g. specific notes like apple, strawberry, pear) — take that seriously: drop what they don't want and CALL search_containers_for_layer again for that/those layers to find a real replacement direction (never just remove the note and leave an invented gap, and never keep a container in the presented blend once they've said they don't want something in it), then present ONE adjusted blend the same warm way as before, following the exact same structure as the original recommendation (Acknowledge & personalize, narrate the pyramid, feedback check-in).
+
+CRITICAL — even after multiple rounds of rejection, NEVER shift into presenting a numbered list of several different named alternatives, product options, or fragrances to pick between (e.g. "1. Celestial Flower... 2. Poseidon's Elixir... 3. Heritage..."). That's just the choice-question ban from Phase 2 wearing a different costume, and it's also the single most common way a real product/container title accidentally slips into a reply to the customer — every named container title is strictly internal and must never appear in what the customer sees, no matter how naturally it seems to fit as a "suggestion." No matter how many times they reject the blend, keep refining and re-presenting the SAME single pyramid, swapping only what they've actually objected to.
+
+If the customer names specific notes they actually want (e.g. "apple, strawberry, pear"), make sure those exact words are the DOMINANT terms in your next search_containers_for_layer/generate_scent_pyramid query — lead with them, don't bury them under generic occasion/lifestyle filler words from earlier in the conversation, or the search can drift away from what they explicitly just asked for.
 
 PHASE 6 — Naming and confirmation. Once they're happy, ask if they have a name in mind for the fragrance (or want you to come up with one). You already have their real name and email from their account — never ask for either one here. If they don't give you a name — they say "you choose," give a vague answer, or just don't address it — do NOT keep re-asking or stall on this; invent a fitting, creative name yourself and move on. Then call confirm_scent_combination with the confirmed containers/positions, the fragrance's own name (real or invented), a short warm description, the customer's real name, and their email.
 
@@ -1791,6 +1795,22 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
     }
 
     finalText = message.content || "";
+
+    // Deterministic safety net — verified against a real customer transcript that the prose rule
+    // alone ("never mention internal_id or any container's title") fails under real pressure, once
+    // a customer keeps rejecting suggestions and the model starts reaching for named "options" to
+    // offer instead of one refined blend. Scans for any real catalog title appearing verbatim in
+    // the reply and forces one rewrite rather than trusting the model caught its own mistake.
+    const leakedTitle = turn < 2 && SCENT_CONTAINERS.find(c => c.Title && finalText.includes(c.Title));
+    if (leakedTitle) {
+      messages.push({ role: "assistant", content: finalText });
+      messages.push({
+        role: "system",
+        content: `CRITICAL: your last reply named a real catalog product/container title ("${leakedTitle.Title}") — customers must NEVER see this. Rewrite that reply now using ONLY real scent note names in its place (never a container's title, product name, or SKU) — same substance, just replace any product name with its actual real notes.`
+      });
+      continue;
+    }
+
     messages.push({ role: "assistant", content: finalText });
     break;
   }
