@@ -321,6 +321,43 @@
         }
 
         this.scrollToBottom();
+      },
+
+      /**
+       * Render generate_new_product_combinations / refine_combination_recommendations results as
+       * cards (Phase 14) — rank, real product titles, type, key notes, why it works, ratio,
+       * confidence, existing/new badge, risk warning, and action buttons. Purely a render of what
+       * the backend already computed; never reformats or re-derives any of the numbers itself.
+       * @param {Array} combinations - ProposedCombination[] (each carries its own recommendationId).
+       */
+      displayCombinationRecommendations: function(combinations) {
+        const { messagesContainer } = this.elements;
+
+        const section = document.createElement('div');
+        section.classList.add('shop-ai-combo-section');
+        messagesContainer.appendChild(section);
+
+        const header = document.createElement('div');
+        header.classList.add('shop-ai-combo-header');
+        header.innerHTML = '<h4>Recommended Combinations</h4>';
+        section.appendChild(header);
+
+        const grid = document.createElement('div');
+        grid.classList.add('shop-ai-combo-grid');
+        section.appendChild(grid);
+
+        if (!combinations || !Array.isArray(combinations) || combinations.length === 0) {
+          const empty = document.createElement('p');
+          empty.textContent = 'No new combinations available right now.';
+          empty.style.padding = '10px';
+          grid.appendChild(empty);
+        } else {
+          combinations.forEach((combo, index) => {
+            grid.appendChild(ShopAIChat.Combination.createCard(combo, index + 1));
+          });
+        }
+
+        this.scrollToBottom();
       }
     },
 
@@ -718,6 +755,17 @@
             ShopAIChat.UI.displayProductResults(data.products);
             break;
 
+          // Phase 14 — structured fragrance-recommendation events. The backend already scored,
+          // filtered, and ratio'd these deterministically; this just renders what it returned,
+          // never reformats or re-narrates the numbers itself.
+          case 'combination_recommendations':
+          case 'recommendation_refined':
+            ShopAIChat.UI.removeTypingIndicator();
+            if (data.combinations) {
+              ShopAIChat.UI.displayCombinationRecommendations(data.combinations);
+            }
+            break;
+
           case 'tool_use':
             if (data.tool_use_message) {
               ShopAIChat.Message.addToolUse(data.tool_use_message, messagesContainer);
@@ -904,6 +952,145 @@
         card.appendChild(info);
 
         return card;
+      }
+    },
+
+    /**
+     * Fragrance combination recommendation cards (Phase 14). Every action button prefills a plain
+     * natural-language message and reuses the existing chat send pipeline — there's no separate
+     * API path; the backend's tool-calling loop (confirm_product_combination etc.) does the real
+     * work from the customer's own words, exactly like the existing "Add to Cart" button does.
+     */
+    Combination: {
+      CONFIDENCE_LABELS: { 'very high': 'Very High', high: 'High', medium: 'Medium', low: 'Low' },
+
+      /**
+       * @param {Object} combo - one ProposedCombination, with recommendationId attached.
+       * @param {number} rank - 1-based display rank.
+       * @returns {HTMLElement}
+       */
+      createCard: function(combo, rank) {
+        const card = document.createElement('div');
+        card.classList.add('shop-ai-combo-card');
+
+        const badge = document.createElement('span');
+        badge.classList.add('shop-ai-combo-badge', combo.existsAlready ? 'is-existing' : 'is-new');
+        badge.textContent = combo.existsAlready ? 'Existing verified combination' : 'New proposed combination';
+        card.appendChild(badge);
+
+        const title = document.createElement('h5');
+        title.classList.add('shop-ai-combo-title');
+        title.textContent = `#${rank} · ${combo.type || ''}`;
+        card.appendChild(title);
+
+        const products = Array.isArray(combo.products) ? combo.products : [];
+        const productNames = products.map(p => p.title).filter(Boolean);
+
+        const productsLine = document.createElement('p');
+        productsLine.classList.add('shop-ai-combo-products');
+        productsLine.textContent = productNames.join(' + ');
+        card.appendChild(productsLine);
+
+        if (combo.mainDirection) {
+          const direction = document.createElement('p');
+          direction.classList.add('shop-ai-combo-direction');
+          direction.textContent = combo.mainDirection;
+          card.appendChild(direction);
+        }
+
+        // Key notes per product — up to 4 real notes each, exactly as the backend returned them.
+        const notesLines = products
+          .filter(p => Array.isArray(p.notes) && p.notes.length)
+          .map(p => `${p.title}: ${p.notes.slice(0, 4).join(', ')}`);
+        if (notesLines.length) {
+          const notes = document.createElement('p');
+          notes.classList.add('shop-ai-combo-notes');
+          notes.textContent = notesLines.join(' • ');
+          card.appendChild(notes);
+        }
+
+        const whyParts = [...(combo.customerFitReasons || []), ...(combo.compatibilityReasons || [])].slice(0, 3);
+        if (whyParts.length) {
+          const why = document.createElement('p');
+          why.classList.add('shop-ai-combo-why');
+          why.textContent = whyParts.join(' ');
+          card.appendChild(why);
+        }
+
+        if (Array.isArray(combo.recommendedRatio) && combo.recommendedRatio.length) {
+          const ratio = document.createElement('p');
+          ratio.classList.add('shop-ai-combo-ratio');
+          ratio.textContent = 'Suggested ratio: ' + combo.recommendedRatio
+            .map(r => `${r.productTitle} ${Math.round(r.ratioPercent)}% (${r.milliliters}ml)`)
+            .join(', ');
+          card.appendChild(ratio);
+        }
+
+        if (combo.confidence) {
+          const confidence = document.createElement('span');
+          const confidenceKey = String(combo.confidence).toLowerCase().replace(/\s+/g, '-');
+          confidence.classList.add('shop-ai-combo-confidence', `is-confidence-${confidenceKey}`);
+          confidence.textContent = `Confidence: ${this.CONFIDENCE_LABELS[combo.confidence] || combo.confidence}`;
+          card.appendChild(confidence);
+        }
+
+        if (Array.isArray(combo.risks) && combo.risks.length) {
+          const risk = document.createElement('p');
+          risk.classList.add('shop-ai-combo-risk');
+          risk.textContent = '⚠ ' + combo.risks.join(' ');
+          card.appendChild(risk);
+        }
+
+        const actions = document.createElement('div');
+        actions.classList.add('shop-ai-combo-actions');
+
+        const productList = productNames.join(' and ');
+
+        const selectButton = document.createElement('button');
+        selectButton.classList.add('shop-ai-combo-select');
+        selectButton.textContent = 'Select';
+        selectButton.addEventListener('click', () => {
+          this.sendPrefilled(`Let's go with the combination of ${productList}.`, true);
+        });
+        actions.appendChild(selectButton);
+
+        const refineButton = document.createElement('button');
+        refineButton.classList.add('shop-ai-combo-refine');
+        refineButton.textContent = 'Refine';
+        refineButton.addEventListener('click', () => {
+          this.sendPrefilled(`For the ${productList} combination, I'd like to `, false);
+        });
+        actions.appendChild(refineButton);
+
+        const createButton = document.createElement('button');
+        createButton.classList.add('shop-ai-combo-create');
+        createButton.textContent = 'Create My Fragrance';
+        createButton.addEventListener('click', () => {
+          this.sendPrefilled(`Yes, please create the combination of ${productList} for me.`, true);
+        });
+        actions.appendChild(createButton);
+
+        card.appendChild(actions);
+
+        return card;
+      },
+
+      /**
+       * Puts `text` in the chat input, optionally sending it immediately — the same mechanism the
+       * existing "Add to Cart" product-card button already uses.
+       * @param {string} text
+       * @param {boolean} autoSend
+       */
+      sendPrefilled: function(text, autoSend) {
+        const input = document.querySelector('.shop-ai-chat-input input');
+        if (!input) return;
+        input.value = text;
+        if (autoSend) {
+          const sendButton = document.querySelector('.shop-ai-chat-send');
+          if (sendButton) sendButton.click();
+        } else {
+          input.focus();
+        }
       }
     },
 

@@ -12,6 +12,14 @@ const { PrismaClient } = require('@prisma/client');
 
 const prisma = new PrismaClient();
 
+// fragranceNormalization.js / customerKeyHash.js are ESM (package.json "type": "module"); this
+// script stays .cjs to match the rest of scripts/, so they're loaded via dynamic import().
+async function loadEsmHelpers() {
+  const { normalizeProductName } = await import('../app/utils/fragranceNormalization.js');
+  const { hashCustomerKey } = await import('../app/utils/customerKeyHash.js');
+  return { normalizeProductName, hashCustomerKey };
+}
+
 function loadCSV(filePath) {
   const raw = fs.readFileSync(filePath, 'utf8');
   const { data } = Papa.parse(raw, { header: true, skipEmptyLines: true });
@@ -19,6 +27,8 @@ function loadCSV(filePath) {
 }
 
 async function main() {
+  const { normalizeProductName, hashCustomerKey } = await loadEsmHelpers();
+
   const notesPath = path.join(__dirname, '..', 'data', 'notes.csv');
   const ordersPath = path.join(__dirname, '..', 'data', 'order_history.csv');
 
@@ -91,17 +101,28 @@ async function main() {
   // Clear old rows first so re-running this script doesn't duplicate them.
   await prisma.orderHistory.deleteMany({});
 
-  const cleanedOrders = ordersRaw.map((row) => ({
-    orderDate: row['Order Date'] || null,
-    season: row['Updated Season'] || null,
-    classification:
-      (row['Classification'] || '').replace(/^CLASSIFICATION:\s*/i, '').trim() || null,
-    notes: (row['Notes'] || '').trim(),
-    // Region only — deliberately still not seeding Name/Race/Gender from the source CSV.
-    city: (row['City'] || '').trim() || null,
-    stateName: (row['State Name'] || '').trim() || null,
-    countryName: (row['Country Name'] || '').trim() || null,
-  }));
+  const cleanedOrders = ordersRaw.map((row) => {
+    const productName = (row['Product Name'] || '').trim() || null;
+    // Name is read ONLY to produce a one-way salted hash for repeat-purchase counting — the raw
+    // value is never assigned to any field below, matching the seed script's existing
+    // privacy-conscious scope (Name/Race/Gender still never stored in the clear).
+    const customerKeyHash = hashCustomerKey(row['Name']);
+
+    return {
+      orderDate: row['Order Date'] || null,
+      season: row['Updated Season'] || null,
+      classification:
+        (row['Classification'] || '').replace(/^CLASSIFICATION:\s*/i, '').trim() || null,
+      notes: (row['Notes'] || '').trim(),
+      // Region only — deliberately still not seeding Name/Race/Gender from the source CSV.
+      city: (row['City'] || '').trim() || null,
+      stateName: (row['State Name'] || '').trim() || null,
+      countryName: (row['Country Name'] || '').trim() || null,
+      productName,
+      normalizedProductName: productName ? normalizeProductName(productName) : null,
+      customerKeyHash,
+    };
+  });
 
   const BATCH_SIZE = 1000;
   let orderCount = 0;

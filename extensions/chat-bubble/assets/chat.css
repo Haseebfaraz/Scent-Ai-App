@@ -487,6 +487,102 @@ body.shop-ai-overlay-open {
   color: var(--scent-text);
 }
 
+/* Fragrance combination recommendation cards (Phase 14) */
+.shop-ai-combo-section {
+  border-top: 1px solid var(--scent-border);
+  border-bottom: 1px solid var(--scent-border);
+  padding: 8px 0;
+}
+.shop-ai-combo-header h4 {
+  color: var(--scent-text);
+  margin: 4px 12px;
+  font-size: 15px;
+}
+.shop-ai-combo-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 12px;
+}
+.shop-ai-combo-card {
+  background: var(--scent-assistant-bubble);
+  border: 1px solid var(--scent-border);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.shop-ai-combo-badge {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 3px 9px;
+  color: var(--scent-accent-text);
+  background: var(--scent-accent);
+}
+.shop-ai-combo-badge.is-existing {
+  background: var(--scent-muted);
+}
+.shop-ai-combo-title {
+  color: var(--scent-text);
+  font-size: 14px;
+  font-weight: 700;
+  margin: 0;
+}
+.shop-ai-combo-products {
+  color: var(--scent-text);
+  font-weight: 600;
+  font-size: 13px;
+  margin: 0;
+}
+.shop-ai-combo-direction,
+.shop-ai-combo-notes,
+.shop-ai-combo-why,
+.shop-ai-combo-ratio {
+  color: var(--scent-muted);
+  font-size: 12.5px;
+  line-height: 1.4;
+  margin: 0;
+}
+.shop-ai-combo-confidence {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--scent-muted);
+}
+.shop-ai-combo-confidence.is-confidence-very-high,
+.shop-ai-combo-confidence.is-confidence-high {
+  color: var(--scent-accent);
+}
+.shop-ai-combo-risk {
+  color: #a8632c;
+  font-size: 12px;
+  margin: 0;
+}
+.shop-ai-combo-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+.shop-ai-combo-actions button {
+  border: 1px solid var(--scent-border);
+  background: var(--scent-input-bg);
+  color: var(--scent-text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+.shop-ai-combo-actions button.shop-ai-combo-create {
+  background: var(--scent-accent);
+  color: var(--scent-accent-text);
+  border-color: var(--scent-accent);
+  font-weight: 600;
+}
+
 /* Strict login gate — rendered server-side by Liquid instead of the chat window when
    {% if customer %} is false; chat.js/chat-input never even load in this branch. */
 .shop-ai-login-gate {

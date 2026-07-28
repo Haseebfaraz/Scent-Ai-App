@@ -100,9 +100,113 @@ model OrderHistory {
   city           String?
   stateName      String?
   countryName    String?
+  // Real DUA product referenced by this historical order — 100% populated in the source CSV,
+  // unlike Name/Race/Gender this isn't privacy-sensitive, so unlike those it's kept.
+  productName           String?
+  normalizedProductName String?
+  // A one-way, salted (HMAC) hash of the source row's customer name — never the name itself,
+  // never reversible without the secret salt (CUSTOMER_KEY_HASH_SALT, env-only, never committed).
+  // Exists ONLY so repeat-purchase patterns can be counted (same hash appearing more than once =
+  // same underlying customer) without ever storing or exposing who that customer actually is.
+  // Never returned in any tool output or customer-facing text — aggregate counts only.
+  customerKeyHash String?
   createdAt      DateTime  @default(now())
 
   @@index([city])
   @@index([stateName])
   @@index([countryName])
+  @@index([normalizedProductName])
+  @@index([customerKeyHash])
+}
+
+model FragranceProduct {
+  id              String   @id @default(cuid())
+  handle          String?
+  title           String
+  normalizedTitle String   @unique
+  notesRaw        String?
+  notesJson       Json?
+  fragranceFamily String?
+  collection      String?
+  pricePer5ml     Float?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([fragranceFamily])
+  @@index([collection])
+}
+
+model ExistingCombination {
+  id                    String   @id @default(cuid())
+  title                 String
+  normalizedTitle       String
+  // HYBRID | TRIBRID | QUADBRID
+  type                  String
+  componentProductsJson Json
+  // Order-independent key (see app/utils/combinationKey.js) so "A+B" and "B+A" are the same row.
+  componentKey          String   @unique
+  tagLine               String?
+  createdAt             DateTime @default(now())
+
+  @@index([type])
+}
+
+model FragranceRecommendation {
+  id                  String    @id @default(cuid())
+  conversationId      String
+  customerProfileJson Json
+  productsJson        Json
+  combinationType      String
+  scoreJson            Json
+  evidenceJson         Json
+  ratiosJson           Json
+  // pending | confirmed | expired
+  status               String    @default("pending")
+  createdAt            DateTime  @default(now())
+  confirmedAt          DateTime?
+  shopifyProductId     String?
+
+  @@index([conversationId])
+  @@index([status])
+}
+
+// Precomputed per Phase 12's performance requirement: a live groupBy of OrderHistory (936k rows)
+// scoped to a broad tier like country="United States" (87% of the table) measured ~12s per query
+// in testing — too slow for a live chat request. This table holds the same three tiers
+// analyzeCustomerProductCandidates needs (country, state, season — city is left live, since a
+// single city's real row count is always small enough to query directly) plus each product's
+// single most common classification, all computed once by scripts/build-region-summary.cjs
+// instead of re-aggregated on every request.
+model ProductRegionSummary {
+  id                    String   @id @default(cuid())
+  normalizedProductName String
+  // "country" | "state" | "season" | "classification_global"
+  scope                 String
+  // the country/state/season name, or (for classification_global) the classification string
+  scopeValue            String
+  orderCount            Int
+  // 0 for the classification_global scope, which isn't customer-scoped
+  distinctCustomerCount Int
+  repeatCustomerCount   Int
+  updatedAt             DateTime @updatedAt
+
+  @@unique([normalizedProductName, scope, scopeValue])
+  @@index([scope, scopeValue])
+}
+
+// Phase 1's CustomerFragranceProfile, stored separately from raw conversation history and
+// validated by the backend (app/services/customerProfile.server.js) — not left to the model's own
+// memory of which turn it's on. One row per conversation, durable across server restarts (mirrors
+// how Conversation/Message already persist history outside the in-memory CONVERSATIONS cache in
+// chat.jsx). profileJson holds the whole CustomerFragranceProfile object; re-saved as a whole on
+// every field update rather than split into individual columns, since it's always read/written as
+// one unit and never queried by individual field.
+model CustomerProfileState {
+  id             String   @id @default(cuid())
+  conversationId String   @unique
+  profileJson    Json
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([conversationId])
 }
