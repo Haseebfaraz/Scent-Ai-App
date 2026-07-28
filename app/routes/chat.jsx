@@ -21,17 +21,29 @@ import { getRecommendation, markRecommendationShopifyProduct } from "../services
 // note names like "Bergamot"/"Musk" before the customer's own preferences were even collected) is
 // gone too, per Fix 1's explicit removal — analyze_customer_product_candidates now does this
 // scoring deterministically instead.
-let cachedCatalogTitles = null;
-async function getCatalogTitlesLowercase() {
-  if (cachedCatalogTitles) return cachedCatalogTitles;
+// Word-boundary matching, not plain substring — fixes a real false positive: the catalog title
+// "Scent" was matching inside the ordinary word "scents" (and "Zest" inside "zesty", which the
+// copy-generation prompt already produces), flagging completely ordinary customer-facing text as
+// a leak. A genuine leaked title still matches in full — this only stops it matching as a
+// fragment of a longer, unrelated word.
+function escapeRegExp(str) {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+let cachedCatalogTitlePatterns = null;
+async function getCatalogTitlePatterns() {
+  if (cachedCatalogTitlePatterns) return cachedCatalogTitlePatterns;
   try {
     const rows = await prisma.fragranceProduct.findMany({ select: { title: true } });
-    cachedCatalogTitles = rows.map(r => r.title.toLowerCase()).filter(t => t.length >= 4);
+    cachedCatalogTitlePatterns = rows
+      .map(r => r.title.trim())
+      .filter(t => t.length >= 4)
+      .map(t => new RegExp(`\\b${escapeRegExp(t.toLowerCase())}\\b`, "i"));
   } catch (err) {
     console.error("Failed to load catalog titles for leak guard:", err.message);
-    cachedCatalogTitles = [];
+    cachedCatalogTitlePatterns = [];
   }
-  return cachedCatalogTitles;
+  return cachedCatalogTitlePatterns;
 }
 
 // ============================================================
@@ -300,9 +312,8 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
     // sees a tool result), so this is defense-in-depth against a hallucinated or otherwise
     // surfaced real title, checked against the real, cached catalog title list.
     const leakedId = turn < 5 && /\bc[a-z0-9]{20,}\b/i.test(finalText);
-    const catalogTitles = turn < 5 ? await getCatalogTitlesLowercase() : [];
-    const lowerReply = finalText.toLowerCase();
-    const leakedTitle = catalogTitles.some(t => lowerReply.includes(t));
+    const catalogTitlePatterns = turn < 5 ? await getCatalogTitlePatterns() : [];
+    const leakedTitle = catalogTitlePatterns.some(pattern => pattern.test(finalText));
     if (leakedId || leakedTitle) {
       messages.push({ role: "assistant", content: finalText });
       messages.push({
