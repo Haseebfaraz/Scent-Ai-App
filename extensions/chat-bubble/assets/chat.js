@@ -965,7 +965,10 @@
       CONFIDENCE_LABELS: { 'very high': 'Very High', high: 'High', medium: 'Medium', low: 'Low' },
 
       /**
-       * @param {Object} combo - one ProposedCombination, with recommendationId attached.
+       * @param {Object} combo - one customer-safe recommendation (recommendationId, type,
+       *   customerFacingName/Description/WhySuits/BestUse/WeatherSuitability/Strength/Risk,
+       *   confidence, evidenceScope, existsAlready). Fix 3: real source product titles/notes are
+       *   never sent to the frontend at all — only these customer-facing fields exist here.
        * @param {number} rank - 1-based display rank.
        * @returns {HTMLElement}
        */
@@ -975,55 +978,52 @@
 
         const badge = document.createElement('span');
         badge.classList.add('shop-ai-combo-badge', combo.existsAlready ? 'is-existing' : 'is-new');
-        badge.textContent = combo.existsAlready ? 'Existing verified combination' : 'New proposed combination';
+        badge.textContent = combo.existsAlready ? 'Existing verified combination' : 'New custom combination';
         card.appendChild(badge);
 
         const title = document.createElement('h5');
         title.classList.add('shop-ai-combo-title');
-        title.textContent = `#${rank} · ${combo.type || ''}`;
+        title.textContent = `#${rank} · ${combo.customerFacingName || combo.type || ''}`;
         card.appendChild(title);
 
-        const products = Array.isArray(combo.products) ? combo.products : [];
-        const productNames = products.map(p => p.title).filter(Boolean);
+        const typeLine = document.createElement('p');
+        typeLine.classList.add('shop-ai-combo-type');
+        typeLine.textContent = combo.type || '';
+        card.appendChild(typeLine);
 
-        const productsLine = document.createElement('p');
-        productsLine.classList.add('shop-ai-combo-products');
-        productsLine.textContent = productNames.join(' + ');
-        card.appendChild(productsLine);
-
-        if (combo.mainDirection) {
-          const direction = document.createElement('p');
-          direction.classList.add('shop-ai-combo-direction');
-          direction.textContent = combo.mainDirection;
-          card.appendChild(direction);
+        if (combo.customerFacingDescription) {
+          const character = document.createElement('p');
+          character.classList.add('shop-ai-combo-character');
+          character.textContent = combo.customerFacingDescription;
+          card.appendChild(character);
         }
 
-        // Key notes per product — up to 4 real notes each, exactly as the backend returned them.
-        const notesLines = products
-          .filter(p => Array.isArray(p.notes) && p.notes.length)
-          .map(p => `${p.title}: ${p.notes.slice(0, 4).join(', ')}`);
-        if (notesLines.length) {
-          const notes = document.createElement('p');
-          notes.classList.add('shop-ai-combo-notes');
-          notes.textContent = notesLines.join(' • ');
-          card.appendChild(notes);
-        }
-
-        const whyParts = [...(combo.customerFitReasons || []), ...(combo.compatibilityReasons || [])].slice(0, 3);
-        if (whyParts.length) {
+        if (combo.customerFacingWhySuits) {
           const why = document.createElement('p');
           why.classList.add('shop-ai-combo-why');
-          why.textContent = whyParts.join(' ');
+          why.textContent = combo.customerFacingWhySuits;
           card.appendChild(why);
         }
 
-        if (Array.isArray(combo.recommendedRatio) && combo.recommendedRatio.length) {
-          const ratio = document.createElement('p');
-          ratio.classList.add('shop-ai-combo-ratio');
-          ratio.textContent = 'Suggested ratio: ' + combo.recommendedRatio
-            .map(r => `${r.productTitle} ${Math.round(r.ratioPercent)}% (${r.milliliters}ml)`)
-            .join(', ');
-          card.appendChild(ratio);
+        if (combo.customerFacingBestUse) {
+          const bestUse = document.createElement('p');
+          bestUse.classList.add('shop-ai-combo-best-use');
+          bestUse.textContent = combo.customerFacingBestUse;
+          card.appendChild(bestUse);
+        }
+
+        if (combo.customerFacingWeatherSuitability) {
+          const weather = document.createElement('p');
+          weather.classList.add('shop-ai-combo-weather');
+          weather.textContent = combo.customerFacingWeatherSuitability;
+          card.appendChild(weather);
+        }
+
+        if (combo.customerFacingStrength) {
+          const strength = document.createElement('p');
+          strength.classList.add('shop-ai-combo-strength');
+          strength.textContent = `Strength: ${combo.customerFacingStrength}`;
+          card.appendChild(strength);
         }
 
         if (combo.confidence) {
@@ -1034,23 +1034,25 @@
           card.appendChild(confidence);
         }
 
-        if (Array.isArray(combo.risks) && combo.risks.length) {
+        if (combo.customerFacingRisk) {
           const risk = document.createElement('p');
           risk.classList.add('shop-ai-combo-risk');
-          risk.textContent = '⚠ ' + combo.risks.join(' ');
+          risk.textContent = '⚠ ' + combo.customerFacingRisk;
           card.appendChild(risk);
         }
 
         const actions = document.createElement('div');
         actions.classList.add('shop-ai-combo-actions');
 
-        const productList = productNames.join(' and ');
-
+        // Fix 6 — sent as plain rank-based text ("Option N"), never a reconstructed product list
+        // (the frontend never has the real product names to reconstruct from anyway). The
+        // backend's select_recommendation tool resolves this deterministically against the
+        // currently active recommendation list, by rank.
         const selectButton = document.createElement('button');
         selectButton.classList.add('shop-ai-combo-select');
         selectButton.textContent = 'Select';
         selectButton.addEventListener('click', () => {
-          this.sendPrefilled(`Let's go with the combination of ${productList}.`, true);
+          this.sendPrefilled(`Option ${rank} looks great — let's go with that one.`, true);
         });
         actions.appendChild(selectButton);
 
@@ -1058,7 +1060,7 @@
         refineButton.classList.add('shop-ai-combo-refine');
         refineButton.textContent = 'Refine';
         refineButton.addEventListener('click', () => {
-          this.sendPrefilled(`For the ${productList} combination, I'd like to `, false);
+          this.sendPrefilled(`For option ${rank}, I'd like to `, false);
         });
         actions.appendChild(refineButton);
 
@@ -1066,7 +1068,7 @@
         createButton.classList.add('shop-ai-combo-create');
         createButton.textContent = 'Create My Fragrance';
         createButton.addEventListener('click', () => {
-          this.sendPrefilled(`Yes, please create the combination of ${productList} for me.`, true);
+          this.sendPrefilled(`Yes, please create option ${rank} for me.`, true);
         });
         actions.appendChild(createButton);
 

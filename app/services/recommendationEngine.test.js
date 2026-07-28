@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { computeRatios, assignRoles, generateNewProductCombinations } from "./recommendationEngine.server.js";
+import {
+  computeRatios, assignRoles, generateNewProductCombinations,
+  validateCombinationShape, computeEvidenceScope,
+} from "./recommendationEngine.server.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
@@ -98,9 +101,97 @@ describe("generateNewProductCombinations (real data)", () => {
 
     const expectedCount = { HYBRID: 2, TRIBRID: 3, QUADBRID: 4 };
     for (const combo of combinations) {
-      expect(combo.products.length).toBe(expectedCount[combo.type]);
+      expect(combo.internalProducts.length).toBe(expectedCount[combo.type]);
       const pctSum = combo.recommendedRatio.reduce((s, r) => s + r.ratioPercent, 0);
       expect(pctSum).toBe(100);
     }
+  });
+
+  // Fix 3 — real source products/notes must never appear on customer-facing fields, and every
+  // customer-facing field must actually be populated (never left for the model to invent).
+  it("never exposes a real source product title in any customerFacing* field", async () => {
+    const profile = {
+      city: "Los Angeles", stateRegion: "California", country: "United States", season: "Summer",
+      likes: ["Fruity", "Sweet"], dislikes: [], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 5 });
+    expect(combinations.length).toBeGreaterThan(0);
+    for (const combo of combinations) {
+      const realTitles = combo.internalProducts.map((p) => p.title);
+      const customerFacingText = [
+        combo.customerFacingName, combo.customerFacingDescription, combo.customerFacingWhySuits,
+        combo.customerFacingBestUse, combo.customerFacingWeatherSuitability, combo.customerFacingRisk,
+      ].filter(Boolean).join(" ");
+      for (const title of realTitles) {
+        expect(customerFacingText).not.toContain(title);
+      }
+      expect(combo.customerFacingName).toBeTruthy();
+      expect(combo.customerFacingDescription).toBeTruthy();
+    }
+  });
+});
+
+describe("validateCombinationShape (Fix 4)", () => {
+  const p = (title) => ({ title, notes: ["x"] });
+
+  it("accepts a Hybrid with exactly 2 distinct products", () => {
+    expect(() =>
+      validateCombinationShape({ type: "HYBRID", products: [p("A"), p("B")], recommendedRatio: [{ ratioPercent: 50 }, { ratioPercent: 50 }] }),
+    ).not.toThrow();
+  });
+
+  it("rejects a single product presented as a combination (the real 'Casino Elixir — 100%' bug)", () => {
+    expect(() => validateCombinationShape({ type: "HYBRID", products: [p("A")], recommendedRatio: [{ ratioPercent: 100 }] })).toThrow(
+      /exactly 2 distinct/,
+    );
+  });
+
+  it("rejects a duplicate product presented as a Hybrid", () => {
+    expect(() => validateCombinationShape({ type: "HYBRID", products: [p("A"), p("A")] })).toThrow(/exactly 2 distinct/);
+  });
+
+  it("rejects a Tribrid without exactly 3 products", () => {
+    expect(() => validateCombinationShape({ type: "TRIBRID", products: [p("A"), p("B")] })).toThrow(/exactly 3 distinct/);
+  });
+
+  it("rejects a Quadbrid without exactly 4 products", () => {
+    expect(() => validateCombinationShape({ type: "QUADBRID", products: [p("A"), p("B"), p("C")] })).toThrow(/exactly 4 distinct/);
+  });
+
+  it("rejects a 100%-one-product ratio even with the right product count", () => {
+    expect(() =>
+      validateCombinationShape({ type: "HYBRID", products: [p("A"), p("B")], recommendedRatio: [{ ratioPercent: 100 }, { ratioPercent: 0 }] }),
+    ).toThrow(/100%/);
+  });
+
+  it("rejects ratios that don't sum to 100", () => {
+    expect(() =>
+      validateCombinationShape({ type: "HYBRID", products: [p("A"), p("B")], recommendedRatio: [{ ratioPercent: 40 }, { ratioPercent: 40 }] }),
+    ).toThrow(/sum to 100/);
+  });
+});
+
+describe("computeEvidenceScope (Fix 9)", () => {
+  const zeroEvidence = { sameCityOrders: 0, sameStateOrders: 0, sameCountryOrders: 0, sameSeasonOrders: 0, distinctSimilarCustomers: 0, repeatPurchaseCustomers: 0 };
+
+  it("never claims city/state/country evidence when the location isn't verified — even with real counts", () => {
+    const anchor = { ...zeroEvidence, sameCityOrders: 50, sameCountryOrders: 500 };
+    expect(computeEvidenceScope(anchor, { locationVerified: false })).not.toBe("city");
+    expect(computeEvidenceScope(anchor, { locationVerified: false })).not.toBe("country");
+  });
+
+  it("returns 'city' when the city has real orders and the location is verified", () => {
+    const anchor = { ...zeroEvidence, sameCityOrders: 12 };
+    expect(computeEvidenceScope(anchor, { locationVerified: true })).toBe("city");
+  });
+
+  it("falls back to 'season_global' when there's no regional evidence at all", () => {
+    const anchor = { ...zeroEvidence, sameSeasonOrders: 40 };
+    expect(computeEvidenceScope(anchor, { locationVerified: true })).toBe("season_global");
+  });
+
+  it("falls back to 'limited' when there's no real evidence of any kind", () => {
+    expect(computeEvidenceScope(zeroEvidence, { locationVerified: true })).toBe("limited");
   });
 });

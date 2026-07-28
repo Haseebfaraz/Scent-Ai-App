@@ -9,6 +9,7 @@ import {
   emptyProfile,
   getCustomerProfile,
   saveCustomerProfileField,
+  saveCustomerProfileFields,
   getMissingRequiredFields,
   isProfileReadyForAnalysis,
   VALID_SEASONS,
@@ -23,6 +24,27 @@ import {
 } from "../services/combinationAnalysis.server.js";
 import { generateNewProductCombinations } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation, getRecommendation } from "../services/recommendationConfirmation.server.js";
+import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
+import { describeWeatherSimple, hasSeasonWeatherConflict } from "../utils/weatherSeason.js";
+import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
+
+// Fix 3 — strips every internal field (real source product titles/notes, raw scores/reasons) from
+// a freshly-generated in-memory combination before it is ever handed to the model's own narration
+// or an SSE customer payload. Mirrors recommendationConfirmation.server.js's
+// toCustomerSafeRecommendation, but operates on the in-memory generator output (which already has
+// the customerFacing* fields flattened, not nested under customerFacingJson).
+function toCustomerSafeCombo(withIdCombo) {
+  const {
+    recommendationId, type, existsAlready, evidenceScope, confidence,
+    customerFacingName, customerFacingDescription, customerFacingWhySuits,
+    customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
+  } = withIdCombo;
+  return {
+    recommendationId, type, existsAlready, evidenceScope, confidence,
+    customerFacingName, customerFacingDescription, customerFacingWhySuits,
+    customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
+  };
+}
 
 // Ephemeral, regenerable per-conversation scratch space — NOT the durable CustomerProfileState.
 // Holds the last analyze_customer_product_candidates/generate_new_product_combinations results so
@@ -72,6 +94,9 @@ const GenerateCombinationsArgs = z.object({
 });
 const RefineArgs = z.object({ feedback: z.string().min(1) });
 const RecommendationIdArgs = z.object({ recommendationId: z.string().min(1) });
+const VerifyLocationArgs = z.object({ cityText: z.string().min(1).max(200) });
+const ResolveSeasonArgs = z.object({ choice: z.enum(["keep_stated", "use_weather"]) });
+const SelectRecommendationArgs = z.object({ selectionText: z.string().min(1).max(200) });
 const CreateProductArgs = z.object({
   recommendationId: z.string().min(1),
   customName: z.string().min(1).max(200),
@@ -171,6 +196,50 @@ export const FRAGRANCE_AGENT_TOOLS = [
           limit: { type: "number", description: "Max results, default 5." },
         },
         required: ["productTitle"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "verify_customer_location",
+      description: "Verify a city the customer typed against real order-history data and real geocoding — NEVER accept a city as real just because it sounds plausible (e.g. a fictional place). Call this before saving city/country to the profile. If needsClarification is true, ask the customer which real place they mean from the candidates. If verified is false, tell the customer you couldn't confidently match that location and ask for a real city.",
+      parameters: {
+        type: "object",
+        properties: { cityText: { type: "string", description: "The raw city text the customer gave." } },
+        required: ["cityText"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_live_weather",
+      description: "Fetch real current weather for the customer's already-VERIFIED city (requires verify_customer_location to have succeeded first). Returns simple weather words (never exact temperatures) and whether it conflicts with the customer's stated season. Only call this when there's a real reason to — a stated season/weather mismatch to check, the customer asking about weather, or it would materially change the recommendation. Do not call this automatically every conversation.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "resolve_season_preference",
+      description: "Call this exactly once, only after get_live_weather reported a real conflict with the customer's stated season, and only after the customer has answered which direction they want. choice='keep_stated' keeps their stated season as the style basis; choice='use_weather' bases the recommendation on today's real conditions instead. Never call this again once already resolved for this conversation.",
+      parameters: {
+        type: "object",
+        properties: { choice: { type: "string", enum: ["keep_stated", "use_weather"], description: "Which direction the customer picked." } },
+        required: ["choice"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "select_recommendation",
+      description: "Call this whenever the customer picks one of the currently shown recommendations, in whatever words they use ('option 1', 'opt 1 is good', 'the first one', 'number 2', 'I want the last one', 'create this'). Pass their message text through as-is — never try to figure out the recommendationId yourself from the product description. This deterministically resolves it against the currently active recommendation list.",
+      parameters: {
+        type: "object",
+        properties: { selectionText: { type: "string", description: "The customer's own selection message, verbatim." } },
+        required: ["selectionText"],
       },
     },
   },
@@ -295,6 +364,15 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
       case "save_customer_profile_field": {
         const parsed = SaveProfileFieldArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
+        // Fix 5 — a trusted identity (authenticated Shopify account, or already saved on the
+        // profile) can never be overwritten by a model-supplied value — the model doesn't get to
+        // "correct" what the backend already knows to be true.
+        if (parsed.data.field === "name" && context.customerName) {
+          return ok(`Name is already known and trusted (${context.customerName}) — no need to save or ask again.`);
+        }
+        if (parsed.data.field === "email" && context.customerEmail) {
+          return ok(`Email is already known and trusted — no need to save or ask again.`);
+        }
         const fieldSchema = PROFILE_FIELD_SCHEMAS[parsed.data.field];
         const valueParsed = fieldSchema.safeParse(parsed.data.value);
         if (!valueParsed.success) {
@@ -313,6 +391,81 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         return ok(
           `Current profile: ${JSON.stringify(profile)}\nMissing required fields: ${getMissingRequiredFields(profile).join(", ") || "none"}.`,
         );
+      }
+
+      case "verify_customer_location": {
+        const parsed = VerifyLocationArgs.safeParse(args);
+        if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
+        const result = await verifyCity(parsed.data.cityText);
+        if (result.needsClarification) {
+          return ok(`Multiple real places match "${parsed.data.cityText}": ${JSON.stringify(result.candidates)}. Ask the customer which one they mean.`);
+        }
+        if (!result.verified) {
+          return ok(`I couldn't confidently match that location. Which real city are you currently in?`);
+        }
+        const profile = await saveCustomerProfileFields(conversationId, {
+          city: result.city,
+          country: result.country || (await getCustomerProfile(conversationId)).country,
+          locationVerified: true,
+          locationSource: result.source,
+        });
+        return ok(`Verified "${result.city}" (${result.country || "country unknown"}) via ${result.source}. Saved to profile.`, {
+          type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile),
+        });
+      }
+
+      case "get_live_weather": {
+        const profile = await getCustomerProfile(conversationId);
+        if (!profile.locationVerified || !profile.city) {
+          return fail("the customer's city isn't verified yet — call verify_customer_location first.");
+        }
+        const weather = await fetchCurrentWeather(profile.city);
+        if (!weather) return fail("couldn't fetch live weather right now — don't mention weather to the customer, just proceed with their stated preferences.");
+        const { words, summary } = describeWeatherSimple(weather.tempF, weather.weatherCode);
+        const tempC = Math.round(((weather.tempF - 32) * 5) / 9);
+        const conflict = hasSeasonWeatherConflict(profile.season, words);
+        const updated = await saveCustomerProfileFields(conversationId, {
+          currentWeather: { condition: summary, temperatureC: tempC, temperatureF: weather.tempF, fetchedAt: new Date().toISOString() },
+          weatherLocation: { city: profile.city, country: profile.country, verified: true },
+        });
+        const conflictAlreadyResolved = updated.seasonConflictResolved;
+        return ok(
+          `Current weather in ${profile.city}: ${summary}. ` +
+            (conflict && !conflictAlreadyResolved
+              ? `This conflicts with the customer's stated ${profile.season}. Ask them ONCE whether they want the ${profile.season}-style direction or a direction based on today's actual conditions, then call resolve_season_preference with their answer.`
+              : `No unresolved conflict with the stated season — do not ask about it again.`),
+          { type: "weather_progress", currentWeather: updated.currentWeather, conflict: conflict && !conflictAlreadyResolved },
+        );
+      }
+
+      case "resolve_season_preference": {
+        const parsed = ResolveSeasonArgs.safeParse(args);
+        if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
+        const profile = await saveCustomerProfileFields(conversationId, {
+          seasonSource: parsed.data.choice === "keep_stated" ? "customer_confirmed_style" : "weather_confirmed",
+          seasonConflictResolved: true,
+        });
+        return ok(`Resolved. Season stays "${profile.season}", basis: ${profile.seasonSource}. Never ask about this conflict again.`, {
+          type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile),
+        });
+      }
+
+      case "select_recommendation": {
+        const parsed = SelectRecommendationArgs.safeParse(args);
+        if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
+        const scratch = getScratch(conversationId);
+        const activeList = scratch.lastCombinations || [];
+        const result = parseRecommendationSelection(parsed.data.selectionText, activeList);
+        if (result.noMatch) {
+          return fail("couldn't tell which recommendation the customer means — ask one short clarifying question (e.g. 'Do you mean option 1, 2, or 3?').");
+        }
+        if (result.ambiguous) {
+          return fail("the selection was ambiguous — ask the customer to confirm which option number they mean.");
+        }
+        const profile = await saveCustomerProfileFields(conversationId, { selectedRecommendationId: result.recommendationId });
+        return ok(`Selected recommendationId ${result.recommendationId}. This is now the customer's chosen recommendation — never substitute a different one.`, {
+          type: "recommendation_selected", recommendationId: result.recommendationId, profile,
+        });
       }
 
       case "analyze_customer_product_candidates": {
@@ -377,7 +530,6 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           maximumResults: parsed.data.maximumResults,
           allowedTypes: parsed.data.allowedTypes,
         });
-        scratch.lastCombinations = combinations;
         // Persist every proposal now (not just the one the customer eventually confirms) so a
         // later confirm_product_combination call always has a real, immutable, re-verifiable
         // record to point at by ID — never a free-form model reconstruction.
@@ -385,15 +537,21 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           combinations.map((c) => saveRecommendation({ conversationId, profile, combination: c })),
         );
         const withIds = combinations.map((c, i) => ({ recommendationId: recommendationIds[i], ...c }));
+        // Stored WITH recommendationId attached — this is the "currently active recommendation
+        // list" select_recommendation resolves against (Fix 6).
+        scratch.lastCombinations = withIds;
         if (!withIds.length) {
           return ok("No genuinely new combinations could be generated from the current candidates — every viable pairing already exists, or none had a clear complementary role.", {
             type: "combination_recommendations",
             combinations: [],
           });
         }
+        // Fix 3 — never hands the model (or the SSE payload) internalProducts/real source titles;
+        // only the customer-safe fields the model needs to narrate the recommendation.
+        const customerSafe = withIds.map(toCustomerSafeCombo);
         return ok(
-          `Generated new combination proposals (each has a recommendationId to use later with confirm_product_combination): ${JSON.stringify(withIds)}`,
-          { type: "combination_recommendations", combinations: withIds },
+          `Generated new combination proposals (each has a recommendationId — use it with select_recommendation/confirm_product_combination, never re-derive it): ${JSON.stringify(customerSafe)}`,
+          { type: "combination_recommendations", combinations: customerSafe },
         );
       }
 
@@ -419,29 +577,44 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           candidateProducts: scratch.candidateProducts,
           allowedTypes: adjustments.allowedTypes,
         });
-        scratch.lastCombinations = combinations;
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),
         );
         const withIds = combinations.map((c, i) => ({ recommendationId: recommendationIds[i], ...c }));
+        scratch.lastCombinations = withIds;
+        const customerSafe = withIds.map(toCustomerSafeCombo);
         return ok(
-          `Refined combination proposals based on "${parsed.data.feedback}": ${JSON.stringify(withIds)}`,
-          { type: "recommendation_refined", combinations: withIds },
+          `Refined combination proposals based on "${parsed.data.feedback}": ${JSON.stringify(customerSafe)}`,
+          { type: "recommendation_refined", combinations: customerSafe },
         );
       }
 
       case "confirm_product_combination": {
         const parsed = RecommendationIdArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
+        // Fix 7 — the backend-stored selectedRecommendationId (set only by select_recommendation's
+        // deterministic parser) is the source of truth, never the model's own argument. A retry
+        // after a technical failure must land on the exact same recommendation, not a different one
+        // the model might otherwise reconstruct.
+        const profile = await getCustomerProfile(conversationId);
+        const recommendationId = profile.selectedRecommendationId || parsed.data.recommendationId;
+        if (profile.selectedRecommendationId && parsed.data.recommendationId !== profile.selectedRecommendationId) {
+          return fail(`the customer's selected recommendation is ${profile.selectedRecommendationId} — use that one, never a different id.`);
+        }
         const result = await confirmRecommendation({
-          recommendationId: parsed.data.recommendationId,
+          recommendationId,
           customerName: context.customerName,
           customerEmail: context.customerEmail,
         });
-        if (!result.ok) return fail(result.reason);
+        if (!result.ok) {
+          // Fix 7 — a confirmation failure (technical issue, expiry, etc.) never clears the
+          // customer's selection and never triggers a new recommendation; the model is told to
+          // retry the SAME id, never substitute another.
+          return fail(`${result.reason} Keep the customer's selected recommendation unchanged — do not propose a different one. You may retry confirm_product_combination with the same recommendationId.`);
+        }
         return ok(
-          `Confirmed. recommendationId ${parsed.data.recommendationId} is ready — call create_shopify_custom_combination_product next.`,
-          { type: "recommendation_confirmed", recommendationId: parsed.data.recommendationId },
+          `Confirmed. recommendationId ${recommendationId} is ready — call create_shopify_custom_combination_product next.`,
+          { type: "recommendation_confirmed", recommendationId },
         );
       }
 

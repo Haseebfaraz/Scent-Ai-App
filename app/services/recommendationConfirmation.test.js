@@ -33,7 +33,7 @@ async function baseCombination() {
   return {
     type: "HYBRID",
     canonicalKey: `vitest-fake-key-${Date.now()}-${Math.random()}`,
-    products: [
+    internalProducts: [
       { title: realProduct.title, notes: realProduct.notesJson, fragranceFamily: null, contribution: "Freshness" },
       { title: realProduct2.title, notes: realProduct2.notesJson, fragranceFamily: null, contribution: "Sweetness" },
     ],
@@ -42,8 +42,11 @@ async function baseCombination() {
       { productTitle: realProduct2.title, parts: 1, ratioPercent: 50, milliliters: 17 },
     ],
     preferenceScore: 5, seasonalScore: 4, historyScore: 5, compatibilityScore: 5, balanceScore: 10,
-    conflictPenalty: 0, finalScore: 29, confidence: "high", mainDirection: "test",
-    compatibilityReasons: [], customerFitReasons: [], historicalEvidence: {}, analogousExistingCombinations: [], risks: [],
+    conflictPenalty: 0, finalScore: 29, confidence: "high", evidenceScope: "limited",
+    compatibilityReasons: [], historicalEvidence: {}, analogousExistingCombinations: [], risks: [],
+    customerFacingName: "Test Blend", customerFacingDescription: "test", customerFacingWhySuits: "test",
+    customerFacingBestUse: "test", customerFacingWeatherSuitability: "test", customerFacingStrength: "moderate",
+    customerFacingRisk: null,
   };
 }
 
@@ -86,13 +89,34 @@ describe("confirmRecommendation", () => {
     expect(result.reason).toMatch(/Customer name and email/);
   });
 
-  it("rejects when ratios don't sum to 100%", async () => {
+  // Fix 4 — saveRecommendation itself now runs the same hard shape gate as generation time
+  // (defense in depth): a bad-ratio combination can never even be PERSISTED, let alone reach
+  // confirmation.
+  it("saveRecommendation itself rejects ratios that don't sum to 100% (Fix 4 defense-in-depth)", async () => {
     const combination = await baseCombination();
     combination.recommendedRatio = combination.recommendedRatio.map((r) => ({ ...r, ratioPercent: 40 })); // 80% total
-    const id = await saveRecommendation({ conversationId: "vitest-confirm-badratio-" + Date.now(), profile: { dislikes: [] }, combination });
-    createdRecommendationIds.push(id);
+    await expect(
+      saveRecommendation({ conversationId: "vitest-confirm-badratio-" + Date.now(), profile: { dislikes: [] }, combination }),
+    ).rejects.toThrow(/sum to 100/);
+  });
 
-    const result = await confirmRecommendation({ recommendationId: id, customerName: "Test Customer", customerEmail: "test@example.com" });
+  it("confirmRecommendation independently re-checks ratios even for a row that bypassed saveRecommendation", async () => {
+    const combination = await baseCombination();
+    const record = await prisma.fragranceRecommendation.create({
+      data: {
+        conversationId: "vitest-confirm-badratio-direct-" + Date.now(),
+        customerProfileJson: { dislikes: [] },
+        productsJson: combination.internalProducts,
+        combinationType: combination.type,
+        scoreJson: {},
+        evidenceJson: { canonicalKey: combination.canonicalKey },
+        ratiosJson: combination.recommendedRatio.map((r) => ({ ...r, ratioPercent: 40 })), // 80% total
+        status: "pending",
+      },
+    });
+    createdRecommendationIds.push(record.id);
+
+    const result = await confirmRecommendation({ recommendationId: record.id, customerName: "Test Customer", customerEmail: "test@example.com" });
     expect(result.ok).toBe(false);
     expect(result.reason).toMatch(/Ratios sum to/);
   });
@@ -103,7 +127,7 @@ describe("confirmRecommendation", () => {
       data: {
         conversationId: "vitest-confirm-expired-" + Date.now(),
         customerProfileJson: { dislikes: [] },
-        productsJson: combination.products,
+        productsJson: combination.internalProducts,
         combinationType: combination.type,
         scoreJson: {},
         evidenceJson: { canonicalKey: combination.canonicalKey },
@@ -125,7 +149,7 @@ describe("confirmRecommendation", () => {
   it("rejects when a component product has a high-severity conflict with the customer's dislikes", async () => {
     const combination = await baseCombination();
     // Force a real, unambiguous high conflict: 3+ strongHeavy notes on one component.
-    combination.products[0].notes = ["Oud", "Leather", "Tobacco", "Resin"];
+    combination.internalProducts[0].notes = ["Oud", "Leather", "Tobacco", "Resin"];
     const id = await saveRecommendation({
       conversationId: "vitest-confirm-conflict-" + Date.now(),
       profile: { dislikes: ["Strong"] },

@@ -6,6 +6,7 @@ import prisma from "../db.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
 import { classifyDislikeConflict } from "../utils/fragranceScoring.js";
 import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { validateCombinationShape } from "./recommendationEngine.server.js";
 
 const COMPONENT_COUNT_BY_TYPE = { HYBRID: 2, TRIBRID: 3, QUADBRID: 4 };
 // No exact expiry window is specified in the spec beyond "has not expired" — 24h is a deliberate,
@@ -18,11 +19,20 @@ const RECOMMENDATION_EXPIRY_MS = 24 * 60 * 60 * 1000;
  * immutable, confirmable record.
  */
 export async function saveRecommendation({ conversationId, profile, combination }) {
+  // Fix 4 — the same hard shape gate the engine already applies at generation time, re-run here as
+  // defense in depth: a recommendation can never be PERSISTED with the wrong product count, a
+  // duplicate product, or a 100%-one-product ratio, regardless of what produced the object.
+  validateCombinationShape({
+    type: combination.type,
+    products: combination.internalProducts,
+    recommendedRatio: combination.recommendedRatio,
+  });
+
   const record = await prisma.fragranceRecommendation.create({
     data: {
       conversationId,
       customerProfileJson: profile,
-      productsJson: combination.products,
+      productsJson: combination.internalProducts,
       combinationType: combination.type,
       scoreJson: {
         preferenceScore: combination.preferenceScore,
@@ -38,16 +48,38 @@ export async function saveRecommendation({ conversationId, profile, combination 
         historicalEvidence: combination.historicalEvidence,
         analogousExistingCombinations: combination.analogousExistingCombinations,
         compatibilityReasons: combination.compatibilityReasons,
-        customerFitReasons: combination.customerFitReasons,
         risks: combination.risks,
-        mainDirection: combination.mainDirection,
         canonicalKey: combination.canonicalKey,
       },
       ratiosJson: combination.recommendedRatio,
+      evidenceScope: combination.evidenceScope,
+      customerFacingJson: {
+        customerFacingName: combination.customerFacingName,
+        customerFacingDescription: combination.customerFacingDescription,
+        customerFacingWhySuits: combination.customerFacingWhySuits,
+        customerFacingBestUse: combination.customerFacingBestUse,
+        customerFacingWeatherSuitability: combination.customerFacingWeatherSuitability,
+        customerFacingStrength: combination.customerFacingStrength,
+        customerFacingRisk: combination.customerFacingRisk,
+      },
       status: "pending",
     },
   });
   return record.id;
+}
+
+// Fix 3 — the only shape any customer-facing surface (SSE payload, recommendation card, the
+// model's own narration) may ever read. Never includes productsJson/evidenceJson (real source
+// titles/notes) or scoreJson's raw numbers.
+export function toCustomerSafeRecommendation(record) {
+  return {
+    recommendationId: record.id,
+    type: record.combinationType,
+    existsAlready: false,
+    evidenceScope: record.evidenceScope,
+    confidence: record.scoreJson?.confidence,
+    ...record.customerFacingJson,
+  };
 }
 
 export async function getRecommendation(recommendationId) {

@@ -30,19 +30,27 @@ describe("getMissingRequiredFields / isProfileReadyForAnalysis", () => {
   });
 
   it("is satisfied once all required fields are present", () => {
-    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", season: "Summer", likes: ["Fruity"] };
+    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", season: "Summer", likes: ["Fruity"], locationVerified: true };
     expect(getMissingRequiredFields(profile)).toEqual([]);
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
   it("accepts preferredStyle in place of likes", () => {
-    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", season: "Summer", preferredStyle: "warm and woody" };
+    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", season: "Summer", preferredStyle: "warm and woody", locationVerified: true };
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
   it("dislikes being empty never blocks readiness", () => {
-    const profile = { ...emptyProfile(), city: "A", country: "B", season: "Summer", likes: ["Fruity"], dislikes: [] };
+    const profile = { ...emptyProfile(), city: "A", country: "B", season: "Summer", likes: ["Fruity"], dislikes: [], locationVerified: true };
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
+  });
+
+  // Fix 8 — a city string alone (however plausible, e.g. a fictional "Vice City") must never
+  // satisfy readiness; only a deterministically VERIFIED city can.
+  it("a city that hasn't been verified still blocks readiness, even with everything else present", () => {
+    const profile = { ...emptyProfile(), city: "Vice City", country: "United States", season: "Summer", likes: ["Fruity"], locationVerified: false };
+    expect(getMissingRequiredFields(profile)).toEqual(["city"]);
+    expect(isProfileReadyForAnalysis(profile)).toBe(false);
   });
 });
 

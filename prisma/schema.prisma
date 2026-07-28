@@ -163,11 +163,22 @@ model FragranceRecommendation {
   id                  String    @id @default(cuid())
   conversationId      String
   customerProfileJson Json
+  // Real source product titles/notes/roles — internal only (Shopify creation, backend analysis).
+  // Fix 3: never read directly by the frontend or the model's customer-facing narration; those
+  // consumers use the customerFacingJson fields below instead.
   productsJson        Json
   combinationType      String
   scoreJson            Json
   evidenceJson         Json
   ratiosJson           Json
+  // Fix 9: the deterministic tier of real historical evidence backing this recommendation —
+  // "city"|"state"|"country"|"season_global"|"global"|"limited". Persisted (not just computed at
+  // generation time) so a later retry/rehydration renders the exact same wording tier.
+  evidenceScope        String?
+  // Fix 3: customerFacingName/Description/WhySuits/BestUse/WeatherSuitability/Strength/Risk —
+  // the only fields any customer-facing surface (SSE payload, recommendation card, chat text) may
+  // ever read from this record.
+  customerFacingJson   Json?
   // pending | confirmed | expired
   status               String    @default("pending")
   createdAt            DateTime  @default(now())
