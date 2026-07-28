@@ -47,7 +47,13 @@ export async function getProductNotesAndCombinationStatus(productTitle) {
     supportingNotes: notes.slice(MAIN_NOTE_COUNT),
     fragranceFamily: product.fragranceFamily,
     collection: product.collection,
-    isSingleInspiration: product.collection === "Inspiration",
+    // Real, stored flag set only by the "Inspirations" sheet import (scripts/import-hybrid-
+    // catalog.cjs) — replaces the earlier collection-based guess, since a product's Collection
+    // value alone doesn't confirm the Inspirations sheet actually covers it.
+    isSingleInspiration: product.isSingleInspiration,
+    tagLine: product.tagLine,
+    inspirationName: product.inspirationName,
+    inspirationBrand: product.inspirationBrand,
     isHybrid: asFinishedCombination?.type === "HYBRID",
     isTribrid: asFinishedCombination?.type === "TRIBRID",
     isQuadbrid: asFinishedCombination?.type === "QUADBRID",

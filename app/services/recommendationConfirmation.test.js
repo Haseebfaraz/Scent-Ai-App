@@ -15,14 +15,19 @@ afterEach(async () => {
 // A minimal, real ProposedCombination-shaped object using two products actually present in the
 // FragranceProduct catalog ("The Opera" was confirmed present during Stage A ingestion) — the
 // component-existence check in confirmRecommendation queries the real catalog, so a fake title
-// would always fail for the wrong reason.
+// would always fail for the wrong reason. Explicitly excludes titles containing "vitest" — other
+// test files (e.g. scripts/import-inspirations.test.js) create and delete their own throwaway
+// FragranceProduct rows using that marker, and Vitest runs test files concurrently by default;
+// without this exclusion, findFirst() here could pick up one of those rows and then find it
+// deleted out from under it moments later by the other file's own cleanup — a real, verified
+// cross-test-file race, not a bug in confirmRecommendation itself.
 async function baseCombination() {
   const realProduct = await prisma.fragranceProduct.findFirst({
-    where: { notesJson: { not: null } },
+    where: { notesJson: { not: null }, NOT: { title: { contains: "vitest" } } },
     select: { title: true, notesJson: true },
   });
   const realProduct2 = await prisma.fragranceProduct.findFirst({
-    where: { notesJson: { not: null }, NOT: { title: realProduct.title } },
+    where: { notesJson: { not: null }, NOT: [{ title: realProduct.title }, { title: { contains: "vitest" } }] },
     select: { title: true, notesJson: true },
   });
   return {

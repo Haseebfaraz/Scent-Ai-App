@@ -129,6 +129,14 @@ model FragranceProduct {
   fragranceFamily String?
   collection      String?
   pricePer5ml     Float?
+  // Populated from the "Inspirations" sheet in data/Notes-Extraction-Separated-hybird.xlsx
+  // (scripts/import-hybrid-catalog.cjs) — matched onto an existing row by normalized title/handle,
+  // never used to create a new product. Null for products the Inspirations sheet doesn't cover
+  // (e.g. Hybrid/Tribrid/Quadbrid finished products, which aren't themselves single inspirations).
+  tagLine             String?
+  inspirationName     String?
+  inspirationBrand    String?
+  isSingleInspiration Boolean  @default(false)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
 
