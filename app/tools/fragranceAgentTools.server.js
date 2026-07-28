@@ -25,8 +25,19 @@ import {
 import { generateNewProductCombinations } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation, getRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
-import { describeWeatherSimple, hasSeasonWeatherConflict } from "../utils/weatherSeason.js";
+import {
+  describeWeatherSimple, deriveWeatherDirection, weatherDirectionToQuerySeason,
+  hasSeasonWeatherConflict, getCalendarSeason,
+} from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
+
+// Ephemeral, query-purposes-only "which historical season bucket to sample" — never shown to the
+// customer, never persisted. Prefers an explicit requestedSeasonStyle; otherwise derives one from
+// the real weatherDirection already saved on the profile; otherwise falls back to the calendar.
+function effectiveQuerySeason(profile) {
+  if (profile.requestedSeasonStyle) return profile.requestedSeasonStyle;
+  return weatherDirectionToQuerySeason(profile.weatherDirection, getCalendarSeason(profile.country));
+}
 
 // Fix 3 — strips every internal field (real source product titles/notes, raw scores/reasons) from
 // a freshly-generated in-memory combination before it is ever handed to the model's own narration
@@ -71,7 +82,7 @@ const PROFILE_FIELD_SCHEMAS = {
   city: z.string().min(1).max(200),
   stateRegion: z.string().min(1).max(200),
   country: z.string().min(1).max(200),
-  season: z.enum(VALID_SEASONS),
+  requestedSeasonStyle: z.enum(VALID_SEASONS),
   likes: z.array(z.string().min(1)).max(20),
   dislikes: z.array(z.string().min(1)).max(20),
   preferredStyle: z.string().min(1).max(200),
@@ -95,7 +106,7 @@ const GenerateCombinationsArgs = z.object({
 const RefineArgs = z.object({ feedback: z.string().min(1) });
 const RecommendationIdArgs = z.object({ recommendationId: z.string().min(1) });
 const VerifyLocationArgs = z.object({ cityText: z.string().min(1).max(200) });
-const ResolveSeasonArgs = z.object({ choice: z.enum(["keep_stated", "use_weather"]) });
+const ResolveSeasonArgs = z.object({ choice: z.enum(["keep_style", "use_weather"]) });
 const SelectRecommendationArgs = z.object({ selectionText: z.string().min(1).max(200) });
 const CreateProductArgs = z.object({
   recommendationId: z.string().min(1),
@@ -111,7 +122,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "save_customer_profile_field",
-      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, season, likes, dislikes, preferredStyle, occasion, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory.",
+      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, requestedSeasonStyle, likes, dislikes, preferredStyle, occasion, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory. requestedSeasonStyle is ONLY for when the customer volunteers a specific seasonal style unprompted (e.g. 'I want something wintery') — never ask them what season it is or what season they associate with an occasion; live weather is handled automatically once their city is verified.",
       parameters: {
         type: "object",
         properties: {
@@ -128,7 +139,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "get_customer_profile",
-      description: "Get the customer's current structured fragrance profile and which required fields (city, country, season, likes-or-preferredStyle) are still missing before analysis can run.",
+      description: "Get the customer's current structured fragrance profile and which required fields (city, country, likes-or-preferredStyle) are still missing before analysis can run.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -136,7 +147,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "analyze_customer_product_candidates",
-      description: "Deterministically score real DUA products against the customer's current profile using real order-history evidence (region, season, likes/dislikes, repeat-purchase and popularity signals). Returns up to 10 real ProductCandidate results. Requires city, country, season, and at least one like or preferredStyle to already be saved on the profile.",
+      description: "Deterministically score real DUA products against the customer's current profile using real order-history evidence (region, season/weather direction, likes/dislikes, repeat-purchase and popularity signals). Returns up to 10 real ProductCandidate results. Requires city (verified), country, and at least one like or preferredStyle to already be saved on the profile.",
       parameters: { type: "object", properties: {} },
     },
   },
@@ -203,7 +214,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "verify_customer_location",
-      description: "Verify a city the customer typed against real order-history data and real geocoding — NEVER accept a city as real just because it sounds plausible (e.g. a fictional place). Call this before saving city/country to the profile. If needsClarification is true, ask the customer which real place they mean from the candidates. If verified is false, tell the customer you couldn't confidently match that location and ask for a real city.",
+      description: "Verify a city the customer typed against real order-history data and real geocoding — NEVER accept a city as real just because it sounds plausible (e.g. a fictional place). Call this before saving city/country to the profile. If needsClarification is true, ask the customer which real place they mean from the candidates. If verified is false, tell the customer you couldn't confidently match that location and ask for a real city. On success, this AUTOMATICALLY fetches real live weather and derives a weatherDirection internally too — you never need a separate step for that, and you must never ask the customer what season it is or explain that you're adjusting anything 'accordingly'. If the response says a style conflict needs confirming, ask the customer that ONE brief question before moving on; otherwise just continue naturally (e.g. into preferences/dislikes).",
       parameters: {
         type: "object",
         properties: { cityText: { type: "string", description: "The raw city text the customer gave." } },
@@ -214,19 +225,11 @@ export const FRAGRANCE_AGENT_TOOLS = [
   {
     type: "function",
     function: {
-      name: "get_live_weather",
-      description: "Fetch real current weather for the customer's already-VERIFIED city (requires verify_customer_location to have succeeded first). Returns simple weather words (never exact temperatures) and whether it conflicts with the customer's stated season. Only call this when there's a real reason to — a stated season/weather mismatch to check, the customer asking about weather, or it would materially change the recommendation. Do not call this automatically every conversation.",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "resolve_season_preference",
-      description: "Call this exactly once, only after get_live_weather reported a real conflict with the customer's stated season, and only after the customer has answered which direction they want. choice='keep_stated' keeps their stated season as the style basis; choice='use_weather' bases the recommendation on today's real conditions instead. Never call this again once already resolved for this conversation.",
+      description: "Call this exactly once, only when a requestedSeasonStyle genuinely conflicted with the real weatherDirection and you've asked the customer which they want. choice='keep_style' keeps their requested style as the basis (e.g. 'a deeper winter-style character' even though it's warm out); choice='use_weather' bases it on today's real conditions instead, clearing the requested style. Never call this again once already resolved for this conversation.",
       parameters: {
         type: "object",
-        properties: { choice: { type: "string", enum: ["keep_stated", "use_weather"], description: "Which direction the customer picked." } },
+        properties: { choice: { type: "string", enum: ["keep_style", "use_weather"], description: "Which direction the customer picked." } },
         required: ["choice"],
       },
     },
@@ -380,6 +383,21 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         }
         const profile = await saveCustomerProfileField(conversationId, parsed.data.field, valueParsed.data);
         const missing = getMissingRequiredFields(profile);
+
+        // Only discuss season when the customer volunteers a style — check for a genuine conflict
+        // with the REAL weatherDirection right here, once, rather than leaving it to the model to
+        // remember to check.
+        if (parsed.data.field === "requestedSeasonStyle") {
+          const conflict = hasSeasonWeatherConflict(profile.requestedSeasonStyle, profile.weatherDirection) && !profile.seasonStyleConflictResolved;
+          return ok(
+            `Saved. Missing required fields before analysis: ${missing.length ? missing.join(", ") : "none — ready to analyze."}` +
+              (conflict
+                ? ` Real weather today is "${profile.weatherDirection}", which conflicts with the requested ${profile.requestedSeasonStyle} style — briefly ask the customer ONCE whether to keep that style anyway or base it on today's real conditions, then call resolve_season_preference with their answer. Do not present this as a rigid either/or menu — a light check-in, e.g. "It's mild and sunny in ${profile.city || "your city"} today, but I can still shape it with a deeper ${profile.requestedSeasonStyle.toLowerCase()}-style character. Should I keep that direction?"`
+                : ` No real conflict with today's weather — do not mention season at all, just continue naturally.`),
+            { type: "profile_progress", profile, missingFields: missing },
+          );
+        }
+
         return ok(
           `Saved. Missing required fields before analysis: ${missing.length ? missing.join(", ") : "none — ready to analyze."}`,
           { type: "profile_progress", profile, missingFields: missing },
@@ -403,38 +421,40 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (!result.verified) {
           return ok(`I couldn't confidently match that location. Which real city are you currently in?`);
         }
-        const profile = await saveCustomerProfileFields(conversationId, {
+        const priorProfile = await getCustomerProfile(conversationId);
+        const fields = {
           city: result.city,
-          country: result.country || (await getCustomerProfile(conversationId)).country,
+          country: result.country || priorProfile.country,
           locationVerified: true,
           locationSource: result.source,
-        });
-        return ok(`Verified "${result.city}" (${result.country || "country unknown"}) via ${result.source}. Saved to profile.`, {
-          type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile),
-        });
-      }
+        };
 
-      case "get_live_weather": {
-        const profile = await getCustomerProfile(conversationId);
-        if (!profile.locationVerified || !profile.city) {
-          return fail("the customer's city isn't verified yet — call verify_customer_location first.");
+        // Automatic, silent weather fetch + direction derivation the moment the city is verified
+        // — never a separate model-driven step, never surfaced as a question. A fetch failure just
+        // means weatherDirection stays null; it never blocks verification itself.
+        let conflictMessage = "";
+        const weather = await fetchCurrentWeather(result.city);
+        if (weather) {
+          const { summary } = describeWeatherSimple(weather.tempF, weather.weatherCode);
+          const direction = deriveWeatherDirection(weather.tempF, weather.weatherCode, weather.relativeHumidityPercent);
+          fields.currentWeather = {
+            condition: summary,
+            temperatureC: Math.round(((weather.tempF - 32) * 5) / 9),
+            fetchedAt: new Date().toISOString(),
+          };
+          fields.weatherDirection = direction;
+          fields.weatherLocation = { city: result.city, country: fields.country, verified: true };
+
+          // Rare ordering (style requested before city) — check immediately so it's never missed.
+          if (priorProfile.requestedSeasonStyle && !priorProfile.seasonStyleConflictResolved && hasSeasonWeatherConflict(priorProfile.requestedSeasonStyle, direction)) {
+            conflictMessage = ` Real weather in ${result.city} is "${direction}", which conflicts with the previously requested ${priorProfile.requestedSeasonStyle} style — briefly ask the customer ONCE whether to keep that style or base it on today's real conditions, then call resolve_season_preference.`;
+          }
         }
-        const weather = await fetchCurrentWeather(profile.city);
-        if (!weather) return fail("couldn't fetch live weather right now — don't mention weather to the customer, just proceed with their stated preferences.");
-        const { words, summary } = describeWeatherSimple(weather.tempF, weather.weatherCode);
-        const tempC = Math.round(((weather.tempF - 32) * 5) / 9);
-        const conflict = hasSeasonWeatherConflict(profile.season, words);
-        const updated = await saveCustomerProfileFields(conversationId, {
-          currentWeather: { condition: summary, temperatureC: tempC, temperatureF: weather.tempF, fetchedAt: new Date().toISOString() },
-          weatherLocation: { city: profile.city, country: profile.country, verified: true },
-        });
-        const conflictAlreadyResolved = updated.seasonConflictResolved;
+
+        const profile = await saveCustomerProfileFields(conversationId, fields);
         return ok(
-          `Current weather in ${profile.city}: ${summary}. ` +
-            (conflict && !conflictAlreadyResolved
-              ? `This conflicts with the customer's stated ${profile.season}. Ask them ONCE whether they want the ${profile.season}-style direction or a direction based on today's actual conditions, then call resolve_season_preference with their answer.`
-              : `No unresolved conflict with the stated season — do not ask about it again.`),
-          { type: "weather_progress", currentWeather: updated.currentWeather, conflict: conflict && !conflictAlreadyResolved },
+          `Verified "${result.city}" (${result.country || "country unknown"}) via ${result.source}. Weather fetched and saved automatically — never ask the customer what season it is, never explain that recommendations will be adjusted "accordingly"; just continue naturally (e.g. into preferences/dislikes).${conflictMessage}`,
+          { type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile) },
         );
       }
 
@@ -442,12 +462,15 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         const parsed = ResolveSeasonArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const profile = await saveCustomerProfileFields(conversationId, {
-          seasonSource: parsed.data.choice === "keep_stated" ? "customer_confirmed_style" : "weather_confirmed",
-          seasonConflictResolved: true,
+          requestedSeasonStyle: parsed.data.choice === "keep_style" ? (await getCustomerProfile(conversationId)).requestedSeasonStyle : null,
+          seasonStyleConflictResolved: true,
         });
-        return ok(`Resolved. Season stays "${profile.season}", basis: ${profile.seasonSource}. Never ask about this conflict again.`, {
-          type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile),
-        });
+        return ok(
+          parsed.data.choice === "keep_style"
+            ? `Resolved. Keeping the requested ${profile.requestedSeasonStyle} style as the basis. Never ask about this again.`
+            : `Resolved. Basing the recommendation on today's real weather (${profile.weatherDirection}) instead. Never ask about this again.`,
+          { type: "profile_progress", profile, missingFields: getMissingRequiredFields(profile) },
+        );
       }
 
       case "select_recommendation": {
@@ -474,7 +497,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (missing.length) {
           return fail(`profile is missing required fields (${missing.join(", ")}) — ask the customer for these before analyzing.`);
         }
-        const candidateProducts = await analyzeCustomerProductCandidates(profile);
+        const candidateProducts = await analyzeCustomerProductCandidates({ ...profile, season: effectiveQuerySeason(profile) });
         getScratch(conversationId).candidateProducts = candidateProducts;
         if (!candidateProducts.length) {
           return ok("No real product candidates found for this profile yet — there may be limited historical data for this exact region/season combination.", {
@@ -520,12 +543,13 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         const parsed = GenerateCombinationsArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const profile = await getCustomerProfile(conversationId);
+        const queriedProfile = { ...profile, season: effectiveQuerySeason(profile) };
         const scratch = getScratch(conversationId);
         if (!scratch.candidateProducts) {
-          scratch.candidateProducts = await analyzeCustomerProductCandidates(profile);
+          scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
         const combinations = await generateNewProductCombinations({
-          profile,
+          profile: queriedProfile,
           candidateProducts: scratch.candidateProducts,
           maximumResults: parsed.data.maximumResults,
           allowedTypes: parsed.data.allowedTypes,
@@ -559,16 +583,17 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         const parsed = RefineArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const profile = await getCustomerProfile(conversationId);
+        const queriedProfile = { ...profile, season: effectiveQuerySeason(profile) };
         const scratch = getScratch(conversationId);
         if (!scratch.candidateProducts) {
-          scratch.candidateProducts = await analyzeCustomerProductCandidates(profile);
+          scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
         const adjustments = deriveRefinementAdjustments(parsed.data.feedback);
         // One-off bias for this regeneration only — not persisted to the stored profile, since a
         // refinement request ("make it sweeter") is a request about THIS recommendation round, not
         // necessarily a permanent change to the customer's stated preferences.
         const adjustedProfile = {
-          ...profile,
+          ...queriedProfile,
           likes: [...new Set([...(profile.likes || []), ...adjustments.addLikes])],
           dislikes: [...new Set([...(profile.dislikes || []), ...adjustments.addDislikes])],
         };

@@ -27,6 +27,7 @@ import {
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
+import { hasSeasonWeatherConflict } from "../utils/weatherSeason.js";
 
 const DEFAULT_MAX_RESULTS = 8;
 const BOTTLE_ML = 34;
@@ -226,13 +227,20 @@ const EVIDENCE_SCOPE_WEATHER_TEMPLATES = {
 };
 
 function describeWeatherSuitability(evidenceScope, profile) {
+  // `profile.season` here is the ephemeral, query-purposes-only value the tool layer computes
+  // (requestedSeasonStyle, else a real-weather-derived label, else the calendar) — safe to use for
+  // this evidence-scope wording since it's phrased generically ("during Summer season"), never as
+  // a claim about what the customer said.
   const season = profile?.season;
   const base = (EVIDENCE_SCOPE_WEATHER_TEMPLATES[evidenceScope] || EVIDENCE_SCOPE_WEATHER_TEMPLATES.limited)(season);
-  if (profile?.seasonSource === "weather_confirmed" && profile?.currentWeather?.condition) {
-    return `${base} Shaped around today's actual conditions (${profile.currentWeather.condition}).`;
+  const hadConflict = hasSeasonWeatherConflict(profile?.requestedSeasonStyle, profile?.weatherDirection);
+  if (!profile?.requestedSeasonStyle && profile?.currentWeather?.condition) {
+    // No requested style at all — the default, automatic case: shaped by real conditions, no
+    // mention of "season" as a customer-facing concept.
+    return `${base} Shaped around today's real conditions (${profile.currentWeather.condition}).`;
   }
-  if (profile?.seasonSource === "customer_confirmed_style" && profile?.seasonConflictResolved) {
-    return `${base} Built around the classic ${season || ""} character you asked for, even on an unusually different-feeling day.`.replace("  ", " ");
+  if (hadConflict && profile?.seasonStyleConflictResolved && profile?.requestedSeasonStyle) {
+    return `${base} Built around the classic ${profile.requestedSeasonStyle} character you asked for, even on an unusually different-feeling day.`;
   }
   return base;
 }
@@ -426,7 +434,8 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     profile.dislikes.length >= 0 && // dislikes may be an empty array, but must have been asked about
     Object.prototype.hasOwnProperty.call(profile || {}, "dislikes") &&
     (profile?.likes?.length > 0 || Boolean(profile?.preferredStyle));
-  const seasonUnresolved = Boolean(profile?.season) && profile?.seasonSource === "customer_explicit" && profile?.seasonConflictResolved === false;
+  const seasonUnresolved =
+    hasSeasonWeatherConflict(profile?.requestedSeasonStyle, profile?.weatherDirection) && profile?.seasonStyleConflictResolved === false;
 
   let confidence;
   if (finalScore >= 30 && risks.length === 0) confidence = "very high";

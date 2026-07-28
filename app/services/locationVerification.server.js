@@ -101,7 +101,7 @@ export async function verifyCity(cityText) {
 
 /**
  * @param {string} verifiedCityName - a city already confirmed via verifyCity (never raw customer text).
- * @returns {Promise<{ tempF: number, weatherCode: number } | null>}
+ * @returns {Promise<{ tempF: number, weatherCode: number, relativeHumidityPercent: number|null } | null>}
  */
 export async function fetchCurrentWeather(verifiedCityName) {
   const { results } = await geocodePlace(verifiedCityName);
@@ -112,14 +112,18 @@ export async function fetchCurrentWeather(verifiedCityName) {
   const timeoutId = setTimeout(() => controller.abort(), GEOCODE_TIMEOUT_MS);
   try {
     const res = await fetch(
-      `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,weather_code&temperature_unit=fahrenheit`,
+      `https://api.open-meteo.com/v1/forecast?latitude=${place.latitude}&longitude=${place.longitude}&current=temperature_2m,weather_code,relative_humidity_2m&temperature_unit=fahrenheit`,
       { signal: controller.signal },
     );
     if (!res.ok) return null;
     const data = await res.json();
     const current = data.current;
     if (!current) return null;
-    return { tempF: Math.round(current.temperature_2m), weatherCode: current.weather_code };
+    return {
+      tempF: Math.round(current.temperature_2m),
+      weatherCode: current.weather_code,
+      relativeHumidityPercent: typeof current.relative_humidity_2m === "number" ? Math.round(current.relative_humidity_2m) : null,
+    };
   } catch (err) {
     console.error("Failed to fetch live weather:", err.message);
     return null;

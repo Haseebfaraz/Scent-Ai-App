@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { getCalendarSeason, describeWeatherSimple, hasSeasonWeatherConflict } from "./weatherSeason.js";
+import {
+  getCalendarSeason, describeWeatherSimple, deriveWeatherDirection,
+  weatherDirectionToQuerySeason, hasSeasonWeatherConflict,
+} from "./weatherSeason.js";
 
 describe("getCalendarSeason", () => {
   it("never throws and returns one of the four real seasons regardless of hemisphere", () => {
@@ -31,16 +34,54 @@ describe("describeWeatherSimple", () => {
   });
 });
 
+describe("deriveWeatherDirection", () => {
+  it("returns 'rainy' regardless of temperature when the WMO code is a real precipitation code", () => {
+    expect(deriveWeatherDirection(80, 63)).toBe("rainy");
+  });
+
+  it("returns 'humid' for a warm, high-humidity reading with no rain", () => {
+    expect(deriveWeatherDirection(80, 0, 70)).toBe("humid");
+  });
+
+  it("does not call a cold, high-humidity day 'humid' — humidity only registers when it's warm", () => {
+    expect(deriveWeatherDirection(45, 0, 90)).not.toBe("humid");
+  });
+
+  it("falls through the temperature bands correctly for a plain clear day", () => {
+    expect(deriveWeatherDirection(95, 0)).toBe("hot");
+    expect(deriveWeatherDirection(75, 0)).toBe("warm");
+    expect(deriveWeatherDirection(60, 0)).toBe("mild");
+    expect(deriveWeatherDirection(45, 0)).toBe("cool");
+    expect(deriveWeatherDirection(20, 0)).toBe("cold");
+  });
+});
+
+describe("weatherDirectionToQuerySeason", () => {
+  it("maps hot/warm/humid to Summer and cold/cool to Winter for DB-query purposes only", () => {
+    expect(weatherDirectionToQuerySeason("hot", "Spring")).toBe("Summer");
+    expect(weatherDirectionToQuerySeason("humid", "Spring")).toBe("Summer");
+    expect(weatherDirectionToQuerySeason("cold", "Spring")).toBe("Winter");
+  });
+
+  it("defers to the calendar fallback for an ambiguous direction", () => {
+    expect(weatherDirectionToQuerySeason("mild", "Fall")).toBe("Fall");
+    expect(weatherDirectionToQuerySeason(null, "Fall")).toBe("Fall");
+  });
+});
+
 describe("hasSeasonWeatherConflict", () => {
-  it("flags hot/sunny weather against a stated Winter (the real transcript bug)", () => {
-    expect(hasSeasonWeatherConflict("Winter", ["hot", "sunny"])).toBe(true);
+  it("flags a requested Winter style against hot/warm/humid real conditions (the real transcript bug)", () => {
+    expect(hasSeasonWeatherConflict("Winter", "hot")).toBe(true);
+    expect(hasSeasonWeatherConflict("Winter", "warm")).toBe(true);
   });
 
-  it("does not flag rainy/cool weather against a stated Winter — that's not a conflict", () => {
-    expect(hasSeasonWeatherConflict("Winter", ["cool", "rainy"])).toBe(false);
+  it("does not flag a requested Winter style against cool/cold/rainy conditions — that's not a conflict", () => {
+    expect(hasSeasonWeatherConflict("Winter", "cool")).toBe(false);
+    expect(hasSeasonWeatherConflict("Winter", "rainy")).toBe(false);
   });
 
-  it("returns false when no season is stated yet", () => {
-    expect(hasSeasonWeatherConflict(null, ["hot", "sunny"])).toBe(false);
+  it("returns false when no style has been requested, or no weather reading exists yet", () => {
+    expect(hasSeasonWeatherConflict(null, "hot")).toBe(false);
+    expect(hasSeasonWeatherConflict("Winter", null)).toBe(false);
   });
 });

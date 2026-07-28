@@ -1,12 +1,13 @@
 // Deterministic weather/season helpers — pure functions, no DB/network access, so both the tool
 // layer (which does the real geocoding/forecast fetch) and tests can reason about them the same
 // way. This is the fix for the "I've saved that it's summer" bug: the calendar season computed
-// here is NEVER written into CustomerProfileState — it exists only as a display-time fallback
-// suggestion, so it can never silently overwrite a season the customer actually stated.
+// here is NEVER written into CustomerProfileState — it exists only as an ephemeral fallback (a
+// ranking/query hint, or ice-breaker small talk), so it can never silently overwrite anything the
+// customer actually stated.
 
 // Northern-hemisphere mapping, matching the US-heavy source data (Michigan, Florida, Puerto Rico,
-// etc.) — used only as a last-resort suggestion when the customer hasn't stated a season at all,
-// never persisted to CustomerProfileState.season.
+// etc.) — used only as a last-resort suggestion when there's no real weather reading yet, never
+// persisted to CustomerProfileState.
 const SEASON_BY_MONTH = ["Winter", "Winter", "Spring", "Spring", "Spring", "Summer", "Summer", "Summer", "Fall", "Fall", "Fall", "Winter"];
 
 // A handful of countries where the calendar season runs opposite the northern-hemisphere default
@@ -77,25 +78,60 @@ export function describeWeatherSimple(tempF, weatherCode) {
   return { words, summary: words.join(" and ") };
 }
 
-// Seasons paired with the weather words that would genuinely conflict with them — e.g. a "hot" or
-// "sunny" reading alongside a stated Winter is worth surfacing; "cool"/"chilly"/"rainy" alongside
-// Winter is not a conflict at all. Deliberately conservative (only the clearest mismatches) so this
-// doesn't nag the customer over borderline/mild days.
-const SEASON_CONFLICT_WORDS = {
-  Winter: new Set(["hot", "sunny"]),
-  Summer: new Set(["chilly", "cool"]),
+// Fix (season/weather v2) — a single deterministic climate-direction enum, derived automatically
+// the moment a city is verified (never asked about, never left to the model). Priority: real rain
+// beats a humidity reading, which beats a plain temperature band — a rainy 75°F day reads to a
+// customer as "rainy" first, not "warm."
+const RAIN_CODES = new Set(Object.entries(CONDITION_WORD_BY_CODE).filter(([, w]) => w === "rainy").map(([c]) => Number(c)));
+const HUMID_MIN_TEMP_F = 65;
+const HUMID_MIN_PERCENT = 60;
+
+/**
+ * @param {number} tempF
+ * @param {number} weatherCode
+ * @param {number|null} [relativeHumidityPercent]
+ * @returns {"hot"|"warm"|"mild"|"cool"|"cold"|"humid"|"rainy"}
+ */
+export function deriveWeatherDirection(tempF, weatherCode, relativeHumidityPercent = null) {
+  if (RAIN_CODES.has(weatherCode)) return "rainy";
+  if (relativeHumidityPercent != null && relativeHumidityPercent >= HUMID_MIN_PERCENT && tempF >= HUMID_MIN_TEMP_F) return "humid";
+  if (tempF >= 85) return "hot";
+  if (tempF >= 70) return "warm";
+  if (tempF >= 55) return "mild";
+  if (tempF >= 40) return "cool";
+  return "cold";
+}
+
+// Ephemeral mapping used ONLY to pick which real historical `season` bucket to query for
+// evidence/ranking purposes (app/services/orderHistoryAnalysis.server.js) — never shown to the
+// customer, never persisted as "the season." A documented, deliberately coarse judgment call:
+// hot/warm/humid conditions read as Summer-like buying patterns, cold/cool as Winter-like; a
+// genuinely ambiguous reading (mild, rainy, or no reading yet) defers to the calendar fallback.
+export function weatherDirectionToQuerySeason(weatherDirection, calendarFallback) {
+  if (weatherDirection === "hot" || weatherDirection === "warm" || weatherDirection === "humid") return "Summer";
+  if (weatherDirection === "cold" || weatherDirection === "cool") return "Winter";
+  return calendarFallback;
+}
+
+// A customer-requested season STYLE (e.g. "I want something wintery") genuinely conflicting with
+// today's real weather direction — e.g. requesting "Winter" on a hot/warm/humid day is worth a
+// single brief check-in; requesting "Winter" on a cool/cold/rainy day is not a conflict at all.
+// Deliberately conservative so this never nags over a borderline/mild day.
+const SEASON_STYLE_CONFLICT_DIRECTIONS = {
+  Winter: new Set(["hot", "warm", "humid"]),
+  Summer: new Set(["cold", "cool"]),
   Spring: new Set(["hot"]),
   Fall: new Set(["hot"]),
 };
 
 /**
- * @param {string|null} statedSeason - the customer's stated/saved season, or null.
- * @param {string[]} weatherWords - from describeWeatherSimple().words.
+ * @param {string|null} requestedSeasonStyle - the customer's explicitly requested style, or null.
+ * @param {string|null} weatherDirection - from deriveWeatherDirection, or null if not fetched yet.
  * @returns {boolean}
  */
-export function hasSeasonWeatherConflict(statedSeason, weatherWords) {
-  if (!statedSeason || !Array.isArray(weatherWords)) return false;
-  const conflictWords = SEASON_CONFLICT_WORDS[statedSeason];
-  if (!conflictWords) return false;
-  return weatherWords.some((w) => conflictWords.has(w));
+export function hasSeasonWeatherConflict(requestedSeasonStyle, weatherDirection) {
+  if (!requestedSeasonStyle || !weatherDirection) return false;
+  const conflictDirections = SEASON_STYLE_CONFLICT_DIRECTIONS[requestedSeasonStyle];
+  if (!conflictDirections) return false;
+  return conflictDirections.has(weatherDirection);
 }
