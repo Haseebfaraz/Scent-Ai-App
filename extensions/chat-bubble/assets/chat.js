@@ -964,6 +964,14 @@
     Combination: {
       CONFIDENCE_LABELS: { 'very high': 'Very High', high: 'High', medium: 'Medium', low: 'Low' },
 
+      // Real product names/notes now render via innerHTML (for the <strong>/<em> markup) — escape
+      // first so a title/note containing &, <, or > can never be interpreted as markup.
+      escapeHtml: function(str) {
+        const div = document.createElement('div');
+        div.textContent = String(str == null ? '' : str);
+        return div.innerHTML;
+      },
+
       /**
        * @param {Object} combo - one customer-safe recommendation (recommendationId, type,
        *   customerFacingName/Description/WhySuits/BestUse/WeatherSuitability/Strength/Risk,
@@ -1003,6 +1011,65 @@
           why.classList.add('shop-ai-combo-why');
           why.textContent = combo.customerFacingWhySuits;
           card.appendChild(why);
+        }
+
+        // Fix (Aniq spec, sections 11/25) — real component names, notes, ratio, and contribution
+        // role, shown directly (this reverses the earlier "Product 1/2/3" generic-label design per
+        // this spec's explicit instruction to show real product names).
+        if (Array.isArray(combo.components) && combo.components.length) {
+          const componentsList = document.createElement('ul');
+          componentsList.classList.add('shop-ai-combo-components');
+          combo.components.forEach((c) => {
+            const item = document.createElement('li');
+            const ratioText = typeof c.ratioPercent === 'number' ? ` — ${c.ratioPercent}%` : '';
+            const notesText = Array.isArray(c.availableNotes) && c.availableNotes.length ? c.availableNotes.join(', ') : '';
+            item.innerHTML =
+              '<strong>' + this.escapeHtml(c.productName || '') + '</strong>' + this.escapeHtml(ratioText) +
+              (c.contribution ? ' <em>(' + this.escapeHtml(c.contribution) + ')</em>' : '') +
+              (notesText ? '<br>' + this.escapeHtml(notesText) : '');
+            componentsList.appendChild(item);
+          });
+          card.appendChild(componentsList);
+        }
+
+        // Expandable detail section — native <details>/<summary>, no extra JS needed for
+        // expand/collapse. Covers combinedDirection, sharedOrConnectingNotes, whyNotesWork,
+        // expectedResult, historical evidence, and existing-combination evidence.
+        const hasDetail = combo.sharedOrConnectingNotes?.length || combo.whyNotesWork || combo.expectedResult ||
+          combo.customerFacingHistoricalEvidence || combo.existingCombinationEvidence;
+        if (hasDetail) {
+          const details = document.createElement('details');
+          details.classList.add('shop-ai-combo-details');
+          const summary = document.createElement('summary');
+          summary.textContent = 'See full evidence and explanation';
+          details.appendChild(summary);
+
+          const addDetailLine = (label, value) => {
+            if (!value) return;
+            const p = document.createElement('p');
+            p.classList.add('shop-ai-combo-detail-line');
+            p.innerHTML = '<strong>' + this.escapeHtml(label) + ':</strong> ' + this.escapeHtml(value);
+            details.appendChild(p);
+          };
+
+          if (combo.sharedOrConnectingNotes?.length) addDetailLine('Shared/connecting notes', combo.sharedOrConnectingNotes.join(', '));
+          addDetailLine('Why the notes work', combo.whyNotesWork);
+          addDetailLine('Expected result', combo.expectedResult);
+          const evidence = combo.customerFacingHistoricalEvidence;
+          if (evidence) {
+            addDetailLine('City evidence', evidence.cityEvidence);
+            addDetailLine('Country evidence', evidence.countryEvidence);
+            addDetailLine('Seasonal evidence', evidence.seasonalEvidence);
+            addDetailLine('Repeat-purchase evidence', evidence.repeatEvidence);
+            addDetailLine('Data window', evidence.dataWindow);
+          }
+          if (combo.existingCombinationEvidence?.similarEvidence?.length) {
+            addDetailLine(
+              'Similar existing combinations',
+              combo.existingCombinationEvidence.similarEvidence.map((e) => e.title).join(', '),
+            );
+          }
+          card.appendChild(details);
         }
 
         if (combo.customerFacingBestUse) {

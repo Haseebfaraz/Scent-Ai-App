@@ -4,6 +4,7 @@
 // sub-several-second one.
 import { describe, it, expect } from "vitest";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
+import prisma from "../db.server.js";
 
 const ACCEPTANCE_PROFILE = {
   city: "Los Angeles",
@@ -95,5 +96,33 @@ describe("analyzeCustomerProductCandidates", () => {
     await analyzeCustomerProductCandidates(ACCEPTANCE_PROFILE);
     const elapsedMs = Date.now() - start;
     expect(elapsedMs).toBeLessThan(15000);
+  });
+
+  // Required Test 10 (Aniq spec) — "Summer Months" and "Summer" must both match a customer whose
+  // current season is Summer. Confirmed real bug: ProductRegionSummary's season scope stores each
+  // raw source value ("Summer" and "Summer Months") as its OWN row (scripts/build-region-summary.cjs
+  // never normalizes them), while this service used to query with the single literal `season`
+  // string — silently missing every "Summer Months"-labeled row. This proves the fix: a candidate's
+  // reported sameSeasonOrders must equal the REAL sum across every alias, not just the literal match.
+  it("Test 10: season-alias sums include both 'Summer' and 'Summer Months' rows, not just the literal match", async () => {
+    const candidates = await analyzeCustomerProductCandidates(ACCEPTANCE_PROFILE);
+    const withSeasonEvidence = candidates.find((c) => c.sameSeasonOrders > 0);
+    expect(withSeasonEvidence).toBeTruthy();
+
+    const [summerOnly, summerMonthsOnly] = await Promise.all([
+      prisma.productRegionSummary.findUnique({
+        where: { normalizedProductName_scope_scopeValue: { normalizedProductName: withSeasonEvidence.normalizedProductName, scope: "season", scopeValue: "Summer" } },
+      }),
+      prisma.productRegionSummary.findUnique({
+        where: { normalizedProductName_scope_scopeValue: { normalizedProductName: withSeasonEvidence.normalizedProductName, scope: "season", scopeValue: "Summer Months" } },
+      }),
+    ]);
+    const expectedTotal = (summerOnly?.orderCount || 0) + (summerMonthsOnly?.orderCount || 0);
+    expect(withSeasonEvidence.sameSeasonOrders).toBe(expectedTotal);
+    // The real point of the fix: if a "Summer Months" row actually exists for this product, the
+    // reported total must be strictly greater than the "Summer"-only literal match would have been.
+    if (summerMonthsOnly?.orderCount > 0) {
+      expect(withSeasonEvidence.sameSeasonOrders).toBeGreaterThan(summerOnly?.orderCount || 0);
+    }
   });
 });

@@ -6,6 +6,11 @@ import {
   pairIsCompatible,
   assessCombinationRisks,
   textToPreferenceFamilies,
+  interpretCustomerPreferences,
+  computeComplexityLevel,
+  passesIntensityFilter,
+  countPreferredDirectionMatches,
+  countAvoidedDirectionMatches,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -103,5 +108,88 @@ describe("assessCombinationRisks", () => {
       { title: "B", notes: ["Musk", "Cedar"] },
     ];
     expect(assessCombinationRisks(products, { season: "Winter" })).toEqual([]);
+  });
+});
+
+// Required Test 1 (Aniq spec) — natural-language sensitivity mapping.
+describe("interpretCustomerPreferences (Test 1: natural-language sensitivity mapping)", () => {
+  it("maps the exact Aniq complaint to high sensitivity, light strength, simple Hybrids", () => {
+    const profile = {
+      dislikes: ["I do not like scents that hit my nose and make me feel headache."],
+      additionalPreferences: ["I do not like scents that hit my nose and make me feel headache."],
+      preferredStyle: "Relaxing",
+    };
+    const result = interpretCustomerPreferences(profile);
+    expect(result.sensitivityLevel).toBe("high");
+    expect(result.strengthPreference).toBe("light");
+    expect(result.preferSimpleCombinations).toBe(true);
+    expect(result.preferredCombinationTypes).toEqual(["HYBRID"]);
+    expect(result.preferredDirections).toEqual(
+      expect.arrayContaining(["relaxing", "airy", "clean", "watery", "green-tea", "soft-musky", "light-fruity"]),
+    );
+    expect(result.avoidedDirections).toEqual(
+      expect.arrayContaining(["sharp", "piercing", "pepper-heavy", "dense-spicy", "smoky", "heavy-amber", "oud", "leather", "tobacco"]),
+    );
+  });
+
+  it("recognizes informal/misspelled sensitivity phrasing", () => {
+    expect(interpretCustomerPreferences({ dislikes: ["it feels too haddik on me"] }).sensitivityLevel).toBe("high");
+    expect(interpretCustomerPreferences({ dislikes: ["gives me a headache"] }).sensitivityLevel).toBe("high");
+    expect(interpretCustomerPreferences({ dislikes: ["it's overpowering and suffocating"] }).sensitivityLevel).toBe("high");
+    expect(interpretCustomerPreferences({ dislikes: ["I cannot tolerate strong perfume"] }).sensitivityLevel).toBe("high");
+  });
+
+  it("does not flag sensitivity for an unrelated dislike", () => {
+    expect(interpretCustomerPreferences({ dislikes: ["I don't like vanilla"] }).sensitivityLevel).toBe("none");
+  });
+});
+
+describe("computeComplexityLevel (Aniq spec complexity bands)", () => {
+  it("matches the exact spec thresholds", () => {
+    expect(computeComplexityLevel(3)).toBe("low");
+    expect(computeComplexityLevel(6)).toBe("low");
+    expect(computeComplexityLevel(7)).toBe("moderate");
+    expect(computeComplexityLevel(12)).toBe("moderate");
+    expect(computeComplexityLevel(13)).toBe("high");
+    expect(computeComplexityLevel(20)).toBe("high");
+    expect(computeComplexityLevel(21)).toBe("very-high");
+    expect(computeComplexityLevel(27)).toBe("very-high"); // real note count for "Ti Amo Mi Amor"
+  });
+});
+
+describe("passesIntensityFilter (hard pre-generation sensitivity filter)", () => {
+  it("excludes a product with 3+ real intensity-driver notes for a high-sensitivity customer", () => {
+    const intent = { sensitivityLevel: "high" };
+    expect(passesIntensityFilter(["Black Pepper", "Saffron", "Cinnamon", "Bergamot"], intent)).toBe(false);
+  });
+
+  it("does not exclude a product with only one strong note — never a blanket ban on a single note", () => {
+    const intent = { sensitivityLevel: "high" };
+    expect(passesIntensityFilter(["Black Pepper", "Bergamot", "Lavender"], intent)).toBe(true);
+  });
+
+  it("excludes very-high complexity (21+ notes) regardless of intensity-driver count", () => {
+    const intent = { sensitivityLevel: "high" };
+    const manyMildNotes = Array.from({ length: 22 }, (_, i) => `Mild Note ${i}`);
+    expect(passesIntensityFilter(manyMildNotes, intent)).toBe(false);
+  });
+
+  it("never filters when the customer has no high sensitivity", () => {
+    expect(passesIntensityFilter(["Black Pepper", "Saffron", "Cinnamon", "Oud"], { sensitivityLevel: "none" })).toBe(true);
+    expect(passesIntensityFilter(["Black Pepper", "Saffron", "Cinnamon", "Oud"], null)).toBe(true);
+  });
+});
+
+describe("countPreferredDirectionMatches / countAvoidedDirectionMatches (Test 2 mechanism)", () => {
+  it("counts a relaxing-style product's real notes against preferredDirections", () => {
+    expect(countPreferredDirectionMatches(["Lavender", "Musk", "Chamomile"], ["relaxing"])).toBeGreaterThan(0);
+  });
+
+  it("counts a pepper-heavy product's real notes against avoidedDirections", () => {
+    expect(countAvoidedDirectionMatches(["Black Pepper", "Saffron"], ["pepper-heavy", "dense-spicy"])).toBeGreaterThan(0);
+  });
+
+  it("never penalizes a direction the customer didn't actually avoid", () => {
+    expect(countAvoidedDirectionMatches(["Black Pepper"], ["oud", "leather"])).toBe(0);
   });
 });

@@ -24,6 +24,13 @@ import {
   pairIsCompatible,
   assessCombinationRisks,
   textToPreferenceFamilies,
+  interpretCustomerPreferences,
+  computeComplexityLevel,
+  detectIntensityDrivers,
+  detectSofteningNotes,
+  passesIntensityFilter,
+  countPreferredDirectionMatches,
+  countAvoidedDirectionMatches,
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
@@ -61,7 +68,7 @@ async function getCatalogAndCombinations() {
     return catalogCache;
   }
   const [allProducts, allCombinations] = await Promise.all([
-    prisma.fragranceProduct.findMany({ select: { title: true, normalizedTitle: true, notesJson: true } }),
+    prisma.fragranceProduct.findMany({ select: { title: true, normalizedTitle: true, notesJson: true, collection: true } }),
     prisma.existingCombination.findMany({ select: { title: true, normalizedTitle: true, type: true, componentProductsJson: true, tagLine: true, componentKey: true } }),
   ]);
   catalogCache = { allProducts, allCombinations, fetchedAt: Date.now() };
@@ -89,6 +96,44 @@ function noteOverlapRatio(notesA, notesB) {
 }
 const NEAR_DUPLICATE_OVERLAP_RATIO = 0.5;
 
+// Fix 7 (Aniq spec) — a plain top-N slice let the same 1-2 anchor products dominate an entire
+// batch (confirmed against real production data: 8 "different" recommendations sharing one
+// anchor). Greedy walk over the already score-sorted list: skip a candidate once its anchor has
+// been used MAX_PER_ANCHOR times, or any single product has appeared MAX_PRODUCT_APPEARANCES times
+// across the accepted set. Backfills from skipped candidates (still in score order) if diversity
+// constraints would otherwise return fewer than requested — a thin real candidate pool should
+// never silently shrink the result count, only reorder it.
+const MAX_PER_ANCHOR = 2;
+const MAX_PRODUCT_APPEARANCES = 3;
+function selectDiverseResults(sortedResults, maximumResults) {
+  const accepted = [];
+  const skipped = [];
+  const anchorCounts = new Map();
+  const productCounts = new Map();
+
+  for (const result of sortedResults) {
+    if (accepted.length >= maximumResults) break;
+    const normalizedTitles = result.internalProducts.map((p) => normalizeProductName(p.title));
+    const anchorTitle = normalizedTitles[0];
+    const anchorCount = anchorCounts.get(anchorTitle) || 0;
+    const productWouldOverflow = normalizedTitles.some((t) => (productCounts.get(t) || 0) >= MAX_PRODUCT_APPEARANCES);
+
+    if (anchorCount >= MAX_PER_ANCHOR || productWouldOverflow) {
+      skipped.push(result);
+      continue;
+    }
+    accepted.push(result);
+    anchorCounts.set(anchorTitle, anchorCount + 1);
+    normalizedTitles.forEach((t) => productCounts.set(t, (productCounts.get(t) || 0) + 1));
+  }
+
+  for (const result of skipped) {
+    if (accepted.length >= maximumResults) break;
+    accepted.push(result);
+  }
+  return accepted;
+}
+
 function* combinationsOf(items, k) {
   if (k === 0) {
     yield [];
@@ -115,11 +160,30 @@ const FAMILY_ROLE_PRIORITY = [
   ["strongHeavy", "Longevity support"],
 ];
 
+// Fix 6 (multi-dimensional roles) — a product is classified from its COMPLETE note list, not just
+// whichever family matches first. `role`/`hasDetectedFamily` are kept exactly as before (the ratio
+// math in computeRatios and existing tests key off `.role`'s exact string) — this is additive:
+// `secondaryRoles` (every OTHER matched family besides the primary), `intensityDrivers` (real
+// matched risk-note keywords, e.g. "royal chariot attar" surfaces ["cardamom","pepper","patchouli",
+// "guaiac"] instead of being flattened into a single "Freshness" label), `softeningNotes`, and
+// `complexityLevel` (from the product's real note count). A product with many real notes spanning
+// several directions (Royal Chariot Attar: bergamot/mandarin + cardamom/pepper + patchouli/guaiac +
+// sandalwood/vanilla) is now visibly complex and multi-directional instead of disappearing into one
+// bucket.
 export function assignRoles(comboProducts) {
   return comboProducts.map((p) => {
     const families = familiesOf(p.notes);
     const match = FAMILY_ROLE_PRIORITY.find(([family]) => families.includes(family));
-    return { ...p, role: match ? match[1] : "Contrast", hasDetectedFamily: families.length > 0 };
+    const primaryFamily = match ? match[0] : null;
+    return {
+      ...p,
+      role: match ? match[1] : "Contrast",
+      hasDetectedFamily: families.length > 0,
+      secondaryRoles: families.filter((f) => f !== primaryFamily),
+      intensityDrivers: detectIntensityDrivers(p.notes),
+      softeningNotes: detectSofteningNotes(p.notes),
+      complexityLevel: computeComplexityLevel((p.notes || []).length),
+    };
   });
 }
 
@@ -323,9 +387,16 @@ function describeBestUse(profile, primaryDirection) {
 // whole proposed SET already exists as a combination — it never stopped an individual finished
 // product from being reused as one ingredient inside a different one.
 const BUNDLE_KEYWORD_PATTERN = /\b(bundle|gift set|giftset|duo pack|trio pack|value pack|set of \d)\b/i;
+const FINISHED_COMBINATION_COLLECTIONS = new Set(["hybrid", "tribrid", "quadbrid"]);
 function isEligibleCombinationComponent(product, finishedCombinationTitles) {
   if (finishedCombinationTitles.has(product.normalizedTitle)) return false;
   if (BUNDLE_KEYWORD_PATTERN.test(product.title)) return false;
+  // Fix 8 (Aniq spec) — confirmed against real data: "Azure Supernova 2.0" has
+  // collection="Tribrid" in FragranceProduct but NO row in ExistingCombination at all (an
+  // incomplete/never-imported component record), so the componentKey-based check above missed it
+  // entirely. The product's own catalogue classification is a second, independent signal that
+  // catches this case even when ExistingCombination data is incomplete.
+  if (product.collection && FINISHED_COMBINATION_COLLECTIONS.has(String(product.collection).toLowerCase())) return false;
   return true;
 }
 
@@ -338,7 +409,7 @@ function isEligibleCombinationComponent(product, finishedCombinationTitles) {
 // siblings ("Poseidon's Elixir 2.0"/"16A"/"13N") — which share the same family and thus never any
 // compatible PAIR — flood the shortlist and crowd out genuinely different, complementary products.
 // Same-family siblings fail the compatibleCount>0 gate here and are correctly excluded.
-function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles) {
+function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent) {
   const anchorFamilies = familiesOf(anchor.orderHistoryNotes);
   const anchorNotes = new Set((anchor.orderHistoryNotes || []).map((n) => String(n).toLowerCase()));
 
@@ -346,6 +417,9 @@ function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombination
   for (const product of allProducts) {
     if (product.normalizedTitle === anchor.normalizedProductName) continue;
     if (!isEligibleCombinationComponent(product, finishedCombinationTitles)) continue;
+    // Fix (Aniq spec) — a highly sensitive customer never sees an intense product enter the
+    // support shortlist at all, not just at final combination scoring.
+    if (!passesIntensityFilter(product.notesJson, preferenceIntent)) continue;
     const families = familiesOf(product.notesJson);
     const compatibleCount = anchorFamilies.filter((af) => families.some((f) => pairIsCompatible(af, f))).length;
     if (compatibleCount === 0) continue;
@@ -373,7 +447,7 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
   return analogous.sort((a, b) => b.overlapCount - a.overlapCount).slice(0, 3);
 }
 
-function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords }) {
+function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent }) {
   // Reject if ANY two products in the combo are near-duplicates of each other (not just of the
   // anchor) — two shortlisted supporting products can each individually pass the anchor's
   // near-duplicate check while being siblings of one another.
@@ -466,16 +540,78 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const analogousExistingCombinations = findAnalogousCombinations(comboProducts, allCombinations, notesByNormalizedTitle);
   const analogousScore = analogousExistingCombinations.length * 2;
 
-  const balanceRiskHit = risks.some((r) => /compete|duplicate|complex/i.test(r));
+  // Fix 9 (Aniq spec) — confirmed real bug while writing the "same-role rejection" test: the
+  // duplicate_direction risk's actual message ('Every product shares the same "X" direction with
+  // no contrasting role') never contains the literal words "compete"/"duplicate"/"complex", so this
+  // check silently never caught it despite the rule's own id being "duplicate_direction". Every
+  // product sharing one identical primary role is exactly the case Test 9 requires to zero out the
+  // balance score.
+  const balanceRiskHit = risks.some((r) => /compete|duplicate|complex|no contrasting role/i.test(r));
   const balanceScore = balanceRiskHit ? 0 : 10;
   const rolesComplementary = !balanceRiskHit && roledProducts.every((p) => p.hasDetectedFamily);
+
+  // Fix (Aniq spec, sections 2/3) — a customer's preferred STYLE (e.g. "relaxing") now scores real
+  // products directly, on its OWN score line separate from historical popularity, so it can outrank
+  // a historically-popular-but-mismatched product (Test 2) rather than only ever affecting
+  // customer-facing copy. Symmetrically, avoidedDirections (from high sensitivity) penalize any
+  // survivor of the hard pre-generation filter that still carries 1-2 (sub-hard-limit) risk notes —
+  // defense in depth alongside the earlier exclusion, never the only gate.
+  //
+  // Counted as DISTINCT directions matched ANYWHERE in the combo, not summed per product — the same
+  // lesson already learned above for compatibilityScore ("one bonus per pair, not per family
+  // combination"). Confirmed as a real bug against the live Aniq profile: summing per-product let a
+  // Quadbrid (4 components) rack up 4x the style-match points of a Hybrid (2 components) purely from
+  // having more products to accumulate hits across — directly fighting the complexity penalty and
+  // silently crowding every Hybrid out of the results entirely. Capping the reward at
+  // preferredDirections.length (regardless of how many products are in the combo) removes that
+  // perverse "more products = better style score" incentive.
+  const preferredDirections = preferenceIntent?.preferredDirections || [];
+  const avoidedDirections = preferenceIntent?.avoidedDirections || [];
+  const comboAllNotes = comboProducts.flatMap((p) => p.notes || []);
+  let styleMatchScore = 0;
+  for (const direction of preferredDirections) {
+    if (countPreferredDirectionMatches(comboAllNotes, [direction]) > 0) styleMatchScore += 3;
+  }
+  let avoidedDirectionPenalty = 0;
+  for (const direction of avoidedDirections) {
+    if (countAvoidedDirectionMatches(comboAllNotes, [direction]) > 0) avoidedDirectionPenalty -= 5;
+  }
+
+  // Fix 5 (Aniq spec) — combined complexity after de-duplicating notes across every component
+  // (two products sharing several notes shouldn't double-count them), penalized more heavily when
+  // the customer prefers simple combinations — this is what lets a simple two-product Hybrid
+  // outrank a complex Tribrid/Quadbrid built from the same candidate pool (Test 6).
+  const combinedUniqueNoteCount = new Set(comboProducts.flatMap((p) => (p.notes || []).map((n) => String(n).toLowerCase()))).size;
+  const combinedComplexity = computeComplexityLevel(combinedUniqueNoteCount);
+  const preferSimple = Boolean(preferenceIntent?.preferSimpleCombinations);
+  const COMPLEXITY_PENALTY = {
+    low: 0,
+    moderate: preferSimple ? -2 : -1,
+    high: preferSimple ? -6 : -2,
+    "very-high": preferSimple ? -12 : -4,
+  };
+  const complexityPenalty = COMPLEXITY_PENALTY[combinedComplexity] ?? 0;
+
+  // Fix (Aniq spec, section 5) — a DIRECT, explicit product-count bias, separate from the combined-
+  // note-complexity penalty above. Confirmed necessary against real data: a genuinely simple 3-note
+  // anchor (e.g. "Herbs & Sea Salt") paired with two 9-12-note real support products still nets
+  // "very-high" combined complexity and a Tribrid shape — the complexity penalty alone wasn't
+  // severe enough to stop it out-scoring a genuine two-product Hybrid once history/style/
+  // compatibility scores are added back in. This directly implements "prefer two-product Hybrids...
+  // avoid automatically filling results with Tribrids... use Quadbrids only when specifically
+  // requested or strongly justified" as its own real scoring line, not just an indirect hope.
+  const TYPE_SIMPLICITY_SCORE = preferSimple
+    ? { HYBRID: 10, TRIBRID: -6, QUADBRID: -16 }
+    : { HYBRID: 0, TRIBRID: 0, QUADBRID: 0 };
+  const typeSimplicityScore = TYPE_SIMPLICITY_SCORE[type] ?? 0;
 
   // Each identified risk (excessive heat, competing fruits, over-complexity, duplicate direction,
   // etc.) is a real, named downside — weighted on the same scale as a dislike conflict (-10/-5) so
   // a risk-laden combination can't out-rank a genuinely clean one just by accumulating small
   // positive signals elsewhere.
   const finalScore =
-    preferenceScore + seasonalScore + historyScore + compatibilityScore + analogousScore + balanceScore + conflictPenalty - risks.length * 10;
+    preferenceScore + seasonalScore + historyScore + compatibilityScore + analogousScore + balanceScore + conflictPenalty +
+    styleMatchScore + avoidedDirectionPenalty + complexityPenalty + typeSimplicityScore - risks.length * 10;
 
   // Fix 10 — deterministic confidence with hard caps layered on top of the numeric threshold, so a
   // risk-laden or evidence-thin combination can never read as "very high"/"high" just by
@@ -508,6 +644,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   if (!profileComplete) cap("high");
   if (evidenceScope === "limited" || evidenceScope === "global") cap("medium");
   if (risks.length >= 2) cap("low");
+  // Fix (Aniq spec) — a highly sensitive/simple-preference customer can never read a very-high- or
+  // high-complexity combination as more confident than the complexity genuinely supports.
+  if (preferSimple && combinedComplexity === "very-high") cap("low");
+  else if (preferSimple && combinedComplexity === "high") cap("medium");
 
   const roledForRatio = roledProducts;
   const recommendedRatio = computeRatios(roledForRatio);
@@ -516,16 +656,57 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // of them ever contains a source product title.
   const primaryDirection = directionForRole(roledProducts[0]?.role || "Contrast");
   const customerFacingDescription = describeCharacter(roledProducts.map((p) => p.role), componentKey, vocabUsedWords);
-  const customerFacingName = generateCustomerFacingName(primaryDirection, componentKey);
   const customerFacingBestUse = describeBestUse(profile, primaryDirection);
   const customerFacingWeatherSuitability = describeWeatherSuitability(evidenceScope, profile);
   const customerFacingStrength = computeCustomerFacingStrength(roledProducts, recommendedRatio);
   const customerFacingRisk = describeCustomerFacingRisk(risks);
+
+  // Fix 13 (Aniq spec) — the generated name must reflect the REAL overall intensity across every
+  // component, computed AFTER the full profile is known — not just the anchor's own individual
+  // role. Without this, a genuinely heavy/complex formula (several real intensity-driving notes,
+  // very-high combined complexity, or a "strong" overall strength reading) could still get named
+  // from the light/calm vocabulary pool purely because its first product happened to read as
+  // "Freshness" — concealing a heavy formula behind words like "calm"/"soft"/"effortless".
+  const totalIntensityDrivers = roledProducts.reduce((sum, p) => sum + (p.intensityDrivers?.length || 0), 0);
+  const isOverallIntense = totalIntensityDrivers >= 3 || combinedComplexity === "very-high" || customerFacingStrength === "strong";
+  const namingDirection = isOverallIntense ? "deep_evening" : primaryDirection;
+  const customerFacingName = generateCustomerFacingName(namingDirection, componentKey);
   const customerFacingWhySuits = matchedPreferenceFamilies.size
     ? `Designed around your preference for ${[...matchedPreferenceFamilies].join(" and ")} scents.`
     : "Designed to be a versatile, easy-to-wear everyday option.";
 
   const internalProducts = roledProducts.map((p) => ({ title: p.title, notes: p.notes, fragranceFamily: null, contribution: p.role }));
+
+  // Fix (Aniq spec, sections 11-12) — REAL product names and notes are now customer-facing (this
+  // reverses the earlier "Product 1/2/3" generic-label design, per this spec's own explicit,
+  // repeated instruction: "Do not limit the response to generic labels such as 'Product 1'... Do
+  // not hide the real product names in the recommendation response"). `internalProducts` above
+  // remains the backend/Shopify-creation source of truth; these are the same real names/notes,
+  // just organized into the shape the frontend and model narration actually consume.
+  const customerFacingNotesByProduct = internalProducts.map((p) => ({
+    label: p.title,
+    notes: (p.notes || []).slice(0, 5),
+  }));
+  const components = internalProducts.map((p) => {
+    const ratio = recommendedRatio.find((r) => r.productTitle === p.title);
+    return {
+      productName: p.title,
+      availableNotes: (p.notes || []).slice(0, 5),
+      contribution: p.contribution,
+      ratioPercent: ratio ? ratio.ratioPercent : null,
+    };
+  });
+  // Real notes present in EVERY component's note list — not invented, computed directly from the
+  // same notesJson used everywhere else.
+  const sharedOrConnectingNotes = internalProducts.length < 2 ? [] : (() => {
+    const noteSets = internalProducts.map((p) => new Set((p.notes || []).map((n) => String(n).toLowerCase())));
+    const sharedLower = [...noteSets[0]].filter((n) => noteSets.slice(1).every((s) => s.has(n)));
+    return (internalProducts[0].notes || []).filter((n) => sharedLower.includes(String(n).toLowerCase()));
+  })();
+  const whyNotesWork = compatibilityReasons.length
+    ? compatibilityReasons.slice(0, 3).join(" ")
+    : "Each component plays a distinct, real role in the blend rather than repeating the same direction.";
+  const expectedResult = `A ${customerFacingDescription} result, built from ${internalProducts.map((p) => p.title).join(" and ")}.`;
 
   validateCombinationShape({ type, products: internalProducts, recommendedRatio });
 
@@ -543,6 +724,26 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
       distinctSimilarCustomers: anchor.distinctSimilarCustomers,
       repeatPurchaseCustomers: anchor.repeatPurchaseCustomers,
     },
+    // Fix 11/12 (Aniq spec) — the same real counts as historicalEvidence above, translated into
+    // plain sentences safe to show the customer directly; never claims evidence that isn't real
+    // (a zero count reads as "not available," never omitted or silently inflated). Fix 16: labeled
+    // as historical data, explicitly not a claim of current popularity.
+    customerFacingHistoricalEvidence: {
+      cityEvidence: anchor.sameCityOrders > 0 ? `${anchor.sameCityOrders} historical order(s) from the same city.` : "No same-city order history available.",
+      countryEvidence: anchor.sameCountryOrders > 0 ? `${anchor.sameCountryOrders} historical order(s) from the same country.` : "No same-country order history available.",
+      seasonalEvidence: anchor.sameSeasonOrders > 0 ? `${anchor.sameSeasonOrders} historical order(s) during the same season.` : "No same-season order history available.",
+      repeatEvidence: anchor.repeatPurchaseCustomers > 0 ? `${anchor.repeatPurchaseCustomers} similar customer(s) repeat-purchased this direction.` : "No repeat-purchase evidence available.",
+      dataWindow: "Reflects real historical order data through October 2024 — not a claim of current popularity.",
+    },
+    existingCombinationEvidence: {
+      exactCombinationExists: false, // structurally guaranteed — see the componentKey exclusion above
+      similarEvidence: analogousExistingCombinations,
+    },
+    components,
+    combinedDirection: customerFacingDescription,
+    sharedOrConnectingNotes,
+    whyNotesWork,
+    expectedResult,
     analogousExistingCombinations,
     preferenceScore,
     seasonalScore,
@@ -550,6 +751,11 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     compatibilityScore,
     balanceScore,
     conflictPenalty,
+    styleMatchScore,
+    avoidedDirectionPenalty,
+    complexityPenalty,
+    typeSimplicityScore,
+    combinedComplexity,
     finalScore,
     recommendedRatio,
     risks,
@@ -566,6 +772,7 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     customerFacingWeatherSuitability,
     customerFacingStrength,
     customerFacingRisk,
+    customerFacingNotesByProduct,
   };
 }
 
@@ -586,9 +793,15 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // Fix (finished-combination-as-ingredient) — a product that IS itself a finished Hybrid/Tribrid/
   // Quadbrid must never become an anchor OR a support ingredient of a DIFFERENT new combination.
   const finishedCombinationTitles = new Set(allCombinations.map((c) => c.normalizedTitle));
+  // Fix (Aniq spec) — computed ONCE per generation call; drives hard pre-generation filters
+  // (anchor/support eligibility below) as well as complexity-aware scoring/type bias downstream.
+  const preferenceIntent = interpretCustomerPreferences(profile);
 
   const anchors = (candidateProducts || [])
-    .filter((c) => isEligibleCombinationComponent({ title: c.productName, normalizedTitle: c.normalizedProductName }, finishedCombinationTitles))
+    .filter((c) =>
+      isEligibleCombinationComponent({ title: c.productName, normalizedTitle: c.normalizedProductName, collection: c.collection }, finishedCombinationTitles) &&
+      passesIntensityFilter(c.orderHistoryNotes, preferenceIntent),
+    )
     .slice()
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
     .slice(0, MAX_ANCHORS);
@@ -601,7 +814,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   const vocabUsedWords = new Set();
 
   for (const anchor of anchors) {
-    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles);
+    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
     if (!shortlist.length) continue;
 
     for (const type of allowedTypes) {
@@ -630,6 +843,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
           allCombinations,
           notesByNormalizedTitle,
           vocabUsedWords,
+          preferenceIntent,
         });
         if (proposal) results.push(proposal);
       }
@@ -637,7 +851,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   }
 
   results.sort((a, b) => b.finalScore - a.finalScore);
-  const finalResults = results.slice(0, maximumResults);
+  const finalResults = selectDiverseResults(results, maximumResults);
 
   // Fix (vagueness diagnosis) — only the proposals actually being returned pay for a real,
   // note-aware copy-generation call; every other scored-but-discarded candidate (up to ~450 per

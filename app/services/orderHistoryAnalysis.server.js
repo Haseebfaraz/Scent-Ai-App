@@ -11,7 +11,7 @@
 import prisma from "../db.server.js";
 import { SEASON_ALIASES } from "../utils/fragranceNormalization.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLevel } from "../utils/fragranceScoring.js";
-import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter } from "../utils/fragranceCompatibility.js";
 
 // Matches the MIN_SAMPLE_SIZE convention already established in app/routes/chat.jsx's
 // getPopularNotesForRegion — a regional signal only counts once it's backed by a real sample.
@@ -52,10 +52,20 @@ async function cityCountsByProduct(cityWhere, candidateNames) {
 
 // ---- Country/state/season tiers (precomputed — indexed point-reads, not live aggregation) ----
 
+// Fix (season-alias bug) — `scopeValue` may be a single string (state/country: no aliasing) OR an
+// array (season: the source `season` column has inconsistent real values — "Summer"/"Summer
+// Months", "Fall"/"Autumn Months" — see SEASON_ALIASES; scripts/build-region-summary.cjs stores
+// each raw value as its OWN scopeValue row, un-normalized). Confirmed a real bug here: this
+// function used to be called with the single raw `season` string, silently missing every row
+// stored under an alias spelling. Passing the full alias array and matching with `in` fixes it.
+function scopeValueWhere(scopeValue) {
+  return Array.isArray(scopeValue) ? { in: scopeValue } : scopeValue;
+}
+
 async function topProductsFromSummary(scope, scopeValue, limit) {
-  if (!scopeValue) return [];
+  if (!scopeValue || (Array.isArray(scopeValue) && !scopeValue.length)) return [];
   const rows = await prisma.productRegionSummary.findMany({
-    where: { scope, scopeValue },
+    where: { scope, scopeValue: scopeValueWhere(scopeValue) },
     orderBy: { orderCount: "desc" },
     take: limit,
     select: { normalizedProductName: true },
@@ -64,12 +74,25 @@ async function topProductsFromSummary(scope, scopeValue, limit) {
 }
 
 async function summaryByProduct(scope, scopeValue, candidateNames) {
-  if (!scopeValue || !candidateNames.length) return new Map();
+  if (!scopeValue || (Array.isArray(scopeValue) && !scopeValue.length) || !candidateNames.length) return new Map();
   const rows = await prisma.productRegionSummary.findMany({
-    where: { scope, scopeValue, normalizedProductName: { in: candidateNames } },
+    where: { scope, scopeValue: scopeValueWhere(scopeValue), normalizedProductName: { in: candidateNames } },
     select: { normalizedProductName: true, orderCount: true, distinctCustomerCount: true, repeatCustomerCount: true },
   });
-  return new Map(rows.map((r) => [r.normalizedProductName, r]));
+  // Multiple alias rows (e.g. "Summer" + "Summer Months") can both match one product — combine
+  // them into a single real total rather than keeping only whichever alias happened to load last.
+  const combined = new Map();
+  for (const row of rows) {
+    const existing = combined.get(row.normalizedProductName);
+    if (!existing) {
+      combined.set(row.normalizedProductName, { ...row });
+    } else {
+      existing.orderCount += row.orderCount;
+      existing.distinctCustomerCount += row.distinctCustomerCount;
+      existing.repeatCustomerCount += row.repeatCustomerCount;
+    }
+  }
+  return combined;
 }
 
 // "Similar customer" evidence (distinct/repeat counts) scoped to the narrowest sufficient region —
@@ -123,7 +146,7 @@ export async function analyzeCustomerProductCandidates(profile) {
     topProductsByCityLive(cityWhere, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("state", stateRegion, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("country", country, CANDIDATE_SHORTLIST_PER_TIER),
-    topProductsFromSummary("season", season, CANDIDATE_SHORTLIST_PER_TIER),
+    topProductsFromSummary("season", seasonValues, CANDIDATE_SHORTLIST_PER_TIER),
   ]);
   const candidateNames = [...new Set([...cityTop, ...stateTop, ...countryTop, ...seasonTop])];
   if (!candidateNames.length) return [];
@@ -132,7 +155,7 @@ export async function analyzeCustomerProductCandidates(profile) {
     cityCountsByProduct(cityWhere, candidateNames),
     summaryByProduct("state", stateRegion, candidateNames),
     summaryByProduct("country", country, candidateNames),
-    summaryByProduct("season", season, candidateNames),
+    summaryByProduct("season", seasonValues, candidateNames),
     prisma.productRegionSummary.findMany({
       where: { scope: "classification_global", normalizedProductName: { in: candidateNames } },
       select: { normalizedProductName: true, scopeValue: true, orderCount: true },
@@ -140,7 +163,7 @@ export async function analyzeCustomerProductCandidates(profile) {
     resolveCohortEvidence({ cityWhere, stateRegion, country, candidateNames }),
     prisma.fragranceProduct.findMany({
       where: { normalizedTitle: { in: candidateNames } },
-      select: { title: true, normalizedTitle: true, notesJson: true },
+      select: { title: true, normalizedTitle: true, notesJson: true, collection: true },
     }),
   ]);
 
@@ -155,6 +178,11 @@ export async function analyzeCustomerProductCandidates(profile) {
 
   const likeFamilies = textToPreferenceFamilies(likes);
   const dislikeFamilies = textToPreferenceFamilies(dislikes);
+  // Fix (Aniq spec, sections 2/4) — a customer's free-text sensitivity/style signals now become a
+  // real, deterministic pre-generation filter at the candidate-scoring stage itself, not just at
+  // final combination scoring — a highly sensitive customer never even sees an intense product as
+  // a candidate to begin with.
+  const preferenceIntent = interpretCustomerPreferences(profile);
 
   const candidates = [];
   for (const normalizedProductName of candidateNames) {
@@ -176,6 +204,8 @@ export async function analyzeCustomerProductCandidates(profile) {
 
     // Spec: "Products with a high conflict should normally be excluded."
     if (dislikeConflict.severity === "high") continue;
+    // Fix (Aniq spec) — a hard pre-generation exclusion for a highly sensitive customer.
+    if (!passesIntensityFilter(notes, preferenceIntent)) continue;
 
     let relevanceScore = 0;
     if (sameCityOrders > 0) relevanceScore += SCORE_WEIGHTS.sameCity;
@@ -190,6 +220,7 @@ export async function analyzeCustomerProductCandidates(profile) {
     candidates.push({
       productName: product.title,
       normalizedProductName,
+      collection: product.collection,
       relevanceScore,
       sameCityOrders,
       sameStateOrders,

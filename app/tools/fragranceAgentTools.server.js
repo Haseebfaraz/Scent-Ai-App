@@ -4,6 +4,7 @@
 // invokes; every handler validates its parsed arguments with Zod before touching a service, and
 // every handler talks to real data only — no handler ever invents a product, note, score, or ratio.
 import { z } from "zod";
+import crypto from "crypto";
 import prisma from "../db.server.js";
 import {
   emptyProfile,
@@ -67,11 +68,20 @@ function toCustomerSafeCombo(withIdCombo) {
     recommendationId, type, existsAlready, evidenceScope, confidence,
     customerFacingName, customerFacingDescription, customerFacingWhySuits,
     customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
+    customerFacingNotesByProduct,
+    // Fix (Aniq spec, sections 11-12) — real product names/notes/ratio/evidence are now part of the
+    // customer-safe shape (this reverses the earlier hidden-name design per this spec's explicit
+    // instruction). Internal database IDs/raw scoring internals still never appear here.
+    components, combinedDirection, sharedOrConnectingNotes, whyNotesWork, expectedResult,
+    customerFacingHistoricalEvidence, existingCombinationEvidence,
   } = withIdCombo;
   return {
     recommendationId, type, existsAlready, evidenceScope, confidence,
     customerFacingName, customerFacingDescription, customerFacingWhySuits,
     customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
+    customerFacingNotesByProduct,
+    components, combinedDirection, sharedOrConnectingNotes, whyNotesWork, expectedResult,
+    customerFacingHistoricalEvidence, existingCombinationEvidence,
   };
 }
 
@@ -82,13 +92,49 @@ function toCustomerSafeCombo(withIdCombo) {
 // combination array (which it could only do by retyping/hallucinating the numbers). Lost on server
 // restart exactly like chat.jsx's own CONVERSATIONS cache — always safe to regenerate from a fresh
 // analyze_customer_product_candidates call.
-const conversationScratch = new Map(); // conversationId -> { candidateProducts, lastCombinations }
+const conversationScratch = new Map(); // conversationId -> { candidateProducts, lastCombinations, profileHash }
 
-function getScratch(conversationId) {
-  if (!conversationScratch.has(conversationId)) {
-    conversationScratch.set(conversationId, { candidateProducts: null, lastCombinations: null });
-  }
+// Fix (Aniq spec, cache invalidation) — every recommendation-relevant profile field, hashed
+// deterministically. Confirmed real risk: without this, a customer changing their preferred style
+// or dislikes mid-conversation could still get combinations generated from the OLD profile's
+// cached candidateProducts, since analyze_customer_product_candidates was only ever re-run when
+// scratch.candidateProducts was still null — never when the profile itself had actually changed.
+function computeProfileHash(profile) {
+  const relevant = {
+    city: profile?.city, stateRegion: profile?.stateRegion, country: profile?.country,
+    requestedSeasonStyle: profile?.requestedSeasonStyle, weatherDirection: profile?.weatherDirection,
+    likes: profile?.likes, dislikes: profile?.dislikes, preferredStyle: profile?.preferredStyle,
+    inferredStyle: profile?.inferredStyle, additionalPreferences: profile?.additionalPreferences,
+    strengthPreference: profile?.strengthPreference,
+  };
+  return crypto.createHash("sha256").update(JSON.stringify(relevant)).digest("hex");
+}
+
+// Test-only escape hatch (Required Test 8: cache invalidation) — the module otherwise has no way
+// to observe whether a cached scratch entry was actually cleared by a profile change.
+export function __getScratchForTesting(conversationId) {
   return conversationScratch.get(conversationId);
+}
+
+/**
+ * @param {string} conversationId
+ * @param {object} [profile] - when given, clears cached candidateProducts/lastCombinations if the
+ *   profile has changed since the last call that supplied one.
+ */
+function getScratch(conversationId, profile) {
+  if (!conversationScratch.has(conversationId)) {
+    conversationScratch.set(conversationId, { candidateProducts: null, lastCombinations: null, profileHash: null });
+  }
+  const scratch = conversationScratch.get(conversationId);
+  if (profile) {
+    const hash = computeProfileHash(profile);
+    if (scratch.profileHash && scratch.profileHash !== hash) {
+      scratch.candidateProducts = null;
+      scratch.lastCombinations = null;
+    }
+    scratch.profileHash = hash;
+  }
+  return scratch;
 }
 
 // ============================================================
@@ -544,7 +590,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           return fail(`profile is missing required fields (${missing.join(", ")}) — ask the customer for these before analyzing.`);
         }
         const candidateProducts = await analyzeCustomerProductCandidates({ ...profile, season: effectiveQuerySeason(profile) });
-        getScratch(conversationId).candidateProducts = candidateProducts;
+        getScratch(conversationId, profile).candidateProducts = candidateProducts;
         if (!candidateProducts.length) {
           return ok("No real product candidates found for this profile yet — there may be limited historical data for this exact region/season combination.", {
             type: "analysis_progress",
@@ -590,7 +636,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const profile = await getCustomerProfile(conversationId);
         const queriedProfile = { ...profile, season: effectiveQuerySeason(profile) };
-        const scratch = getScratch(conversationId);
+        const scratch = getScratch(conversationId, profile);
         if (!scratch.candidateProducts) {
           scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
@@ -630,7 +676,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const profile = await getCustomerProfile(conversationId);
         const queriedProfile = { ...profile, season: effectiveQuerySeason(profile) };
-        const scratch = getScratch(conversationId);
+        const scratch = getScratch(conversationId, profile);
         if (!scratch.candidateProducts) {
           scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
