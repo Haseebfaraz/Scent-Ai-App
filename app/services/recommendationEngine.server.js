@@ -28,6 +28,7 @@ import {
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
 import { hasSeasonWeatherConflict } from "../utils/weatherSeason.js";
+import { applyCustomerFacingCopy } from "./fragranceCopyGeneration.server.js";
 
 const DEFAULT_MAX_RESULTS = 8;
 const BOTTLE_ML = 34;
@@ -39,6 +40,33 @@ const ALL_TYPES = ["HYBRID", "TRIBRID", "QUADBRID"];
 // catalog.
 const MAX_ANCHORS = 5;
 const MAX_SUPPORT_SHORTLIST = 8;
+
+// Fix (perf) — allProducts/allCombinations are near-static reference tables (~3450 / ~432 rows)
+// that were being fetched fresh, unconditionally, on EVERY call to generateNewProductCombinations
+// (including every refine_combination_recommendations call in the same conversation) — a full
+// table scan regardless of how rich or thin the customer's profile is. Cached at module scope,
+// same pattern as chat.jsx's own cachedCatalogTitlePatterns cache, but with a TTL rather than a
+// permanent cache: verified nothing in the live running app writes to FragranceProduct or
+// ExistingCombination — only the offline scripts/*.cjs import scripts do, and those run as a
+// SEPARATE process against the same database, so there is no in-process "a row was just written"
+// event this module could ever hook an invalidation into. A short TTL is the only mechanism that
+// can notice a catalog re-import that happened while the server was already running, and 5 minutes
+// is far shorter than the gap between real catalog updates (a manual, infrequent operation) while
+// still eliminating the round trip for every tool call within one live conversation.
+const CATALOG_CACHE_TTL_MS = 5 * 60 * 1000;
+let catalogCache = null; // { allProducts, allCombinations, fetchedAt }
+
+async function getCatalogAndCombinations() {
+  if (catalogCache && Date.now() - catalogCache.fetchedAt < CATALOG_CACHE_TTL_MS) {
+    return catalogCache;
+  }
+  const [allProducts, allCombinations] = await Promise.all([
+    prisma.fragranceProduct.findMany({ select: { title: true, normalizedTitle: true, notesJson: true } }),
+    prisma.existingCombination.findMany({ select: { title: true, type: true, componentProductsJson: true, tagLine: true, componentKey: true } }),
+  ]);
+  catalogCache = { allProducts, allCombinations, fetchedAt: Date.now() };
+  return catalogCache;
+}
 
 const ALL_FAMILIES = { ...PREFERENCE_FAMILIES, ...COMPATIBILITY_TAGS };
 
@@ -530,10 +558,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
     .slice(0, MAX_ANCHORS);
   if (!anchors.length) return [];
 
-  const [allProducts, allCombinations] = await Promise.all([
-    prisma.fragranceProduct.findMany({ select: { title: true, normalizedTitle: true, notesJson: true } }),
-    prisma.existingCombination.findMany({ select: { title: true, type: true, componentProductsJson: true, tagLine: true, componentKey: true } }),
-  ]);
+  const { allProducts, allCombinations } = await getCatalogAndCombinations();
   const notesByNormalizedTitle = new Map(allProducts.map((p) => [p.normalizedTitle, p.notesJson || []]));
   // Loaded once, checked in-memory per candidate combo below — avoids one DB round trip per
   // candidate (with up to ~450 candidate combos generated per request, that was the dominant cost
@@ -583,5 +608,26 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   }
 
   results.sort((a, b) => b.finalScore - a.finalScore);
-  return results.slice(0, maximumResults);
+  const finalResults = results.slice(0, maximumResults);
+
+  // Fix (vagueness diagnosis) — only the proposals actually being returned pay for a real,
+  // note-aware copy-generation call; every other scored-but-discarded candidate (up to ~450 per
+  // request) never does. On any failure this leaves customerFacingDescription/customerFacingWhySuits
+  // exactly as scoreProposedCombination() already set them above (the deterministic fallback).
+  const catalogTitlesLowercase = allProducts.map((p) => p.title.toLowerCase()).filter((t) => t.length >= 4);
+  const copyItems = finalResults.map((proposal) => {
+    const notesByRole = {};
+    for (const p of proposal.internalProducts) {
+      const existing = notesByRole[p.contribution] || [];
+      notesByRole[p.contribution] = [...new Set([...existing, ...p.notes])];
+    }
+    return { proposal, notesByRole };
+  });
+  await applyCustomerFacingCopy(
+    copyItems,
+    { likes: profile?.likes, dislikes: profile?.dislikes, preferredStyle: profile?.preferredStyle, occasion: profile?.occasion },
+    catalogTitlesLowercase,
+  );
+
+  return finalResults;
 }
