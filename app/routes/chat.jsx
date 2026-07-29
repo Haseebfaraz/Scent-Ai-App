@@ -1,10 +1,7 @@
 import crypto from "crypto";
-import { unauthenticated } from "../shopify.server";
-import prisma, { createOrUpdateConversation, saveMessage, getConversationHistory } from "../db.server";
-import { normalizeProductName } from "../utils/fragranceNormalization";
+import { createOrUpdateConversation, saveMessage, getConversationHistory } from "../db.server";
 import { FRAGRANCE_AGENT_TOOLS, executeFragranceTool } from "../tools/fragranceAgentTools.server";
 import { getCustomerProfile, getMissingRequiredFields, saveCustomerProfileField } from "../services/customerProfile.server";
-import { getRecommendation, markRecommendationShopifyProduct } from "../services/recommendationConfirmation.server";
 
 // Fix 1/8 — the old region/season/weather system that used to live here (extractRegionFromHistory,
 // getPopularNotesForRegion, getCurrentSeason, getLiveWeather, the strict-city-question gate) is
@@ -234,7 +231,7 @@ function extractEmailFromHistory(history) {
 async function callAI(history, conversationId, knownCustomerEmail, knownCustomerName) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
-    return { replyText: "Configuration error: missing API key.", readyForShopifyCreation: null, sseEvents: [] };
+    return { replyText: "Configuration error: missing API key.", sseEvents: [] };
   }
 
   // Fix 8 — city verification is now deterministic (verify_customer_location, backed by real
@@ -251,7 +248,6 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
 
   let messages = [{ role: "system", content: await buildSystemPrompt(history, conversationId, knownCustomerEmail, knownCustomerName) }, ...history];
   let finalText = "";
-  let readyForShopifyCreation = null;
   const sseEvents = [];
   const toolContext = {
     conversationId,
@@ -264,7 +260,7 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
   for (let turn = 0; turn < 6; turn++) {
     const data = await callOpenAIOnce(apiKey, messages, true);
     if (!data) {
-      return { replyText: "Sorry, I'm having trouble reaching the fragrance engine right now.", readyForShopifyCreation: null, sseEvents };
+      return { replyText: "Sorry, I'm having trouble reaching the fragrance engine right now.", sseEvents };
     }
 
     const choice = data.choices[0];
@@ -277,7 +273,6 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
       for (const toolCall of toolCalls) {
         const result = await executeFragranceTool(toolCall.function.name, toolCall.function.arguments, toolContext);
         if (result.sseEvent) sseEvents.push(result.sseEvent);
-        if (result.readyForShopifyCreation) readyForShopifyCreation = result.readyForShopifyCreation;
 
         messages.push({
           role: "tool",
@@ -314,7 +309,6 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
 
   return {
     replyText: finalText || "Let's get that crafted for you.",
-    readyForShopifyCreation,
     sseEvents,
     updatedMessages: persistedMessages
   };
@@ -323,232 +317,12 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
 // ============================================================
 // 6. DYNAMIC PRODUCT CREATION
 // ============================================================
-// Used only when a component product's real pricePer5ml is somehow missing from the catalog —
-// shouldn't happen since every FragranceProduct row is populated, but keeps product creation from
-// ever computing a $0 price.
-const FALLBACK_PRICE_PER_5ML = 20;
-
-// Real animated bottle renders hosted on the shop's own CDN — a different one for a 2-component
-// blend vs. a 3+ component blend, since the render itself shows the layering.
-const BOTTLE_IMAGE_2_LAYER = "https://cdn.shopify.com/s/files/1/1005/4379/1236/files/animated_bottle.png?v=1784530062";
-const BOTTLE_IMAGE_3PLUS_LAYER = "https://cdn.shopify.com/s/files/1/1005/4379/1236/files/animated_bottle-3layered.png?v=1784530061";
-
-/**
- * Creates the real Shopify product for a CONFIRMED FragranceRecommendation — never called until
- * recommendationConfirmation.server.js's confirmRecommendation has already re-verified everything
- * (products exist, notes exist, ratios sum to 100%, no high-severity conflict, combination is
- * still genuinely new). Every product, note, and ratio here comes straight from the immutable
- * recommendation record — nothing is re-derived or left to the model.
- */
-async function createShopifyCustomCombinationProduct(admin, shopDomain, recommendation, customName, description, customerName, customerEmail) {
-  const products = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
-  const ratios = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
-  const ratioByTitle = new Map(ratios.map(r => [r.productTitle, r]));
-
-  // Real per-5ml pricing comes from the FragranceProduct catalog now, not a CSV.
-  const catalogRows = await prisma.fragranceProduct.findMany({
-    where: { normalizedTitle: { in: products.map(p => normalizeProductName(p.title)) } },
-    select: { normalizedTitle: true, pricePer5ml: true }
-  });
-  const priceByNormalizedTitle = new Map(catalogRows.map(r => [r.normalizedTitle, r.pricePer5ml]));
-
-  const componentDetails = products.map(p => {
-    const ratio = ratioByTitle.get(p.title);
-    if (!ratio) throw new Error(`No ratio found for product "${p.title}".`);
-    const pricePer5ml = priceByNormalizedTitle.get(normalizeProductName(p.title));
-    return {
-      title: p.title,
-      notes: Array.isArray(p.notes) ? p.notes : [],
-      role: p.contribution || "",
-      ratioPercent: ratio.ratioPercent,
-      milliliters: ratio.milliliters,
-      pricePer5ml: typeof pricePer5ml === "number" ? pricePer5ml : FALLBACK_PRICE_PER_5ML
-    };
-  });
-
-  // Total price = each component's real per-5ml rate applied to however much of it went into the
-  // blend (recommendationEngine.server.js already computed milliliters against a fixed 34ml bottle).
-  const computedPrice = componentDetails.reduce(
-    (sum, c) => sum + (c.pricePer5ml / 5) * c.milliliters,
-    0
-  );
-  const FIXED_PRICE = computedPrice.toFixed(2);
-
-  // A combination can have 2-4 real component products (Hybrid/Tribrid/Quadbrid), but Shopify caps
-  // every product at 3 options total — unlike the old top/middle/base system (always exactly 3
-  // positions), a single "Blend Composition" option naming every real product and its fixed ratio
-  // works uniformly regardless of type, and never risks exceeding the cap.
-  const blendValue = componentDetails.map(c => `${c.title} (${Math.round(c.ratioPercent)}%)`).join(" + ");
-  const productOptions = [{ name: "Blend Composition", values: [{ name: blendValue }] }];
-
-  const notesSummaryHtml = componentDetails
-    .map(c => `<strong>${c.title}</strong> (${c.role}, ${Math.round(c.ratioPercent)}%): ${c.notes.slice(0, 6).join(", ")}`)
-    .join("<br>");
-
-  const fullDescription = `${description}` +
-    `<p>${notesSummaryHtml}</p>` +
-    `<p><strong>Type:</strong> ${recommendation.combinationType}</p>` +
-    `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>`;
-
-  const createResponse = await admin.graphql(`
-    mutation createProduct($input: ProductInput!) {
-      productCreate(input: $input) {
-        product { id handle }
-        userErrors { field message }
-      }
-    }
-  `, {
-    variables: {
-      input: {
-        title: customName,
-        descriptionHtml: fullDescription,
-        vendor: customerName || customerEmail || undefined,
-        status: "ACTIVE",
-        templateSuffix: "custom-scent",
-        productOptions,
-        metafields: [
-          {
-            namespace: "custom",
-            key: "note_composition",
-            type: "json",
-            value: JSON.stringify({
-              recommendationId: recommendation.id,
-              combinationType: recommendation.combinationType,
-              components: componentDetails
-            })
-          },
-          {
-            // Admin-only by default (not exposed to the Storefront API) — keeps the customer's
-            // name/email out of any public-facing page while still letting staff look up who a
-            // custom product belongs to.
-            namespace: "custom",
-            key: "customer_name",
-            type: "single_line_text_field",
-            value: customerName || ""
-          },
-          {
-            namespace: "custom",
-            key: "customer_email",
-            type: "single_line_text_field",
-            value: customerEmail || ""
-          }
-        ]
-      }
-    }
-  });
-
-  const createJson = await createResponse.json();
-  const product = createJson.data?.productCreate?.product;
-  const createErrors = createJson.data?.productCreate?.userErrors;
-
-  if (!product || (createErrors && createErrors.length > 0)) {
-    throw new Error(createErrors?.map(e => e.message).join(", ") || "Product creation failed.");
-  }
-
-  // Custom-built products have no real product photo — without one, collection/search grids show
-  // a blank placeholder box (as seen in "Your Design"). Attach the real bottle image hosted on
-  // Shopify's own CDN — a different animation for a 2-component blend vs. a 3+ component one.
-  const bottleImageUrl = componentDetails.length === 2 ? BOTTLE_IMAGE_2_LAYER : BOTTLE_IMAGE_3PLUS_LAYER;
-  try {
-    const mediaResponse = await admin.graphql(`
-      mutation attachBottleImage($productId: ID!, $media: [CreateMediaInput!]!) {
-        productCreateMedia(productId: $productId, media: $media) {
-          mediaUserErrors { field message }
-        }
-      }
-    `, {
-      variables: {
-        productId: product.id,
-        media: [{
-          mediaContentType: "IMAGE",
-          originalSource: bottleImageUrl,
-          alt: customName
-        }]
-      }
-    });
-    const mediaJson = await mediaResponse.json();
-    const mediaErrors = mediaJson.data?.productCreateMedia?.mediaUserErrors;
-    if (mediaErrors && mediaErrors.length > 0) {
-      console.error("productCreateMedia returned mediaUserErrors:", JSON.stringify(mediaErrors));
-    }
-  } catch (mediaErr) {
-    console.error("Failed to attach bottle image:", mediaErr.message || mediaErr);
-    // Don't fail the whole product just because the image attach failed.
-  }
-
-  // New products aren't published anywhere by default — publish to every sales channel the app
-  // can see so the customer can actually buy it, not just view it in the admin.
-  try {
-    const publicationsResponse = await admin.graphql(`
-      query getPublications {
-        publications(first: 25) { nodes { id } }
-      }
-    `);
-    const publicationsJson = await publicationsResponse.json();
-    const publicationIds = publicationsJson.data?.publications?.nodes?.map(n => n.id) || [];
-    console.log("Publications lookup:", JSON.stringify({ count: publicationIds.length, errors: publicationsJson.errors }));
-
-    if (publicationIds.length > 0) {
-      const publishResponse = await admin.graphql(`
-        mutation publishToAllChannels($id: ID!, $input: [PublicationInput!]!) {
-          publishablePublish(id: $id, input: $input) {
-            userErrors { field message }
-          }
-        }
-      `, {
-        variables: {
-          id: product.id,
-          input: publicationIds.map(pubId => ({ publicationId: pubId }))
-        }
-      });
-      const publishJson = await publishResponse.json();
-      const publishErrors = publishJson.data?.publishablePublish?.userErrors;
-      if (publishErrors && publishErrors.length > 0) {
-        console.error("publishablePublish returned userErrors:", JSON.stringify(publishErrors));
-      }
-    }
-  } catch (pubErr) {
-    console.error("Failed to publish product to sales channels:", pubErr.message || pubErr);
-    // Don't fail the whole product just because publishing failed — it'll just need publishing
-    // manually in admin.
-  }
-
-  const variantsResponse = await admin.graphql(`
-    query getVariants($id: ID!) {
-      product(id: $id) { variants(first: 1) { edges { node { id } } } }
-    }
-  `, { variables: { id: product.id } });
-  const variantsJson = await variantsResponse.json();
-  const defaultVariantId = variantsJson.data?.product?.variants?.edges?.[0]?.node?.id;
-
-  // Custom fragrances are made to order — there's no real stock count to track. Leaving the
-  // variant untracked (Shopify's own default for a fresh variant) means it's always purchasable,
-  // with no location/quantity bookkeeping needed at all.
-  if (defaultVariantId) {
-    await admin.graphql(`
-      mutation setPrice($productId: ID!, $variants: [ProductVariantsBulkInput!]!) {
-        productVariantsBulkUpdate(productId: $productId, variants: $variants) {
-          product { id }
-          userErrors { field message }
-        }
-      }
-    `, {
-      variables: {
-        productId: product.id,
-        variants: [{ id: defaultVariantId, price: FIXED_PRICE, inventoryItem: { tracked: false } }],
-      },
-    });
-  }
-
-  const cleanShopDomain = shopDomain.replace(/^https?:\/\//, '');
-  const productUrl = `https://${cleanShopDomain}/products/${product.handle}`;
-
-  // Records which real Shopify product this recommendation resulted in — keeps the immutable
-  // FragranceRecommendation row linked to what was actually created from it.
-  await markRecommendationShopifyProduct(recommendation.id, product.id);
-
-  return { productUrl, totalPrice: parseFloat(FIXED_PRICE) };
-}
+// Fix (fragrance preview page) — Shopify product creation is no longer triggered automatically
+// from chat at all. confirm_product_combination only opens the fragrance preview page now (see
+// the "preview_ready" SSE event below); the customer explicitly creates the real product from
+// there via Save Build or Add to Cart. That creation logic (the Top/Middle/Base Note product
+// shape, matching app/routes/api.save-build.jsx's existing expectations) now lives in
+// app/services/fragranceBuild.server.js and app/routes/fragrance-preview.jsx, not here.
 
 // ============================================================
 // 7. LOADER — handles history fetch (GET) requests
@@ -577,6 +351,26 @@ export async function loader({ request }) {
     // Reuses the same DB-rehydration path as the AI's own conversation lookup, so a page reload
     // after a server restart shows the same history the AI itself will actually remember.
     const { history } = conversationId ? await getConversation(conversationId) : { history: [] };
+
+    // Fix (fragrance preview page, Recreate) — the preview page's Recreate action sets this flag
+    // and redirects the customer's browser back to the storefront; the widget there resumes this
+    // SAME conversation (it already persists conversationId in sessionStorage) and immediately
+    // calls this history endpoint. Firing here — once, then clearing it — makes the bot ask the
+    // question without any extra client-side plumbing or a wasted extra chat turn.
+    if (conversationId) {
+      const profile = await getCustomerProfile(conversationId);
+      if (profile.pendingRecreateRecommendationId) {
+        const askText = "What would you like to change about your fragrance?";
+        history.push({ role: "assistant", content: askText });
+        CONVERSATIONS.set(conversationId, history);
+        try {
+          await saveMessage(conversationId, "assistant", askText);
+        } catch (err) {
+          console.error("Failed to persist recreate re-entry message:", err.message);
+        }
+        await saveCustomerProfileField(conversationId, "pendingRecreateRecommendationId", null);
+      }
+    }
 
     const messages = history
       .filter(m => (m.role === "user" || m.role === "assistant") && typeof m.content === "string" && m.content.trim() !== "")
@@ -610,27 +404,10 @@ export async function action({ request }) {
   try {
     const body = await request.json();
 
-    // Prefer the shop domain the theme block actually knows about (injected via Liquid as
-    // {{ shop.permanent_domain }}) over guessing from the Origin header — Origin reflects
-    // whatever's actually hosting the storefront request (e.g. a local theme preview port),
-    // which isn't a valid shop domain and made `unauthenticated.admin()` reject it outright.
-    const originHeader = request.headers.get("Origin") || "";
-    const originShopDomain = originHeader.replace(/^https?:\/\//, '').split('/')[0];
-    let shopDomain = body.shop_domain || originShopDomain;
-    if (!shopDomain || !shopDomain.includes(".")) {
-      shopDomain = "test-3d-products.myshopify.com";
-    }
-    console.log("Shop domain resolution:", JSON.stringify({ fromBody: body.shop_domain, fromOrigin: originShopDomain, resolved: shopDomain }));
-
-    let admin = null;
-    try {
-      const result = await unauthenticated.admin(shopDomain);
-      admin = result.admin;
-      console.log("Successfully verified session credentials for:", shopDomain);
-    } catch (authErr) {
-      console.error("Admin verification session lookup failure:", authErr.message);
-    }
-
+    // Fix (fragrance preview page) — chat.jsx no longer needs a Shopify Admin API session at all:
+    // it never creates a product itself anymore (see the "6. DYNAMIC PRODUCT CREATION" header
+    // above) — that now happens on the fragrance-preview route, which authenticates its own
+    // admin session when the customer actually clicks Save Build/Add to Cart.
     const userMessage = body.message || "";
     const { id: conversationId, history } = await getConversation(body.conversation_id);
 
@@ -647,7 +424,7 @@ export async function action({ request }) {
       ? body.customer_name.trim()
       : null;
 
-    const { replyText, readyForShopifyCreation, sseEvents, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail, knownCustomerName);
+    const { replyText, sseEvents, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail, knownCustomerName);
 
     CONVERSATIONS.set(conversationId, updatedMessages || history);
 
@@ -681,38 +458,6 @@ export async function action({ request }) {
 
         send({ type: "chunk", chunk: replyText });
         send({ type: "message_complete" });
-
-        if (readyForShopifyCreation) {
-          const { recommendationId, customName, description } = readyForShopifyCreation;
-          console.log("Combination confirmed, creating Shopify product for recommendation:", recommendationId);
-          send({ type: "product_creating" });
-
-          if (!admin) {
-            const productError = "Product creation is unavailable right now (session handshake failed).";
-            console.error(productError);
-            send({ type: "product_error", error: productError });
-          } else {
-            try {
-              const recommendation = await getRecommendation(recommendationId);
-              // Fix 5 — same trusted identity priority as callAI/buildSystemPrompt (Shopify
-              // account value, falling back to the saved profile) rather than the raw
-              // knownCustomerName/Email request fields, so a name collected mid-conversation still
-              // ends up on the created product even when the Shopify account itself has none.
-              const identityProfile = await getCustomerProfile(conversationId);
-              const confirmedName = knownCustomerName || identityProfile.name || null;
-              const confirmedEmail = knownCustomerEmail || identityProfile.email || null;
-              const productResult = await createShopifyCustomCombinationProduct(
-                admin, shopDomain, recommendation, customName, description, confirmedName, confirmedEmail
-              );
-              console.log("Combination product created successfully:", productResult.productUrl);
-              send({ type: "product_created", url: productResult.productUrl, price: productResult.totalPrice });
-            } catch (err) {
-              console.error("Combination product creation failed:", err);
-              send({ type: "product_error", error: err.message });
-            }
-          }
-        }
-
         send({ type: "end_turn" });
         controller.close();
       },

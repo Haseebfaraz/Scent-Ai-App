@@ -184,6 +184,20 @@ model FragranceRecommendation {
   createdAt            DateTime  @default(now())
   confirmedAt          DateTime?
   shopifyProductId     String?
+  // Fix (fragrance preview page) — Shopify product creation is now DEFERRED until the customer
+  // clicks Save Build or Add to Cart on the preview page (never automatically on chat confirm).
+  // draft while only previewed/edited; SAVED once Save Build has actually created/resolved a real
+  // Shopify product+variant. shopifyVariantId is the specific ratio-variant last created/resolved
+  // (a distinct variant per distinct ratio — see app/services/fragranceBuild.server.js).
+  buildStatus          String    @default("draft")
+  shopifyVariantId     String?
+  // Customer edits made on the preview page — a customer-renamed fragrance name, notes they chose
+  // to exclude from display, and the last top/middle/base percentages they landed on. All optional;
+  // null/empty means "use the deterministic defaults" (customerFacingName, no exclusions, the
+  // ratios computed from computeNotePositionBuckets/computeRatios).
+  draftName             String?
+  draftExcludedNotes    Json?
+  draftRatiosJson       Json?
 
   @@index([conversationId])
   @@index([status])

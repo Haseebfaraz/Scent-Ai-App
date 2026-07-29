@@ -66,6 +66,11 @@ export function emptyProfile() {
     // select_recommendation tool's deterministic parser, never reconstructed by the model from
     // conversation text. Immutable once set except by another explicit selection (Fix 7).
     selectedRecommendationId: null,
+    // Fix (fragrance preview page, Recreate) — set by the preview page's Recreate action, read
+    // (and cleared) exactly once by chat.jsx's history loader to make the bot proactively ask
+    // "What would you like to change about your fragrance?" the next time this conversation is
+    // resumed, without needing any new client-side round trip.
+    pendingRecreateRecommendationId: null,
   };
 }
 
