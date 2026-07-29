@@ -32,6 +32,7 @@ import {
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
 import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 
 // Fix (profile normalization) — a preferredStyle answer that's actually a non-answer ("you should
 // know", "surprise me") carries no real style signal. Deriving a deterministic guess from whatever
@@ -689,7 +690,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           if (!confirmResult.ok) continue;
 
           await saveCustomerProfileFields(conversationId, { selectedRecommendationId: candidate.recommendationId });
-          const previewUrl = `/fragrance-preview?recommendationId=${candidate.recommendationId}`;
+          const previewUrl = buildPreviewUrl(candidate.recommendationId);
           logPreviewEvent("BEST_RECOMMENDATION_SELECTED", {
             conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
             eventType: "preview_ready", previewUrl,
@@ -773,7 +774,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         // needed for the primary new-conversation flow (generate_new_product_combinations now
         // auto-selects and auto-confirms the best recommendation by itself) — it's kept only for
         // legacy conversations that already have a manually-selected recommendationId.
-        const legacyPreviewUrl = `/fragrance-preview?recommendationId=${recommendationId}`;
+        const legacyPreviewUrl = buildPreviewUrl(recommendationId);
         logPreviewEvent("PREVIEW_READY_EMITTED", {
           conversationId, recommendationId, previewId: recommendationId, eventType: "preview_ready", previewUrl: legacyPreviewUrl,
         });
