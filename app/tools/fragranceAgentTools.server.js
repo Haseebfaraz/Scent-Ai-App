@@ -30,6 +30,24 @@ import {
   hasSeasonWeatherConflict, getCalendarSeason,
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
+import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+
+// Fix (profile normalization) — a preferredStyle answer that's actually a non-answer ("you should
+// know", "surprise me") carries no real style signal. Deriving a deterministic guess from whatever
+// real signal already exists (likes, additional preferences, requested season style) means the
+// profile still has something real to generate from, without ever inventing a preference the
+// customer never gave — labeled internally as "inferred," never presented to the customer as a
+// literal fact they stated.
+const NO_REAL_STYLE_PATTERN = /you should know|you decide|surprise me|not sure|no preference|i ?don'?t know|\bidk\b|whatever you (think|want|pick)/i;
+const NO_REAL_VALUE_PATTERN = /^(na|n\/a|none|nothing|no)$/i;
+function inferStyleFromProfile(profile) {
+  const parts = [];
+  const likeFamilies = textToPreferenceFamilies(profile.likes || []);
+  if (likeFamilies.length) parts.push(likeFamilies.join(" & "));
+  if (profile.additionalPreferences?.length) parts.push(profile.additionalPreferences.join(", "));
+  if (profile.requestedSeasonStyle) parts.push(`${profile.requestedSeasonStyle}-appropriate`);
+  return parts.length ? parts.join(", ") : "Versatile, easy-to-wear";
+}
 
 // Ephemeral, query-purposes-only "which historical season bucket to sample" — never shown to the
 // customer, never persisted. Prefers an explicit requestedSeasonStyle; otherwise derives one from
@@ -318,6 +336,13 @@ const REFINEMENT_LIKE_KEYWORDS = [
   { pattern: /\bfresh(er)?\b/i, family: "Fresh" },
   { pattern: /\bsweet(er)?\b/i, family: "Sweet" },
   { pattern: /\bfruit(y|ier)?\b/i, family: "Fruity" },
+  // Previously missing entirely — a refinement request like "focus on spicy" or "spicier" silently
+  // matched nothing here, so it never actually biased regeneration despite the model's narration
+  // claiming otherwise. Confirmed against real production data (recommendation batches that kept
+  // returning sweet/fresh combinations after repeated "spicier" refinement requests).
+  { pattern: /\bspic(y|ier|e)?\b/i, family: "Spicy" },
+  { pattern: /\bwood(y|ier)?\b/i, family: "Woody" },
+  { pattern: /\bmusk(y)?\b/i, family: "Musk" },
 ];
 const REFINEMENT_DISLIKE_KEYWORDS = [
   { pattern: /\bremove spicy|\bless spicy|no spicy/i, family: "Spicy" },
@@ -376,6 +401,27 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (parsed.data.field === "email" && context.customerEmail) {
           return ok(`Email is already known and trusted — no need to save or ask again.`);
         }
+
+        // Fix (profile normalization) — "NA"/"none"/"nothing" under dislikes means no stated
+        // dislikes, not a literal disliked note called "NA".
+        if (parsed.data.field === "dislikes" && Array.isArray(parsed.data.value)) {
+          parsed.data.value = parsed.data.value.filter((v) => !NO_REAL_VALUE_PATTERN.test(String(v).trim()));
+        }
+
+        // Fix (profile normalization) — a non-answer style ("you should know") never gets stored
+        // as a literal preferredStyle; instead derive+save inferredStyle from whatever real signal
+        // already exists, so the required-field check reflects real information, not a placeholder.
+        if (parsed.data.field === "preferredStyle" && typeof parsed.data.value === "string" && NO_REAL_STYLE_PATTERN.test(parsed.data.value)) {
+          const current = await getCustomerProfile(conversationId);
+          const inferred = inferStyleFromProfile(current);
+          const profile = await saveCustomerProfileFields(conversationId, { inferredStyle: inferred });
+          const missing = getMissingRequiredFields(profile);
+          return ok(
+            `The customer didn't give a real style preference — inferred "${inferred}" from their other stated signals and saved it as inferredStyle (not a literal quote from them). Missing required fields: ${missing.length ? missing.join(", ") : "none — ready to analyze."}`,
+            { type: "profile_progress", profile, missingFields: missing },
+          );
+        }
+
         const fieldSchema = PROFILE_FIELD_SCHEMAS[parsed.data.field];
         const valueParsed = fieldSchema.safeParse(parsed.data.value);
         if (!valueParsed.success) {

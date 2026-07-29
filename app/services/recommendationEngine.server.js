@@ -62,7 +62,7 @@ async function getCatalogAndCombinations() {
   }
   const [allProducts, allCombinations] = await Promise.all([
     prisma.fragranceProduct.findMany({ select: { title: true, normalizedTitle: true, notesJson: true } }),
-    prisma.existingCombination.findMany({ select: { title: true, type: true, componentProductsJson: true, tagLine: true, componentKey: true } }),
+    prisma.existingCombination.findMany({ select: { title: true, normalizedTitle: true, type: true, componentProductsJson: true, tagLine: true, componentKey: true } }),
   ]);
   catalogCache = { allProducts, allCombinations, fetchedAt: Date.now() };
   return catalogCache;
@@ -315,6 +315,20 @@ function describeBestUse(profile, primaryDirection) {
   return occasion ? `Great for ${occasion}, and works well for ${settingText}.` : `Works well for ${settingText}.`;
 }
 
+// Fix (finished-combination-as-ingredient) — a finished Hybrid/Tribrid/Quadbrid, or an obvious
+// multi-product bundle/gift-set, must never be picked as an INGREDIENT of a different new
+// combination — confirmed against real production data, where "Supernova Rebirth & Supernova Noir
+// Bundle" (a bundle, not an atomic fragrance) repeatedly turned up as a component across several
+// "new" recommendations. The exact-componentKey check elsewhere only catches the case where the
+// whole proposed SET already exists as a combination — it never stopped an individual finished
+// product from being reused as one ingredient inside a different one.
+const BUNDLE_KEYWORD_PATTERN = /\b(bundle|gift set|giftset|duo pack|trio pack|value pack|set of \d)\b/i;
+function isEligibleCombinationComponent(product, finishedCombinationTitles) {
+  if (finishedCombinationTitles.has(product.normalizedTitle)) return false;
+  if (BUNDLE_KEYWORD_PATTERN.test(product.title)) return false;
+  return true;
+}
+
 // Real catalog products whose family is compatible with at least one of the anchor's own families
 // (Phase 6: "compatible supporting products from the notes database"). Compatibility (a genuinely
 // DIFFERENT, complementary family — see fragranceCompatibility.js's COMPATIBLE_PAIRS) is the sole
@@ -324,13 +338,14 @@ function describeBestUse(profile, primaryDirection) {
 // siblings ("Poseidon's Elixir 2.0"/"16A"/"13N") — which share the same family and thus never any
 // compatible PAIR — flood the shortlist and crowd out genuinely different, complementary products.
 // Same-family siblings fail the compatibleCount>0 gate here and are correctly excluded.
-function buildSupportShortlistForAnchor(anchor, allProducts) {
+function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles) {
   const anchorFamilies = familiesOf(anchor.orderHistoryNotes);
   const anchorNotes = new Set((anchor.orderHistoryNotes || []).map((n) => String(n).toLowerCase()));
 
   const scored = [];
   for (const product of allProducts) {
     if (product.normalizedTitle === anchor.normalizedProductName) continue;
+    if (!isEligibleCombinationComponent(product, finishedCombinationTitles)) continue;
     const families = familiesOf(product.notesJson);
     const compatibleCount = anchorFamilies.filter((af) => families.some((f) => pairIsCompatible(af, f))).length;
     if (compatibleCount === 0) continue;
@@ -404,6 +419,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
       matches.forEach((m) => matchedPreferenceFamilies.add(m));
     }
   }
+
+  // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a
+  // requirement: a customer who said "I like spicy" could still get combinations with zero spicy
+  // content if other axes (history, compatibility, balance) scored well enough. Confirmed against
+  // real production data — six "spicier" refinement results all anchored on Cotton Candy de Dua
+  // with no spicy-tagged component anywhere, while the model's own narration still claimed "designed
+  // around your preference for spicy scents." When the customer has stated real likes, at least one
+  // component must actually carry one of those families, or this combination is rejected outright —
+  // never silently substituted and described as matching something it doesn't.
+  if (likeFamilies.length > 0 && matchedPreferenceFamilies.size === 0) return null;
 
   const seasonalScore = risks.some((r) => r.includes("summer heat")) ? 0 : SCORE_WEIGHTS.sameSeason;
 
@@ -552,18 +577,22 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
  * @param {string[]} [args.allowedTypes] - subset of ["HYBRID","TRIBRID","QUADBRID"].
  */
 export async function generateNewProductCombinations({ profile, candidateProducts, maximumResults = DEFAULT_MAX_RESULTS, allowedTypes = ALL_TYPES }) {
-  const anchors = (candidateProducts || [])
-    .slice()
-    .sort((a, b) => b.relevanceScore - a.relevanceScore)
-    .slice(0, MAX_ANCHORS);
-  if (!anchors.length) return [];
-
   const { allProducts, allCombinations } = await getCatalogAndCombinations();
   const notesByNormalizedTitle = new Map(allProducts.map((p) => [p.normalizedTitle, p.notesJson || []]));
   // Loaded once, checked in-memory per candidate combo below — avoids one DB round trip per
   // candidate (with up to ~450 candidate combos generated per request, that was the dominant cost
   // in testing before this fix).
   const existingComponentKeys = new Set(allCombinations.map((c) => c.componentKey));
+  // Fix (finished-combination-as-ingredient) — a product that IS itself a finished Hybrid/Tribrid/
+  // Quadbrid must never become an anchor OR a support ingredient of a DIFFERENT new combination.
+  const finishedCombinationTitles = new Set(allCombinations.map((c) => c.normalizedTitle));
+
+  const anchors = (candidateProducts || [])
+    .filter((c) => isEligibleCombinationComponent({ title: c.productName, normalizedTitle: c.normalizedProductName }, finishedCombinationTitles))
+    .slice()
+    .sort((a, b) => b.relevanceScore - a.relevanceScore)
+    .slice(0, MAX_ANCHORS);
+  if (!anchors.length) return [];
 
   const results = [];
   const seenComponentKeys = new Set();
@@ -572,7 +601,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   const vocabUsedWords = new Set();
 
   for (const anchor of anchors) {
-    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts);
+    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles);
     if (!shortlist.length) continue;
 
     for (const type of allowedTypes) {

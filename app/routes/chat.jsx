@@ -205,7 +205,7 @@ async function callOpenAIOnce(apiKey, messages, useTools) {
         "Authorization": `Bearer ${apiKey}`
       },
       body: JSON.stringify({
-        model: "gpt-4o-mini",
+        model: "gpt-4.1-mini",
         messages,
         temperature: 0.3,
         ...(useTools ? { tools: FRAGRANCE_AGENT_TOOLS } : {})
