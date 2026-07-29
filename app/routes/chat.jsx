@@ -2,6 +2,7 @@ import crypto from "crypto";
 import { createOrUpdateConversation, saveMessage, getConversationHistory } from "../db.server";
 import { FRAGRANCE_AGENT_TOOLS, executeFragranceTool } from "../tools/fragranceAgentTools.server";
 import { getCustomerProfile, getMissingRequiredFields, saveCustomerProfileField } from "../services/customerProfile.server";
+import { resolveLegacyPreviewShortCircuit } from "../services/legacyPreviewRecovery.server";
 
 // Fix 1/8 — the old region/season/weather system that used to live here (extractRegionFromHistory,
 // getPopularNotesForRegion, getCurrentSeason, getLiveWeather, the strict-city-question gate) is
@@ -128,28 +129,16 @@ PHASE 4 — Save profile fields as you learn them, then analyze. Throughout Turn
    - likes / preferredStyle / occasion: as soon as their bridge (Turn 3c) or any later reply expresses a real style/mood/occasion direction (e.g. "fresh, invigorating" -> likes: ["Fresh"]; "for my wife's wedding" -> occasion: "wedding").
    - dislikes: as soon as they mention anything they want to avoid.
    Once Turn 3d is complete (city verified, or they've dodged it after a genuine attempt) and you have at least one real like/preferredStyle signal, CALL get_customer_profile to confirm nothing required is still missing. Do NOT ask another follow-up question just to gather more once the required fields are met — take ownership and move to analysis.
-   Once nothing required is missing: CALL analyze_customer_product_candidates (no arguments needed) then generate_new_product_combinations to get genuinely NEW combination proposals (Hybrid = 2 real products, Tribrid = 3, Quadbrid = 4) — every proposal is already checked against the real existing-combination database and only returned if it's genuinely new. Never invent your own combination outside of what this tool returns.
+   Once nothing required is missing: CALL analyze_customer_product_candidates (no arguments needed) then generate_new_product_combinations (no arguments needed unless the customer asked for a specific type). Never invent your own combination outside of what this tool returns.
 
-Presenting results — real DUA product names and notes ARE customer-facing now. Every proposal generate_new_product_combinations/refine_combination_recommendations returns is already the full customer-safe shape — use ONLY these fields, verbatim in spirit, never invent beyond them:
-   - customerFacingName — this IS the fragrance's name. Never invent a different one.
-   - type (Hybrid/Tribrid/Quadbrid) and combinedDirection — its overall character.
-   - components — the REAL product name, its real availableNotes, its contribution role, and its ratioPercent, for EVERY component. Show every component's real name and real notes plainly — do not hide them, do not generalize them into "Product 1/2/3."
-   - sharedOrConnectingNotes, if any — real notes present in more than one component; explain how they connect the blend.
-   - whyNotesWork — why the real notes work together.
-   - customerFacingWhySuits — why it suits THIS customer.
-   - customerFacingBestUse and customerFacingWeatherSuitability — when/where it works.
-   - customerFacingStrength — light/moderate/strong. expectedResult — the overall expected fragrance experience.
-   - confidence — state it plainly, exactly as given (never upgrade "medium" to "high," etc.).
-   - customerFacingHistoricalEvidence — real, evidence-scoped sentences (cityEvidence/countryEvidence/seasonalEvidence/repeatEvidence/dataWindow). Only state what these actually say — never claim more regional/historical significance than the sentence itself gives, and always keep in mind this reflects historical data, never current popularity.
-   - existingCombinationEvidence — exactCombinationExists is always false for a new proposal (never claim otherwise); similarEvidence lists real analogous existing combinations, if any.
-   - customerFacingRisk (possibleRisk), if present — mention as a friendly, honest heads-up.
-   - Always call it a "new, custom combination" — never claim it already exists.
-   Close by inviting their reaction, e.g. "How do these sound? Want me to adjust any of them, or shall we create one?"
+PHASE 5 — Automatic preview (the ONLY behavior for a new recommendation). generate_new_product_combinations ranks every genuinely-new combination it generates and, on its own, deterministically selects and confirms the single best one and opens the fragrance preview page for it (a preview_ready event the frontend acts on immediately) — this is NOT something you narrate your way through. The moment that tool call returns successfully:
+   - Do NOT list the combinations it generated. Do NOT describe multiple options. Do NOT say things like "I have five combinations" or "here are your options."
+   - Do NOT ask the customer to pick one, in any form — no "which one sounds good", no "want me to adjust any of them", no "shall we create one?"
+   - Do NOT ask for confirmation of any kind. The customer never needs to type "1", "yes", "create it", or "preview" for a new recommendation — it opens automatically the instant it's ready.
+   - Say at most one short, warm line acknowledging it's ready (e.g. "Found something I think you'll love — pulling it up now.") and stop there. Nothing further about notes, products, ratios, or evidence belongs in this reply; the preview page itself shows all of that.
+   If generate_new_product_combinations reports every candidate failed re-verification (a real, rare backend failure — it will tell you plainly), that's the ONLY case where you explain there was a temporary issue and offer to try again.
 
-PHASE 5 — Selection and refinement. The moment the customer picks one (in ANY phrasing — "option 1", "opt 1 is good", "the first one", "number 2", "I want the last one", "create this"), CALL select_recommendation with their message text passed through verbatim — never try to resolve which one they mean yourself from the description; the tool resolves it deterministically. If they instead react with feedback like "make it sweeter," "show me fresher combinations," "remove spicy notes," "give me a Hybrid only," CALL refine_combination_recommendations with their feedback in their own words — never regenerate or adjust combinations yourself from memory.
-
-PHASE 6 — Confirmation and creation. Once select_recommendation has resolved their pick, CALL confirm_product_combination with that same recommendationId. If it succeeds, immediately CALL create_shopify_custom_combination_product with the same recommendationId (you may give it your own creative product name/description — that's for the real Shopify listing, separate from customerFacingName), then tell the customer warmly it's being created.
-   If confirm_product_combination fails for ANY reason (a technical issue, expiry, etc.): NEVER propose a different combination, never regenerate recommendations, never move to another option without the customer explicitly asking for one, and never let the selection change. Tell them plainly, e.g. "I've kept your selected fragrance. I'm having a temporary issue preparing it, so I haven't created anything yet. Would you like me to try again?" — then retry confirm_product_combination with the exact same recommendationId when they say yes. The customer's selection is permanent until THEY explicitly pick something else.
+LEGACY PATHS (select_recommendation / confirm_product_combination) — you will not need these for a normal new conversation; generate_new_product_combinations already does both automatically. They exist only for the rare case of an older conversation that already shows a numbered list of combinations from before this behavior existed, where the customer references one manually (e.g. "option 1", "the second one"). If that happens: CALL select_recommendation with their message text verbatim, then CALL confirm_product_combination with the resolved recommendationId. If the customer instead gives feedback on an existing set of shown options ("make it sweeter," "remove spicy notes"), CALL refine_combination_recommendations with their feedback in their own words.
 
 Rules:
 - Real DUA product names and notes ARE allowed and expected in replies to the customer (via the components list) — say them plainly. Internal database IDs/handles/recommendationIds are still STRICTLY INTERNAL and must never appear in any reply.
@@ -279,6 +268,18 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
           tool_call_id: toolCall.id,
           content: result.modelContent
         });
+
+        // Fix (auto-preview flow) — once the preview is ready, the turn is over. Going back to the
+        // model here would risk exactly the bug this fix targets: the model narrating a "how do
+        // these sound" / five-combination list, or any other continuation, AFTER the browser is
+        // already about to navigate away. A short fixed acknowledgment is used instead of another
+        // model round-trip — deterministic, not dependent on the model choosing to stay quiet.
+        if (result.sseEvent?.type === "preview_ready") {
+          finalText = "Found something I think you'll love — pulling up your fragrance preview now.";
+          messages.push({ role: "assistant", content: finalText });
+          const persistedMessages = messages.filter(m => m.role !== "system");
+          return { replyText: finalText, sseEvents, updatedMessages: persistedMessages };
+        }
       }
       continue;
     }
@@ -424,7 +425,20 @@ export async function action({ request }) {
       ? body.customer_name.trim()
       : null;
 
-    const { replyText, sseEvents, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail, knownCustomerName);
+    // Fix 8 (legacy conversation recovery) — resolved and short-circuited BEFORE the model ever
+    // runs, so a stuck legacy conversation's "1"/"preview"/"yes" is never left dependent on the
+    // model reliably calling two separate tools in sequence for a low-signal message (the exact
+    // failure mode behind the original bug).
+    const legacyShortCircuit = await resolveLegacyPreviewShortCircuit(conversationId, userMessage, knownCustomerName, knownCustomerEmail);
+
+    let replyText, sseEvents, updatedMessages;
+    if (legacyShortCircuit) {
+      replyText = "Pulling up your fragrance preview now.";
+      sseEvents = [{ type: "preview_ready", recommendationId: legacyShortCircuit.recommendationId, previewId: legacyShortCircuit.recommendationId, previewUrl: legacyShortCircuit.previewUrl }];
+      updatedMessages = [...history, { role: "assistant", content: replyText }];
+    } else {
+      ({ replyText, sseEvents, updatedMessages } = await callAI(history, conversationId, knownCustomerEmail, knownCustomerName));
+    }
 
     CONVERSATIONS.set(conversationId, updatedMessages || history);
 
@@ -453,6 +467,17 @@ export async function action({ request }) {
         // recommendation_refined, recommendation_confirmed — sent before the chunk so the frontend
         // can render any recommendation cards alongside the accompanying conversational text.
         for (const event of sseEvents || []) {
+          if (event.type === "preview_ready") {
+            // Required diagnostic logging for the auto-preview flow — IDs/event metadata only,
+            // never a full customer profile or private customer data. This is the exact SSE event
+            // being sent down the wire to the widget for this turn.
+            console.log("CHAT_PREVIEW_EVENT", JSON.stringify({
+              conversationId,
+              recommendationId: event.recommendationId,
+              eventType: event.type,
+              previewUrl: event.previewUrl,
+            }));
+          }
           send(event);
         }
 

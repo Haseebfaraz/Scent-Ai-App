@@ -674,6 +674,35 @@
       },
 
       /**
+       * Fix 4 (auto-preview flow) — one reusable handler for the preview_ready event, so it's
+       * detected the same way no matter which response mode it arrives through (this codebase's
+       * actual transport is a single flat SSE-style "data: {...}" event per line, but this stays a
+       * standalone function rather than inline switch-case logic so any future transport change —
+       * a nested tool-result payload, a batched events array — only needs a new call site here,
+       * never new redirect logic). Accepts either `previewUrl` (this backend's real field name) or
+       * `redirectUrl` defensively, in case a future event shape uses the other name.
+       * @param {Object} event - a parsed event object, expected shape {type: "preview_ready", previewUrl}.
+       * @returns {boolean} true if this was a preview_ready event and navigation was started.
+       */
+      handlePreviewReady: function(event) {
+        if (!event || event.type !== 'preview_ready') return false;
+        const target = event.previewUrl || event.redirectUrl;
+        if (!target) return false;
+
+        console.log('PREVIEW_READY_RECEIVED_BY_WIDGET', JSON.stringify({
+          recommendationId: event.recommendationId || null,
+          previewUrl: target
+        }));
+        ShopAIChat.UI.removeTypingIndicator();
+
+        const base = window.appBaseUrl || 'https://localhost:3458';
+        const resolvedUrl = base.replace(/\/$/, '') + target;
+        console.log('PREVIEW_REDIRECT_STARTED', JSON.stringify({ resolvedUrl }));
+        window.location.assign(resolvedUrl);
+        return true;
+      },
+
+      /**
        * Handle stream events from the API
        * @param {Object} data - Event data
        * @param {HTMLElement} currentMessageElement - Current message element being updated
@@ -682,6 +711,13 @@
        * @param {Function} updateCurrentElement - Callback to update the current element reference
        */
       handleStreamEvent: function(data, currentMessageElement, messagesContainer, userMessage, updateCurrentElement) {
+        // Checked before the switch, not as one case among many — Fix 4 requires detecting
+        // preview_ready "regardless of whether the server response is standard JSON, streaming,
+        // SSE, NDJSON, a tool-event payload, or the final accumulated response object." A
+        // top-of-function check here means it fires the same way even if a future response mode
+        // wraps or duplicates the object being switched on below.
+        if (this.handlePreviewReady(data)) return;
+
         switch (data.type) {
           case 'id':
             if (data.conversation_id) {
@@ -718,18 +754,8 @@
             currentMessageElement.textContent = "Sorry, our servers are currently busy. Please try again later.";
             break;
 
-          // Fix (fragrance preview page) — confirming a recommendation no longer creates a
-          // Shopify product from chat at all; it opens the fragrance preview page instead, where
-          // the customer adjusts Top/Middle/Base sliders and explicitly chooses Recreate/Save
-          // Build/Add to Cart. No creation-in-progress animation is needed here anymore — nothing
-          // is being created yet, so the navigation happens immediately.
-          case 'preview_ready':
-            ShopAIChat.UI.removeTypingIndicator();
-            if (data.previewUrl) {
-              const base = window.appBaseUrl || 'https://localhost:3458';
-              window.location.href = base.replace(/\/$/, '') + data.previewUrl;
-            }
-            break;
+          // preview_ready is handled by the handlePreviewReady() early-return above (Fix 4) —
+          // no case needed here.
 
           case 'auth_required':
             // Save the last user message for resuming after authentication
