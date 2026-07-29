@@ -718,32 +718,17 @@
             currentMessageElement.textContent = "Sorry, our servers are currently busy. Please try again later.";
             break;
 
-          case 'product_creating':
+          // Fix (fragrance preview page) — confirming a recommendation no longer creates a
+          // Shopify product from chat at all; it opens the fragrance preview page instead, where
+          // the customer adjusts Top/Middle/Base sliders and explicitly chooses Recreate/Save
+          // Build/Add to Cart. No creation-in-progress animation is needed here anymore — nothing
+          // is being created yet, so the navigation happens immediately.
+          case 'preview_ready':
             ShopAIChat.UI.removeTypingIndicator();
-            ShopAIChat.UI.showProductCreatingAnimation();
-            break;
-
-          case 'product_created':
-            ShopAIChat.UI.removeProductCreatingAnimation();
-            ShopAIChat.UI.removeTypingIndicator();
-            if (data.url) {
-              // Longer than before (was 1500ms) — Shopify's storefront can take a few seconds to
-              // start actually serving a brand-new product even after publishing succeeds, and a
-              // too-fast redirect was hitting a transient 404 before that finished propagating.
-              setTimeout(() => {
-                window.location.href = data.url;
-              }, 4000);
+            if (data.previewUrl) {
+              const base = window.appBaseUrl || 'https://localhost:3458';
+              window.location.href = base.replace(/\/$/, '') + data.previewUrl;
             }
-            break;
-
-          case 'product_error':
-            ShopAIChat.UI.removeProductCreatingAnimation();
-            ShopAIChat.UI.removeTypingIndicator();
-            console.error('Product creation error:', data.error);
-            ShopAIChat.Message.add(
-              "I've noted your blend, but I ran into an issue creating your product just now. Our team has been notified — please try again in a moment.",
-              'assistant', messagesContainer
-            );
             break;
 
           case 'auth_required':

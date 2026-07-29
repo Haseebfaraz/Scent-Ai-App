@@ -24,7 +24,7 @@ import {
   findCombinationsUsingSimilarNotes,
 } from "../services/combinationAnalysis.server.js";
 import { generateNewProductCombinations } from "../services/recommendationEngine.server.js";
-import { saveRecommendation, confirmRecommendation, getRecommendation } from "../services/recommendationConfirmation.server.js";
+import { saveRecommendation, confirmRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
 import {
   describeWeatherSimple, deriveWeatherDirection, weatherDirectionToQuerySeason,
@@ -172,11 +172,6 @@ const RecommendationIdArgs = z.object({ recommendationId: z.string().min(1) });
 const VerifyLocationArgs = z.object({ cityText: z.string().min(1).max(200) });
 const ResolveSeasonArgs = z.object({ choice: z.enum(["keep_style", "use_weather"]) });
 const SelectRecommendationArgs = z.object({ selectionText: z.string().min(1).max(200) });
-const CreateProductArgs = z.object({
-  recommendationId: z.string().min(1),
-  customName: z.string().min(1).max(200),
-  description: z.string().min(1).max(1000),
-});
 
 // ============================================================
 // Tool definitions (OpenAI function-calling format)
@@ -344,27 +339,11 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "confirm_product_combination",
-      description: "Call this ONLY after the customer has explicitly confirmed (said something like 'yes' / 'create that one') one specific recommendation by its recommendationId. Deterministically re-verifies everything (products still exist, notes exist, combination is still genuinely new, ratios sum to 100%, no high-severity dislike conflict) before allowing product creation.",
+      description: "Call this ONLY after the customer has explicitly confirmed (said something like 'yes' / 'create that one') one specific recommendation by its recommendationId. Deterministically re-verifies everything (products still exist, notes exist, combination is still genuinely new, ratios sum to 100%, no high-severity dislike conflict). Fix (fragrance preview page) — this does NOT create a Shopify product. It opens the fragrance preview page instead, where the customer can adjust it and explicitly choose to save or buy — never tell the customer a product has been created at this point.",
       parameters: {
         type: "object",
         properties: { recommendationId: { type: "string", description: "The exact recommendationId of the one specific combination the customer confirmed." } },
         required: ["recommendationId"],
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "create_shopify_custom_combination_product",
-      description: "Create the real Shopify product for a recommendation that confirm_product_combination has already successfully confirmed. Never call this before confirm_product_combination has returned success for the same recommendationId.",
-      parameters: {
-        type: "object",
-        properties: {
-          recommendationId: { type: "string", description: "The same recommendationId just confirmed." },
-          customName: { type: "string", description: "A unique, creative, personalized name for the combination fragrance itself (your own creative name, or one the customer gave)." },
-          description: { type: "string", description: "A short, appealing 1-2 sentence product description." },
-        },
-        required: ["recommendationId", "customName", "description"],
       },
     },
   },
@@ -415,16 +394,15 @@ function deriveRefinementAdjustments(feedback) {
  * @param {string} toolName
  * @param {string} rawArgsJson - the tool call's raw JSON argument string.
  * @param {object} context - { conversationId, customerName, customerEmail }.
- * @returns {Promise<{modelContent: string, sseEvent: object|null, readyForShopifyCreation: {recommendationId: string, customName: string, description: string}|null}>}
- *   readyForShopifyCreation is populated when create_shopify_custom_combination_product has been
- *   validated and is ready for chat.jsx's action handler (which owns the Shopify `admin` client) to
- *   actually create the product — mirrors how the old confirm_scent_combination tool handed
- *   `comboConfirmed` back to the action handler instead of creating the product itself.
+ * @returns {Promise<{modelContent: string, sseEvent: object|null}>}
+ *   Fix (fragrance preview page) — Shopify product creation is no longer triggered from chat at
+ *   all; confirm_product_combination's sseEvent (type: "preview_ready") is what the frontend uses
+ *   to navigate to the preview page, where creation actually happens (Save Build/Add to Cart).
  */
 export async function executeFragranceTool(toolName, rawArgsJson, context) {
   const { conversationId } = context;
-  const fail = (message) => ({ modelContent: `Error: ${message}`, sseEvent: null, readyForShopifyCreation: null });
-  const ok = (modelContent, sseEvent = null) => ({ modelContent, sseEvent, readyForShopifyCreation: null });
+  const fail = (message) => ({ modelContent: `Error: ${message}`, sseEvent: null });
+  const ok = (modelContent, sseEvent = null) => ({ modelContent, sseEvent });
 
   let args;
   try {
@@ -729,32 +707,13 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           // retry the SAME id, never substitute another.
           return fail(`${result.reason} Keep the customer's selected recommendation unchanged — do not propose a different one. You may retry confirm_product_combination with the same recommendationId.`);
         }
+        // Fix (fragrance preview page) — creation is now DEFERRED. Confirming just opens the
+        // preview page (Top/Middle/Base sliders, real component names/notes, Recreate/Save
+        // Build/Add to Cart) — nothing is created in Shopify at this point.
         return ok(
-          `Confirmed. recommendationId ${recommendationId} is ready — call create_shopify_custom_combination_product next.`,
-          { type: "recommendation_confirmed", recommendationId },
+          `Confirmed. Tell the customer their fragrance preview is ready — do NOT say a product has been created yet. The frontend will open the preview page automatically.`,
+          { type: "preview_ready", recommendationId, previewUrl: `/fragrance-preview?recommendationId=${recommendationId}` },
         );
-      }
-
-      case "create_shopify_custom_combination_product": {
-        const parsed = CreateProductArgs.safeParse(args);
-        if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
-        const record = await getRecommendation(parsed.data.recommendationId);
-        if (!record) return fail("recommendation not found.");
-        if (record.status !== "confirmed") {
-          return fail("this recommendation hasn't been confirmed yet — call confirm_product_combination first.");
-        }
-        if (record.shopifyProductId) {
-          return fail("a Shopify product has already been created for this recommendation.");
-        }
-        return {
-          modelContent: "Creating the Shopify product now — tell the customer it's on its way.",
-          sseEvent: null,
-          readyForShopifyCreation: {
-            recommendationId: parsed.data.recommendationId,
-            customName: parsed.data.customName,
-            description: parsed.data.description,
-          },
-        };
       }
 
       default:
