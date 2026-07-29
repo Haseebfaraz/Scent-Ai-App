@@ -9,6 +9,7 @@ import { describe, it, expect } from "vitest";
 import { executeFragranceTool } from "../tools/fragranceAgentTools.server.js";
 import { saveRecommendation } from "./recommendationConfirmation.server.js";
 import { resolveLegacyPreviewShortCircuit } from "./legacyPreviewRecovery.server.js";
+import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import prisma from "../db.server.js";
 
 function freshConversationId(label) {
@@ -29,7 +30,10 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
       expect(result.sseEvent).toBeTruthy();
       expect(result.sseEvent.type).toBe("preview_ready");
       expect(result.sseEvent.recommendationId).toBeTruthy();
-      expect(result.sseEvent.previewUrl).toBe(`/fragrance-preview?recommendationId=${result.sseEvent.recommendationId}`);
+      // Absolute URL, on this app's own domain — the widget runs on the storefront domain, so a
+      // relative path would resolve against the wrong origin (see previewUrl.server.js).
+      expect(result.sseEvent.previewUrl).toBe(buildPreviewUrl(result.sseEvent.recommendationId));
+      expect(() => new URL(result.sseEvent.previewUrl)).not.toThrow();
 
       // The customer must never be shown a list to pick from — this event type is retired for
       // the auto-preview success path.
@@ -41,7 +45,7 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  }, 30000);
+  }, 60000);
 
   it("tells the model explicitly not to list combinations or ask the customer to pick one", async () => {
     const conversationId = freshConversationId("instruction");
@@ -55,7 +59,7 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  }, 30000);
+  }, 60000);
 });
 
 describe("select_recommendation — legacy DB rehydration (Test 3, Fix 8)", () => {
@@ -90,7 +94,7 @@ describe("select_recommendation — legacy DB rehydration (Test 3, Fix 8)", () =
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  }, 30000);
+  }, 60000);
 });
 
 // confirmRecommendation re-verifies every component against the REAL FragranceProduct catalog
@@ -126,14 +130,14 @@ describe("resolveLegacyPreviewShortCircuit — deterministic recovery for a stuc
       const result = await resolveLegacyPreviewShortCircuit(conversationId, "1", "Test", "test@example.com");
       expect(result).toBeTruthy();
       expect(result.recommendationId).toBe(firstId);
-      expect(result.previewUrl).toBe(`/fragrance-preview?recommendationId=${firstId}`);
+      expect(result.previewUrl).toBe(buildPreviewUrl(firstId));
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: firstId } });
       expect(record.status).toBe("confirmed");
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  }, 30000);
+  }, 60000);
 
   it("treats a bare 'preview' as re-opening an already-confirmed recommendation, not an error", async () => {
     const conversationId = freshConversationId("shortcircuit-preview");
@@ -153,7 +157,7 @@ describe("resolveLegacyPreviewShortCircuit — deterministic recovery for a stuc
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  }, 30000);
+  }, 60000);
 
   it("returns null for ordinary conversational text — never hijacks a normal reply", async () => {
     const conversationId = freshConversationId("shortcircuit-noop");

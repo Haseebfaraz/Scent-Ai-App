@@ -16,6 +16,7 @@
 import prisma from "../db.server.js";
 import { getCustomerProfile, saveCustomerProfileFields } from "./customerProfile.server.js";
 import { confirmRecommendation } from "./recommendationConfirmation.server.js";
+import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 
 const LEGACY_SELECTION_PATTERN = /^\s*(\d{1,2}|first|second|third|last|preview|yes|confirm|create it|create this|create that one)\s*[.!]?\s*$/i;
 
@@ -61,5 +62,5 @@ export async function resolveLegacyPreviewShortCircuit(conversationId, userMessa
   if (!result.ok && !result.reason?.includes("already been confirmed")) return null;
 
   await saveCustomerProfileFields(conversationId, { selectedRecommendationId: recommendationId });
-  return { recommendationId, previewUrl: `/fragrance-preview?recommendationId=${recommendationId}` };
+  return { recommendationId, previewUrl: buildPreviewUrl(recommendationId) };
 }
