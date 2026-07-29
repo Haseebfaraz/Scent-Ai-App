@@ -215,3 +215,207 @@ export const RISK_RULES = [
 export function assessCombinationRisks(products, context = {}) {
   return RISK_RULES.map((rule) => rule.check(products, context)).filter(Boolean);
 }
+
+// ============================================================
+// Deterministic natural-language preference interpretation
+// ============================================================
+// Fix (Aniq regression) — the engine was treating a customer's own free-text complaint ("scents
+// that hit my nose and make me feel headache") as pure customer-facing color with zero effect on
+// which products get selected. This is a phrase-detection layer, NOT an LLM call — it must produce
+// the same structured constraints every time for the same input, since these feed hard filters
+// (Fix: hard sensitivity filters), not just narration.
+
+// Deliberately phrase-based rather than single-keyword — "heavy" alone is common enough in
+// unrelated text that it's only included alongside the other, more specific complaint phrasing.
+const SENSITIVITY_PHRASES = [
+  /hit(s)?\s*my\s*nose/i,
+  /headache/i,
+  /migraine/i,
+  /\bsharp\b/i,
+  /\bpiercing\b/i,
+  /\bharsh\b/i,
+  /too\s*strong/i,
+  /overpowering/i,
+  /suffocat/i,
+  /\bheavy\b/i,
+  /haddik/i, // spec's own informal/misspelled example — kept literal, not "corrected" into a guess
+  /uncomfortable/i,
+  /cannot tolerate|can'?t tolerate/i,
+  /sensitive (nose|to (scent|smell|fragrance|perfume))/i,
+];
+
+// The exact real-note keywords behind each "risk-driving direction" the spec names — reused by both
+// interpretCustomerPreferences (to translate avoidedDirections into real matchable text) and
+// recommendationEngine.server.js's per-product intensity-driver detection (Fix 6/multi-dimensional
+// roles). Deliberately real note substrings, never a family name alone, so a match is always
+// traceable to an actual word in the product's real notesJson.
+export const DIRECTION_RISK_NOTES = {
+  "pepper-heavy": ["black pepper", "pink pepper", "pepper"],
+  "dense-spicy": ["saffron", "cinnamon", "cumin", "clove"],
+  smoky: ["smoke", "incense"],
+  oud: ["oud", "agarwood"],
+  leather: ["leather"],
+  tobacco: ["tobacco"],
+  "heavy-amber": ["labdanum", "ambergris", "ambroxan", "amberwood", "amber"],
+  resinous: ["resin"],
+  "dense-patchouli": ["patchouli"],
+  "strong-guaiac": ["guaiac"],
+};
+
+// Real note keywords that soften/calm a blend — used to populate a product's softeningNotes.
+export const SOFTENING_NOTE_KEYWORDS = [
+  "lavender", "sandalwood", "vanilla", "musk", "chamomile", "sea salt", "tea", "aloe",
+  "white musk", "clean musk", "linen", "cotton", "powder", "iris", "neroli", "mint",
+];
+
+// A customer's preferred STYLE word maps to a bundle of fragrance directions — a documented,
+// general judgment call (not specific to any one customer), matching the spec's own "relaxing ->
+// airy/clean/watery/green-tea/soft-musky/light-fruity" example bundle.
+const STYLE_DIRECTION_MAP = [
+  {
+    pattern: /relax|calm|soothing|gentle|soft|easy|comfort/i,
+    preferredDirections: ["relaxing", "airy", "clean", "watery", "green-tea", "soft-musky", "light-fruity"],
+  },
+  {
+    pattern: /energetic|active|sport|bold|confident|invigorat/i,
+    preferredDirections: ["energetic", "crisp", "citrus-forward", "bright"],
+  },
+  {
+    pattern: /elegant|sophisticat|formal|professional/i,
+    preferredDirections: ["refined", "polished", "understated"],
+  },
+  {
+    pattern: /playful|fun\b/i,
+    preferredDirections: ["playful", "sweet", "gourmand-light"],
+  },
+];
+
+const BASE_SENSITIVITY_AVOID_DIRECTIONS = [
+  "sharp", "piercing", "pepper-heavy", "dense-spicy", "smoky", "heavy-amber",
+  "resinous", "oud", "leather", "tobacco", "overly-complex",
+];
+
+/**
+ * Deterministic interpretation of a customer's free-text signals (dislikes, additionalPreferences,
+ * preferredStyle/inferredStyle) into structured recommendation constraints. Pure phrase-matching —
+ * no LLM call, no randomness — so the same profile always produces the same constraints, and hard
+ * filters downstream can depend on it directly.
+ * @param {object} profile
+ * @returns {{preferredDirections: string[], avoidedDirections: string[], strengthPreference: string|null,
+ *   sensitivityLevel: "high"|"none", preferSimpleCombinations: boolean, preferredCombinationTypes: string[]}}
+ */
+export function interpretCustomerPreferences(profile) {
+  const additionalText = Array.isArray(profile?.additionalPreferences)
+    ? profile.additionalPreferences.join(" . ")
+    : (profile?.additionalPreferences || "");
+  const textBlob = [
+    ...(profile?.dislikes || []),
+    additionalText,
+    profile?.preferredStyle,
+    profile?.inferredStyle,
+  ].filter(Boolean).join(" . ");
+
+  const sensitivityHit = SENSITIVITY_PHRASES.some((re) => re.test(textBlob));
+  const styleMatch = STYLE_DIRECTION_MAP.find((s) => s.pattern.test(textBlob));
+
+  return {
+    preferredDirections: styleMatch ? [...styleMatch.preferredDirections] : [],
+    avoidedDirections: sensitivityHit ? [...BASE_SENSITIVITY_AVOID_DIRECTIONS] : [],
+    strengthPreference: sensitivityHit ? "light" : (profile?.strengthPreference || null),
+    sensitivityLevel: sensitivityHit ? "high" : "none",
+    preferSimpleCombinations: sensitivityHit,
+    preferredCombinationTypes: sensitivityHit ? ["HYBRID"] : [],
+  };
+}
+
+// Fix 5 — deterministic complexity bands from a real note count, per the spec's own thresholds.
+export function computeComplexityLevel(noteCount) {
+  if (noteCount <= 6) return "low";
+  if (noteCount <= 12) return "moderate";
+  if (noteCount <= 20) return "high";
+  return "very-high";
+}
+
+// Real matched risk-note keywords present in a product's own notes (not a family label) — the
+// per-product "intensity drivers" the multi-dimensional role classifier and hard filters both need.
+export function detectIntensityDrivers(notes) {
+  const noteText = (Array.isArray(notes) ? notes : []).join(" | ").toLowerCase();
+  const hits = [];
+  for (const keywords of Object.values(DIRECTION_RISK_NOTES)) {
+    for (const kw of keywords) {
+      if (noteText.includes(kw) && !hits.includes(kw)) hits.push(kw);
+    }
+  }
+  return hits;
+}
+
+export function detectSofteningNotes(notes) {
+  const noteText = (Array.isArray(notes) ? notes : []).join(" | ").toLowerCase();
+  return SOFTENING_NOTE_KEYWORDS.filter((kw) => noteText.includes(kw));
+}
+
+// Fix 4 (Aniq spec) — a hard, pre-generation filter shared by both the candidate-scoring stage
+// (orderHistoryAnalysis.server.js) and combination generation (recommendationEngine.server.js), so
+// a highly sensitive customer never has an intense product enter EITHER an anchor or a support
+// shortlist in the first place. Deliberately NOT triggered by a single strong note — only several
+// real intensity-driver matches, or genuinely very-high complexity, disqualify a product outright.
+const INTENSITY_DRIVER_HARD_LIMIT = 3;
+export function passesIntensityFilter(notes, preferenceIntent) {
+  if (!preferenceIntent || preferenceIntent.sensitivityLevel !== "high") return true;
+  if (computeComplexityLevel((notes || []).length) === "very-high") return false;
+  return detectIntensityDrivers(notes).length < INTENSITY_DRIVER_HARD_LIMIT;
+}
+
+// Real note keywords behind each "preferredDirections" label interpretCustomerPreferences can
+// produce — lets a preferred STYLE (e.g. "relaxing") actually score real products higher, rather
+// than only ever affecting customer-facing copy (Test 2's exact requirement).
+export const PREFERRED_DIRECTION_MATCHERS = {
+  relaxing: ["lavender", "chamomile", "tea", "musk"],
+  airy: ["aquatic", "marine", "citrus", "green"],
+  clean: ["musk", "clean", "linen", "cotton", "soap"],
+  watery: ["aquatic", "marine", "sea salt", "water"],
+  "green-tea": ["tea", "green"],
+  "soft-musky": ["musk"],
+  "light-fruity": ["fruity", "pear", "apple", "berr", "peach", "mango", "pineapple"],
+  energetic: ["citrus", "mint", "bergamot"],
+  crisp: ["citrus", "aquatic", "green"],
+  "citrus-forward": ["citrus", "bergamot", "lemon", "orange"],
+  bright: ["citrus", "fruity"],
+  refined: ["musk", "iris", "sandalwood"],
+  polished: ["musk", "sandalwood"],
+  understated: ["musk", "clean"],
+  playful: ["fruity", "sweet"],
+  sweet: ["sweet", "vanilla"],
+  "gourmand-light": ["vanilla", "sugar"],
+};
+
+// How many of a product's REAL notes match the customer's preferred style directions — a real,
+// deterministic scoring signal (not just customer-facing wording) so a preferred style actually
+// outranks a historically-popular-but-mismatched product (Test 2).
+export function countPreferredDirectionMatches(notes, preferredDirections) {
+  if (!preferredDirections?.length) return 0;
+  const noteText = (Array.isArray(notes) ? notes : []).join(" | ").toLowerCase();
+  if (!noteText) return 0;
+  let count = 0;
+  for (const direction of preferredDirections) {
+    const keywords = PREFERRED_DIRECTION_MATCHERS[direction];
+    if (keywords?.some((kw) => noteText.includes(kw))) count++;
+  }
+  return count;
+}
+
+// How many of the customer's specific avoidedDirections (e.g. from a high-sensitivity profile)
+// this product's real notes actually hit — reuses DIRECTION_RISK_NOTES so "oud"/"leather"/etc. map
+// to the same real keywords the hard pre-generation filter already uses, restricted to only the
+// directions THIS customer actually avoids (never a blanket penalty for every possible direction).
+export function countAvoidedDirectionMatches(notes, avoidedDirections) {
+  if (!avoidedDirections?.length) return 0;
+  const noteText = (Array.isArray(notes) ? notes : []).join(" | ").toLowerCase();
+  if (!noteText) return 0;
+  let count = 0;
+  for (const direction of avoidedDirections) {
+    const keywords = DIRECTION_RISK_NOTES[direction];
+    if (keywords?.some((kw) => noteText.includes(kw))) count++;
+  }
+  return count;
+}

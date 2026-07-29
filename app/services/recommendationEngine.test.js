@@ -109,7 +109,14 @@ describe("generateNewProductCombinations (real data)", () => {
 
   // Fix 3 — real source products/notes must never appear on customer-facing fields, and every
   // customer-facing field must actually be populated (never left for the model to invent).
-  it("never exposes a real source product title in any customerFacing* field", async () => {
+  // Fix (Aniq spec, sections 11-12) — reverses the earlier hidden-name policy: real product names
+  // and notes are now REQUIRED in the customer-safe `components`/`customerFacingNotesByProduct`
+  // fields (this spec's own explicit instruction: "Do not hide the real product names... Do not
+  // limit the response to generic labels such as 'Product 1'"). The generated
+  // customerFacingName/Description/WhySuits/BestUse/WeatherSuitability/Risk fields are still their
+  // OWN generated text (never literally equal to a real title), but the real names now belong,
+  // deliberately, on `components` and `customerFacingNotesByProduct`.
+  it("exposes real product names and notes via components/customerFacingNotesByProduct, and every recommendation has a real customerFacingName", async () => {
     const profile = {
       city: "Los Angeles", stateRegion: "California", country: "United States", season: "Summer",
       likes: ["Fruity", "Sweet"], dislikes: [], locationVerified: true,
@@ -119,12 +126,15 @@ describe("generateNewProductCombinations (real data)", () => {
     expect(combinations.length).toBeGreaterThan(0);
     for (const combo of combinations) {
       const realTitles = combo.internalProducts.map((p) => p.title);
-      const customerFacingText = [
-        combo.customerFacingName, combo.customerFacingDescription, combo.customerFacingWhySuits,
-        combo.customerFacingBestUse, combo.customerFacingWeatherSuitability, combo.customerFacingRisk,
-      ].filter(Boolean).join(" ");
+      expect(combo.components.length).toBe(realTitles.length);
       for (const title of realTitles) {
-        expect(customerFacingText).not.toContain(title);
+        expect(combo.components.some((c) => c.productName === title)).toBe(true);
+        expect(combo.customerFacingNotesByProduct.some((n) => n.label === title)).toBe(true);
+      }
+      for (const c of combo.components) {
+        expect(c.availableNotes.length).toBeGreaterThan(0);
+        expect(typeof c.ratioPercent).toBe("number");
+        expect(c.contribution).toBeTruthy();
       }
       expect(combo.customerFacingName).toBeTruthy();
       expect(combo.customerFacingDescription).toBeTruthy();

@@ -21,30 +21,12 @@ import { getRecommendation, markRecommendationShopifyProduct } from "../services
 // note names like "Bergamot"/"Musk" before the customer's own preferences were even collected) is
 // gone too, per Fix 1's explicit removal — analyze_customer_product_candidates now does this
 // scoring deterministically instead.
-// Word-boundary matching, not plain substring — fixes a real false positive: the catalog title
-// "Scent" was matching inside the ordinary word "scents" (and "Zest" inside "zesty", which the
-// copy-generation prompt already produces), flagging completely ordinary customer-facing text as
-// a leak. A genuine leaked title still matches in full — this only stops it matching as a
-// fragment of a longer, unrelated word.
-function escapeRegExp(str) {
-  return str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-let cachedCatalogTitlePatterns = null;
-async function getCatalogTitlePatterns() {
-  if (cachedCatalogTitlePatterns) return cachedCatalogTitlePatterns;
-  try {
-    const rows = await prisma.fragranceProduct.findMany({ select: { title: true } });
-    cachedCatalogTitlePatterns = rows
-      .map(r => r.title.trim())
-      .filter(t => t.length >= 4)
-      .map(t => new RegExp(`\\b${escapeRegExp(t.toLowerCase())}\\b`, "i"));
-  } catch (err) {
-    console.error("Failed to load catalog titles for leak guard:", err.message);
-    cachedCatalogTitlePatterns = [];
-  }
-  return cachedCatalogTitlePatterns;
-}
+// Fix (Aniq spec, sections 11-12) — real source product names are now intentionally customer-
+// facing (this spec explicitly reverses the earlier hidden-name design: "Do not hide the real
+// product names in the recommendation response"). The title-leak guard that used to rewrite any
+// reply naming a real catalog product is removed — that would now incorrectly flag legitimate,
+// intended output. Internal database IDs (recommendationId etc.) are still never customer-facing —
+// see the leakedId check below, which is unaffected by this change.
 
 // ============================================================
 // 2. CONVERSATION MEMORY
@@ -151,15 +133,19 @@ PHASE 4 — Save profile fields as you learn them, then analyze. Throughout Turn
    Once Turn 3d is complete (city verified, or they've dodged it after a genuine attempt) and you have at least one real like/preferredStyle signal, CALL get_customer_profile to confirm nothing required is still missing. Do NOT ask another follow-up question just to gather more once the required fields are met — take ownership and move to analysis.
    Once nothing required is missing: CALL analyze_customer_product_candidates (no arguments needed) then generate_new_product_combinations to get genuinely NEW combination proposals (Hybrid = 2 real products, Tribrid = 3, Quadbrid = 4) — every proposal is already checked against the real existing-combination database and only returned if it's genuinely new. Never invent your own combination outside of what this tool returns.
 
-Presenting results — CRITICAL, Fix 3: the real source DUA products that make up a combination are STRICTLY INTERNAL — never name them, hint at them, or describe them to the customer, under any circumstance. Every proposal generate_new_product_combinations/refine_combination_recommendations returns is already stripped down to only customer-safe fields — use ONLY these, verbatim in spirit, never invent beyond them:
-   - customerFacingName — this IS the fragrance's name. Never invent a different one, never expose an internal product's real title as "the name."
-   - type (Hybrid/Tribrid/Quadbrid) and customerFacingDescription — its character.
+Presenting results — real DUA product names and notes ARE customer-facing now. Every proposal generate_new_product_combinations/refine_combination_recommendations returns is already the full customer-safe shape — use ONLY these fields, verbatim in spirit, never invent beyond them:
+   - customerFacingName — this IS the fragrance's name. Never invent a different one.
+   - type (Hybrid/Tribrid/Quadbrid) and combinedDirection — its overall character.
+   - components — the REAL product name, its real availableNotes, its contribution role, and its ratioPercent, for EVERY component. Show every component's real name and real notes plainly — do not hide them, do not generalize them into "Product 1/2/3."
+   - sharedOrConnectingNotes, if any — real notes present in more than one component; explain how they connect the blend.
+   - whyNotesWork — why the real notes work together.
    - customerFacingWhySuits — why it suits THIS customer.
    - customerFacingBestUse and customerFacingWeatherSuitability — when/where it works.
-   - customerFacingStrength — light/moderate/strong.
+   - customerFacingStrength — light/moderate/strong. expectedResult — the overall expected fragrance experience.
    - confidence — state it plainly, exactly as given (never upgrade "medium" to "high," etc.).
-   - evidenceScope controls EXACTLY how you may phrase historical popularity — never say "in your area" or "in your region" unless evidenceScope is "city", "state", or "country". If evidenceScope is "season_global", say something like "this direction has shown wider interest during similar seasonal conditions" — never claim it's about their region. If "global", say "broader interest among customers with similar preferences" — again, never regional. If "limited", say historical evidence is limited and this leans on compatibility/stated preferences instead — never invent a popularity claim.
-   - customerFacingRisk, if present — mention as a friendly, honest heads-up.
+   - customerFacingHistoricalEvidence — real, evidence-scoped sentences (cityEvidence/countryEvidence/seasonalEvidence/repeatEvidence/dataWindow). Only state what these actually say — never claim more regional/historical significance than the sentence itself gives, and always keep in mind this reflects historical data, never current popularity.
+   - existingCombinationEvidence — exactCombinationExists is always false for a new proposal (never claim otherwise); similarEvidence lists real analogous existing combinations, if any.
+   - customerFacingRisk (possibleRisk), if present — mention as a friendly, honest heads-up.
    - Always call it a "new, custom combination" — never claim it already exists.
    Close by inviting their reaction, e.g. "How do these sound? Want me to adjust any of them, or shall we create one?"
 
@@ -169,7 +155,7 @@ PHASE 6 — Confirmation and creation. Once select_recommendation has resolved t
    If confirm_product_combination fails for ANY reason (a technical issue, expiry, etc.): NEVER propose a different combination, never regenerate recommendations, never move to another option without the customer explicitly asking for one, and never let the selection change. Tell them plainly, e.g. "I've kept your selected fragrance. I'm having a temporary issue preparing it, so I haven't created anything yet. Would you like me to try again?" — then retry confirm_product_combination with the exact same recommendationId when they say yes. The customer's selection is permanent until THEY explicitly pick something else.
 
 Rules:
-- Real DUA source product names, notes, and internal handles/IDs/recommendationIds are STRICTLY INTERNAL — never appear in any reply to the customer, under any circumstance. Only customerFacingName/Description/WhySuits/BestUse/WeatherSuitability/Strength/Risk ever describe a combination to the customer.
+- Real DUA product names and notes ARE allowed and expected in replies to the customer (via the components list) — say them plainly. Internal database IDs/handles/recommendationIds are still STRICTLY INTERNAL and must never appear in any reply.
 - NEVER reveal another customer's name, email, or any individually-identifiable detail. Historical evidence is always aggregate and anonymous, phrased exactly per evidenceScope above.
 - Gender is never a hard restriction on any recommendation. Race/ethnicity is never a factor in any recommendation, ever.
 - Never invent a product, note, score, ratio, risk, confidence level, or combination that a tool call didn't actually return.
@@ -304,23 +290,17 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
 
     finalText = message.content || "";
 
-    // Fix 3/24 — a deterministic safety net for two DIFFERENT risks: (1) an internal technical
-    // identifier (Prisma's cuid-style IDs, e.g. recommendationId) leaking into a reply — a long
-    // lowercase alphanumeric token starting with "c" doesn't occur in ordinary English, so this
-    // only ever fires on an actual leaked ID; (2) a real source DUA product title leaking — these
-    // are never sent to the model anymore (toCustomerSafeCombo strips them before the model ever
-    // sees a tool result), so this is defense-in-depth against a hallucinated or otherwise
-    // surfaced real title, checked against the real, cached catalog title list.
+    // Fix 3/24 — a deterministic safety net for a leaked internal technical identifier (Prisma's
+    // cuid-style IDs, e.g. recommendationId) — a long lowercase alphanumeric token starting with
+    // "c" doesn't occur in ordinary English, so this only ever fires on an actual leaked ID. Real
+    // source product names are intentionally customer-facing now (see the file header) and are no
+    // longer checked for here.
     const leakedId = turn < 5 && /\bc[a-z0-9]{20,}\b/i.test(finalText);
-    const catalogTitlePatterns = turn < 5 ? await getCatalogTitlePatterns() : [];
-    const leakedTitle = catalogTitlePatterns.some(pattern => pattern.test(finalText));
-    if (leakedId || leakedTitle) {
+    if (leakedId) {
       messages.push({ role: "assistant", content: finalText });
       messages.push({
         role: "system",
-        content: leakedTitle
-          ? `CRITICAL: your last reply named a real internal source product — customers must NEVER see the source products a combination is built from. Rewrite that reply now using ONLY the combination's customerFacingName/customerFacingDescription and the other customer-facing fields, never a source product's real title.`
-          : `CRITICAL: your last reply contained what looks like an internal database identifier — customers must NEVER see this. Rewrite that reply now without any technical ID.`
+        content: `CRITICAL: your last reply contained what looks like an internal database identifier — customers must NEVER see this. Rewrite that reply now without any technical ID.`
       });
       continue;
     }
