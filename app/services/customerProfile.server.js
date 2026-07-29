@@ -48,6 +48,11 @@ export function emptyProfile() {
     likes: [],
     dislikes: [],
     preferredStyle: null,
+    // Set only when the customer's stated preferredStyle was actually a non-answer ("you should
+    // know", "surprise me", etc.) — a deterministic style guess derived from likes/dislikes/season/
+    // additionalPreferences instead (see fragranceAgentTools.server.js), so the profile still has a
+    // real signal to generate from without ever inventing a preference the customer didn't give.
+    inferredStyle: null,
     occasion: null,
     strengthPreference: null,
     additionalPreferences: [],
@@ -133,7 +138,7 @@ export function getMissingRequiredFields(profile) {
   const missing = [];
   if (!profile.city || !profile.locationVerified) missing.push("city");
   if (!profile.country) missing.push("country");
-  if (!(profile.likes?.length > 0) && !profile.preferredStyle) missing.push("likes or preferredStyle");
+  if (!(profile.likes?.length > 0) && !profile.preferredStyle && !profile.inferredStyle) missing.push("likes or preferredStyle");
   return missing;
 }
 

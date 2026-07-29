@@ -18,7 +18,7 @@
 // fallback itself. A duplicate that survives every repair step (measured in testing: rare, but
 // real — more likely the more combinations in one batch share the same dominant note role) is only
 // logged for monitoring; per the current design this is never retried further or blocked on.
-const COPY_MODEL = "gpt-4o-mini";
+const COPY_MODEL = "gpt-4.1-mini";
 const COPY_REQUEST_TIMEOUT_MS = 12000;
 const MAX_FIELD_LENGTH = 220;
 

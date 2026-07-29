@@ -33,9 +33,10 @@ export const PREFERENCE_FAMILIES = {
     "fresh", "citrus", "bergamot", "lemon", "lime", "mandarin", "grapefruit",
     "orange", "tangerine", "aquatic", "marine", "green", "mint", "neroli", "aromatic",
   ],
-  // Spec: pepper, saffron, clove, cinnamon, cardamom, coriander. "spice"/"spicy" added because
-  // the real catalog uses a generic "Spices"/"Spicy Notes" entry as a catch-all note.
-  spicy: ["spicy", "spice", "pepper", "saffron", "clove", "cinnamon", "cardamom", "coriander"],
+  // Spec: pepper, saffron, clove, cinnamon, cardamom, coriander, ginger, nutmeg, cumin.
+  // "spice"/"spicy" added because the real catalog uses a generic "Spices"/"Spicy Notes" entry as
+  // a catch-all note. "pepper" alone (substring) already catches "black pepper"/"pink pepper".
+  spicy: ["spicy", "spice", "pepper", "saffron", "clove", "cinnamon", "cardamom", "coriander", "ginger", "nutmeg", "cumin"],
   // Spec: oud, smoke, leather, dense amber, tobacco, heavy resins, very intense woods.
   // "agarwood" added — it's the raw wood oud is distilled from, and appears in the real catalog.
   // "strong"/"heavy" added for matching the customer's own words (verified against the full real
@@ -44,6 +45,10 @@ export const PREFERENCE_FAMILIES = {
     "strong", "heavy", "oud", "agarwood", "smoke", "smoky", "leather", "amber",
     "tobacco", "resin", "incense",
   ],
+  // Added so a customer stating "I like woody/musk" (or a refinement request naming one) is a real,
+  // matchable family here — not just a COMPATIBILITY_TAGS entry usable for pair-compatibility only.
+  woody: ["woody", "wood", "sandalwood", "cedar", "vetiver", "patchouli", "guaiac"],
+  musk: ["musk", "musky"],
 };
 
 // `fruity`/`sweet`/`fresh`/`spicy`/`strongHeavy` keywords above double as matchers for both real
@@ -105,6 +110,15 @@ export const COMPATIBLE_PAIRS = [
   ["citrus", "aromatic"],
   ["smoky", "amber"],
   ["woody", "amber"],
+  // Added: supported spicy directions (aquatic+cardamom, ginger+bergamot, mint+coriander,
+  // vanilla+controlled spice, woody+fresh citrus, lavender+cardamom, pear+pink pepper).
+  ["aquatic", "spicy"],
+  ["citrus", "spicy"],
+  ["fresh", "spicy"],
+  ["vanilla", "spicy"],
+  ["woody", "citrus"],
+  ["aromatic", "spicy"],
+  ["fruity", "spicy"],
 ];
 
 export function pairIsCompatible(familyA, familyB) {
