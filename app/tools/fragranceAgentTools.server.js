@@ -116,6 +116,12 @@ export function __getScratchForTesting(conversationId) {
   return conversationScratch.get(conversationId);
 }
 
+// Required diagnostic logging (auto-preview-flow debugging) — conversation/recommendation/preview
+// IDs and event metadata only, never a full customer profile or private customer data.
+function logPreviewEvent(stage, { conversationId, recommendationId, previewId, eventType, previewUrl }) {
+  console.log(stage, JSON.stringify({ conversationId, recommendationId, previewId, eventType, previewUrl }));
+}
+
 /**
  * @param {string} conversationId
  * @param {object} [profile] - when given, clears cached candidateProducts/lastCombinations if the
@@ -297,7 +303,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "select_recommendation",
-      description: "Call this whenever the customer picks one of the currently shown recommendations, in whatever words they use ('option 1', 'opt 1 is good', 'the first one', 'number 2', 'I want the last one', 'create this'). Pass their message text through as-is — never try to figure out the recommendationId yourself from the product description. This deterministically resolves it against the currently active recommendation list.",
+      description: "LEGACY/manual path only — generate_new_product_combinations now auto-selects and auto-confirms the best recommendation on its own, so you should not normally need this. Use it only if a customer is looking at an older message that actually listed multiple numbered combinations and picks one by number/phrase ('option 1', 'the first one', 'number 2'). Pass their message text through as-is — never try to figure out the recommendationId yourself from the product description.",
       parameters: {
         type: "object",
         properties: { selectionText: { type: "string", description: "The customer's own selection message, verbatim." } },
@@ -309,7 +315,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "generate_new_product_combinations",
-      description: "Generate genuinely new Hybrid/Tribrid/Quadbrid combination proposals — built from the customer's top real product candidates plus compatible real supporting products — scored on preference match, seasonal fit, historical evidence, note compatibility, balance, and risk. NEVER proposes a combination that already exists. Call analyze_customer_product_candidates first in this conversation if you haven't yet.",
+      description: "Generate genuinely new Hybrid/Tribrid/Quadbrid combination proposals — built from the customer's top real product candidates plus compatible real supporting products — scored on preference match, seasonal fit, historical evidence, note compatibility, balance, and risk. NEVER proposes a combination that already exists. Call analyze_customer_product_candidates first in this conversation if you haven't yet. IMPORTANT: this tool automatically selects and confirms the single best-ranked recommendation for you and opens the fragrance preview page on its own (a preview_ready event) — it does NOT return a list for the customer to pick from. After calling this, do not list combinations, do not ask the customer to choose one, do not ask how they sound — just stop; the preview is already opening.",
       parameters: {
         type: "object",
         properties: {
@@ -339,7 +345,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "confirm_product_combination",
-      description: "Call this ONLY after the customer has explicitly confirmed (said something like 'yes' / 'create that one') one specific recommendation by its recommendationId. Deterministically re-verifies everything (products still exist, notes exist, combination is still genuinely new, ratios sum to 100%, no high-severity dislike conflict). Fix (fragrance preview page) — this does NOT create a Shopify product. It opens the fragrance preview page instead, where the customer can adjust it and explicitly choose to save or buy — never tell the customer a product has been created at this point.",
+      description: "LEGACY/manual path only — generate_new_product_combinations now auto-confirms the best recommendation on its own, so you should not normally need this. Use it only after select_recommendation resolved a customer's manual pick on an older conversation. Deterministically re-verifies everything (products still exist, notes exist, combination is still genuinely new, ratios sum to 100%, no high-severity dislike conflict). This does NOT create a Shopify product — it opens the fragrance preview page instead, where the customer can adjust it and explicitly choose to save or buy — never tell the customer a product has been created at this point.",
       parameters: {
         type: "object",
         properties: { recommendationId: { type: "string", description: "The exact recommendationId of the one specific combination the customer confirmed." } },
@@ -547,7 +553,24 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         const parsed = SelectRecommendationArgs.safeParse(args);
         if (!parsed.success) return fail(parsed.error.issues.map((i) => i.message).join("; "));
         const scratch = getScratch(conversationId);
-        const activeList = scratch.lastCombinations || [];
+        let activeList = scratch.lastCombinations || [];
+
+        // Fix (legacy conversation recovery) — a conversation that predates the auto-preview flow,
+        // or whose in-memory scratch was lost to a server restart (conversationScratch is an
+        // in-memory Map, wiped on every redeploy exactly like chat.jsx's CONVERSATIONS cache), can
+        // have nothing in memory to resolve "1"/"the second one" against even though real pending
+        // recommendations still exist in the database. Rehydrate the most recent batch from
+        // FragranceRecommendation rather than leaving an already-stuck conversation stuck.
+        if (!activeList.length) {
+          const pending = await prisma.fragranceRecommendation.findMany({
+            where: { conversationId, status: "pending" },
+            orderBy: { createdAt: "desc" },
+            take: 10,
+          });
+          activeList = pending.reverse().map((r) => ({ recommendationId: r.id }));
+          scratch.lastCombinations = activeList;
+        }
+
         const result = parseRecommendationSelection(parsed.data.selectionText, activeList);
         if (result.noMatch) {
           return fail("couldn't tell which recommendation the customer means — ask one short clarifying question (e.g. 'Do you mean option 1, 2, or 3?').");
@@ -640,13 +663,50 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
             combinations: [],
           });
         }
-        // Fix 3 — never hands the model (or the SSE payload) internalProducts/real source titles;
-        // only the customer-safe fields the model needs to narrate the recommendation.
-        const customerSafe = withIds.map(toCustomerSafeCombo);
-        return ok(
-          `Generated new combination proposals (each has a recommendationId — use it with select_recommendation/confirm_product_combination, never re-derive it): ${JSON.stringify(customerSafe)}`,
-          { type: "combination_recommendations", combinations: customerSafe },
-        );
+
+        logPreviewEvent("RECOMMENDATIONS_RANKED", {
+          conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
+        });
+
+        // Fix (auto-preview flow) — the customer must never see a "pick one of five" screen or be
+        // required to type "1"/"yes"/"preview": the highest-ranked recommendation that still passes
+        // confirmRecommendation's full re-verification (same checks confirm_product_combination
+        // always ran — products still exist, ratios still sum to 100%, no high-severity dislike
+        // conflict, etc.) is selected and confirmed automatically, right here, deterministically —
+        // never left to the model to narrate a list and wait for free-form customer text to resolve
+        // via a separate tool call. `withIds` is already rank-sorted best-first (see
+        // recommendationEngine.server.js's `results.sort((a, b) => b.finalScore - a.finalScore)`),
+        // so walking it in order and taking the first one that actually confirms is "the highest-
+        // ranked VALID recommendation" — a rare re-verification failure (e.g. a component vanished
+        // from the catalog microseconds after generation) falls through to the next-best real
+        // candidate instead of silently failing the whole turn or creating a misleading preview.
+        for (const candidate of withIds) {
+          const confirmResult = await confirmRecommendation({
+            recommendationId: candidate.recommendationId,
+            customerName: context.customerName,
+            customerEmail: context.customerEmail,
+          });
+          if (!confirmResult.ok) continue;
+
+          await saveCustomerProfileFields(conversationId, { selectedRecommendationId: candidate.recommendationId });
+          const previewUrl = `/fragrance-preview?recommendationId=${candidate.recommendationId}`;
+          logPreviewEvent("BEST_RECOMMENDATION_SELECTED", {
+            conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
+            eventType: "preview_ready", previewUrl,
+          });
+          logPreviewEvent("PREVIEW_READY_EMITTED", {
+            conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
+            eventType: "preview_ready", previewUrl,
+          });
+          return ok(
+            `The best recommendation (recommendationId ${candidate.recommendationId}) was selected and confirmed automatically. The preview page is opening on its own right now — do NOT list any combinations, do NOT ask the customer to pick one, do NOT ask "how do these sound", and do NOT say anything further about this turn.`,
+            { type: "preview_ready", recommendationId: candidate.recommendationId, previewId: candidate.recommendationId, previewUrl },
+          );
+        }
+
+        // Every ranked candidate failed re-verification (rare) — never silently open a broken
+        // preview; tell the model plainly instead so it can inform the customer honestly.
+        return fail("every generated combination failed re-verification (catalog changed, ratio drift, or a dislike conflict) — tell the customer there was a temporary issue preparing their fragrance and ask if they'd like to try again.");
       }
 
       case "refine_combination_recommendations": {
@@ -709,10 +769,17 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         }
         // Fix (fragrance preview page) — creation is now DEFERRED. Confirming just opens the
         // preview page (Top/Middle/Base sliders, real component names/notes, Recreate/Save
-        // Build/Add to Cart) — nothing is created in Shopify at this point.
+        // Build/Add to Cart) — nothing is created in Shopify at this point. This tool is no longer
+        // needed for the primary new-conversation flow (generate_new_product_combinations now
+        // auto-selects and auto-confirms the best recommendation by itself) — it's kept only for
+        // legacy conversations that already have a manually-selected recommendationId.
+        const legacyPreviewUrl = `/fragrance-preview?recommendationId=${recommendationId}`;
+        logPreviewEvent("PREVIEW_READY_EMITTED", {
+          conversationId, recommendationId, previewId: recommendationId, eventType: "preview_ready", previewUrl: legacyPreviewUrl,
+        });
         return ok(
           `Confirmed. Tell the customer their fragrance preview is ready — do NOT say a product has been created yet. The frontend will open the preview page automatically.`,
-          { type: "preview_ready", recommendationId, previewUrl: `/fragrance-preview?recommendationId=${recommendationId}` },
+          { type: "preview_ready", recommendationId, previewId: recommendationId, previewUrl: legacyPreviewUrl },
         );
       }
 
