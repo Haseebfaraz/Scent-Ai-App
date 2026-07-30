@@ -204,25 +204,25 @@ const PAGE_STYLES = `
   .cs-hero {
     display: grid;
     grid-template-columns: 1.1fr 1.3fr 1fr;
-    gap: 32px;
-    padding: 48px 56px;
+    gap: 44px;
+    padding: 56px 64px;
     align-items: start;
   }
   .cs-eyebrow {
-    font-size: 14px;
+    font-size: 15px;
     letter-spacing: 0.18em;
     text-transform: uppercase;
     color: var(--cs-wine);
-    margin-bottom: 14px;
+    margin-bottom: 16px;
     opacity: 0;
     animation: cs-fade-up 0.7s ease forwards 0.1s;
   }
   .cs-title-input {
     font-family: 'Cormorant Garamond', serif;
-    font-size: 56px;
+    font-size: 68px;
     line-height: 1.05;
     font-weight: 500;
-    margin: 0 0 20px;
+    margin: 0 0 22px;
     border: none;
     border-bottom: 1px solid transparent;
     background: transparent;
@@ -235,53 +235,55 @@ const PAGE_STYLES = `
   .cs-title-input:focus { outline: none; border-bottom-color: var(--cs-taupe); }
   .cs-type-badge {
     display: inline-block;
-    font-size: 12px;
+    font-size: 13px;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     color: var(--cs-wine);
     border: 1px solid var(--cs-wine);
     border-radius: 20px;
-    padding: 4px 12px;
-    margin-bottom: 28px;
+    padding: 5px 14px;
+    margin-bottom: 32px;
   }
   .cs-notes {
     margin-top: 8px;
     opacity: 0;
     animation: cs-fade-up 0.7s ease forwards 0.4s;
   }
-  .cs-note-row { margin-bottom: 24px; }
+  .cs-note-row { margin-bottom: 28px; }
   .cs-note-label {
     display: flex;
     justify-content: space-between;
-    font-size: 16px;
+    font-size: 17px;
     letter-spacing: 0.06em;
     text-transform: uppercase;
-    margin-bottom: 8px;
+    margin-bottom: 9px;
   }
-  .cs-note-pct { font-family: 'Cormorant Garamond', serif; font-size: 18px; letter-spacing: 0; }
+  .cs-note-pct { font-family: 'Cormorant Garamond', serif; font-size: 19px; letter-spacing: 0; }
   .cs-note-notes-text {
-    font-size: 15px;
-    opacity: 0.65;
-    margin-bottom: 10px;
-    line-height: 1.5;
+    font-size: 16px;
+    opacity: 0.68;
+    margin-bottom: 12px;
+    line-height: 1.55;
   }
   .cs-note-notes-text button {
     border: none; background: none; cursor: pointer; padding: 0; font: inherit; color: inherit;
   }
   .cs-note-notes-text button.excluded { text-decoration: line-through; opacity: 0.45; }
 
+  /* Filled portion drawn via an inline background gradient (percent-driven, one color per
+     position — matches the reference page's Top=blue/Middle=gold/Base=wine slider fills) since a
+     native range input has no fill pseudo-element of its own to target with pure CSS. */
   .cs-slider {
     -webkit-appearance: none;
     appearance: none;
     width: 100%;
-    height: 12px;
-    border-radius: 6px;
+    height: 14px;
+    border-radius: 7px;
     cursor: pointer;
-    background: var(--cs-taupe-light);
   }
   .cs-slider::-webkit-slider-thumb {
     -webkit-appearance: none;
-    width: 20px; height: 20px;
+    width: 22px; height: 22px;
     border-radius: 50%;
     background: var(--cs-white);
     border: 3px solid var(--cs-ink);
@@ -289,7 +291,7 @@ const PAGE_STYLES = `
     cursor: grab;
   }
   .cs-slider::-moz-range-thumb {
-    width: 20px; height: 20px;
+    width: 22px; height: 22px;
     border-radius: 50%;
     background: var(--cs-white);
     border: 3px solid var(--cs-ink);
@@ -303,7 +305,7 @@ const PAGE_STYLES = `
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 70vh;
+    min-height: 78vh;
     background: var(--cs-taupe-light);
     border-radius: 12px;
     opacity: 0;
@@ -315,8 +317,8 @@ const PAGE_STYLES = `
   .cs-profile-box {
     border: 1px solid var(--cs-taupe);
     border-radius: 10px;
-    padding: 22px;
-    margin-bottom: 24px;
+    padding: 26px;
+    margin-bottom: 26px;
   }
   .cs-feature-row {
     display: flex;
@@ -385,26 +387,26 @@ const PAGE_STYLES = `
 
   .cs-actionbar {
     position: sticky;
-    bottom: 24px;
+    bottom: 28px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 12px;
-    padding: 14px 24px;
+    gap: 16px;
+    padding: 18px 32px;
     background: var(--cs-white);
-    margin: 32px 56px 0;
-    box-shadow: 0px 20px 20px 18px rgb(181 181 181 / 30%);
+    margin: 40px 64px 0;
+    box-shadow: 0px 20px 32px 4px rgb(181 181 181 / 35%);
     border: 1px solid #ededed;
     border-radius: 15px;
   }
-  .cs-actionbar-price { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
-  .cs-actionbar-price .cs-price { font-family: 'Cormorant Garamond', serif; font-size: 32px; }
+  .cs-actionbar-price { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
+  .cs-actionbar-price .cs-price { font-family: 'Cormorant Garamond', serif; font-size: 38px; }
   .cs-actionbar-price .cs-price-size {
     font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; opacity: 0.55;
   }
-  .cs-actionbar-left, .cs-actionbar-right { display: flex; gap: 10px; align-items: center; }
+  .cs-actionbar-left, .cs-actionbar-right { display: flex; gap: 12px; align-items: center; }
   .cs-btn-ghost {
-    padding: 11px 18px;
+    padding: 13px 22px;
     border: 1px solid var(--cs-taupe);
     background: transparent;
     color: var(--cs-ink);
@@ -418,11 +420,11 @@ const PAGE_STYLES = `
   }
   .cs-btn-ghost:disabled { opacity: 0.5; cursor: default; }
   .cs-btn-primary {
-    padding: 11px 28px;
+    padding: 13px 34px;
     border: none;
     background: var(--cs-ink);
     color: var(--cs-cream);
-    font-size: 13px;
+    font-size: 14px;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     border-radius: 2px;
@@ -431,7 +433,7 @@ const PAGE_STYLES = `
   }
   .cs-btn-primary:hover:not(:disabled) { background: var(--cs-wine); }
   .cs-btn-primary:disabled { opacity: 0.5; cursor: not-allowed; }
-  .cs-error { color: var(--cs-wine); margin: 0 56px; }
+  .cs-error { color: var(--cs-wine); margin: 0 64px; }
 
   @keyframes cs-fade-up { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: translateY(0); } }
   @keyframes cs-fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -765,12 +767,17 @@ function BottleVisualization({ ratios }) {
   return <div id="cs-bottle-3d" ref={mountRef} />;
 }
 
+// Matches the reference page's own per-position slider colors exactly (see LAYER_GRADIENTS in
+// BottleVisualization below — same three colors, applied here as a flat 2D fill).
+const SLIDER_FILL_COLOR = { top: "#2655d8", middle: "#D9AE68", base: "#8C4A3C" };
+
 function NoteRow({ position, notes, percent, excluded, onToggleExclude, onSlide }) {
+  const pct = Math.round(percent);
   return (
     <div className="cs-note-row" data-position={position}>
       <div className="cs-note-label">
         <span>{POSITION_LABELS[position]}</span>
-        <span className="cs-note-pct">{Math.round(percent)}%</span>
+        <span className="cs-note-pct">{pct}%</span>
       </div>
       <div className="cs-note-notes-text">
         {notes.map((note, i) => {
@@ -791,8 +798,9 @@ function NoteRow({ position, notes, percent, excluded, onToggleExclude, onSlide 
         })}
       </div>
       <input
-        type="range" className="cs-slider" min="0" max="100" value={Math.round(percent)}
+        type="range" className="cs-slider" min="0" max="100" value={pct}
         onChange={(e) => onSlide(position, Number(e.target.value))}
+        style={{ background: `linear-gradient(to right, ${SLIDER_FILL_COLOR[position]} ${pct}%, var(--cs-taupe-light) ${pct}%)` }}
       />
     </div>
   );

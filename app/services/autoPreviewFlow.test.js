@@ -62,6 +62,38 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
   }, 60000);
 });
 
+describe("refine_combination_recommendations — auto-select + auto-confirm (real bug: Recreate refinement showed a card list)", () => {
+  it("emits preview_ready for the best refined recommendation instead of a combination list, same as a first generation", async () => {
+    const conversationId = freshConversationId("refine");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
+      // Exactly the reported flow: an initial generation, then feedback ("Dont want Dark
+      // Chocolate") that used to fall back to the old Select/Refine/Create card list.
+      await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
+
+      const result = await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "make it fresher" }),
+        ctx,
+      );
+
+      expect(result.modelContent).not.toMatch(/^Error/);
+      expect(result.sseEvent).toBeTruthy();
+      expect(result.sseEvent.type).toBe("preview_ready");
+      expect(result.sseEvent.type).not.toBe("recommendation_refined");
+      expect(result.sseEvent.recommendationId).toBeTruthy();
+      expect(result.sseEvent.previewUrl).toBe(buildPreviewUrl(result.sseEvent.recommendationId));
+
+      const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
+      expect(record.status).toBe("confirmed");
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+});
+
 describe("select_recommendation — legacy DB rehydration (Test 3, Fix 8)", () => {
   it("resolves a bare numeric selection from the database when in-memory scratch was never populated for this conversation", async () => {
     const conversationId = freshConversationId("legacy-select");
