@@ -43,6 +43,9 @@ export async function saveRecommendation({ conversationId, profile, combination 
         conflictPenalty: combination.conflictPenalty,
         finalScore: combination.finalScore,
         confidence: combination.confidence,
+        // Fix (multidimensional confidence) — persisted so a confirmed/previewed recommendation
+        // still shows the same breakdown it was generated with, not just the blended overall value.
+        confidenceBreakdown: combination.confidenceBreakdown,
       },
       evidenceJson: {
         historicalEvidence: combination.historicalEvidence,
@@ -86,6 +89,7 @@ export function toCustomerSafeRecommendation(record) {
     existsAlready: false,
     evidenceScope: record.evidenceScope,
     confidence: record.scoreJson?.confidence,
+    confidenceBreakdown: record.scoreJson?.confidenceBreakdown,
     ...record.customerFacingJson,
   };
 }

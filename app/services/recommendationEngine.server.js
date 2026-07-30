@@ -25,6 +25,7 @@ import {
   assessCombinationRisks,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
+  interpretLifestyleContext,
   computeComplexityLevel,
   detectIntensityDrivers,
   detectSofteningNotes,
@@ -447,7 +448,7 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
   return analogous.sort((a, b) => b.overlapCount - a.overlapCount).slice(0, 3);
 }
 
-function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent }) {
+function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent, lifestyleContext }) {
   // Reject if ANY two products in the combo are near-duplicates of each other (not just of the
   // anchor) — two shortlisted supporting products can each individually pass the anchor's
   // near-duplicate check while being siblings of one another.
@@ -577,6 +578,40 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     if (countAvoidedDirectionMatches(comboAllNotes, [direction]) > 0) avoidedDirectionPenalty -= 5;
   }
 
+  // Fix (lifestyle scoring) — same pattern as styleMatchScore/avoidedDirectionPenalty above, but
+  // keyed off the customer's occasion/lifestyle text rather than their preferredStyle. Multiple
+  // simultaneous lifestyles (interpretLifestyleContext's weighted intersection) each contribute
+  // proportionally — a combo matching both "gym" and "relaxation" directions scores on both,
+  // weighted, rather than only whichever lifestyle happened to be detected first.
+  let lifestyleMatchScore = 0;
+  const lifestylePreferred = lifestyleContext?.preferredDirections || new Map();
+  const lifestyleAvoided = lifestyleContext?.avoidedDirections || new Map();
+  for (const [direction, weight] of lifestylePreferred) {
+    if (countPreferredDirectionMatches(comboAllNotes, [direction]) > 0) lifestyleMatchScore += 3 * weight;
+  }
+  let lifestyleConflictPenalty = 0;
+  for (const [direction, weight] of lifestyleAvoided) {
+    if (countAvoidedDirectionMatches(comboAllNotes, [direction]) > 0) lifestyleConflictPenalty -= 5 * weight;
+  }
+
+  // Fix (powdery overload) — the flat risk flag (assessCombinationRisks' powdery_overload rule,
+  // already folded into `risks`/the -10-per-risk penalty below) is the same regardless of who the
+  // customer is. This is the EXTRA, context-sensitive penalty on top of that: a powdery-heavy blend
+  // is a bigger real mismatch for a customer whose stated style/lifestyle/sensitivity points toward
+  // fresh, airy, light, gym, or relaxing scents than for one with no such signal — mirrors how
+  // complexityPenalty already scales by preferSimpleCombinations rather than applying one flat
+  // number to everyone. Never applied at all if the customer explicitly likes powdery/iris — their
+  // own stated preference always wins over this heuristic.
+  const powderyProductCount = comboProducts.filter((p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("powdery")).length;
+  let powderyContextPenalty = 0;
+  if (powderyProductCount >= 2 && !likeFamilies.includes("powdery")) {
+    const sensitiveOrLight =
+      preferenceIntent?.sensitivityLevel === "high" ||
+      preferredDirections.some((d) => ["relaxing", "airy", "clean", "watery", "light-fruity"].includes(d)) ||
+      [...lifestylePreferred.keys()].some((d) => ["airy", "crisp", "watery", "citrus-forward"].includes(d));
+    if (sensitiveOrLight) powderyContextPenalty = -8;
+  }
+
   // Fix 5 (Aniq spec) — combined complexity after de-duplicating notes across every component
   // (two products sharing several notes shouldn't double-count them), penalized more heavily when
   // the customer prefers simple combinations — this is what lets a simple two-product Hybrid
@@ -611,7 +646,8 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // positive signals elsewhere.
   const finalScore =
     preferenceScore + seasonalScore + historyScore + compatibilityScore + analogousScore + balanceScore + conflictPenalty +
-    styleMatchScore + avoidedDirectionPenalty + complexityPenalty + typeSimplicityScore - risks.length * 10;
+    styleMatchScore + avoidedDirectionPenalty + complexityPenalty + typeSimplicityScore +
+    lifestyleMatchScore + lifestyleConflictPenalty + powderyContextPenalty - risks.length * 10;
 
   // Fix 10 — deterministic confidence with hard caps layered on top of the numeric threshold, so a
   // risk-laden or evidence-thin combination can never read as "very high"/"high" just by
@@ -648,6 +684,45 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // high-complexity combination as more confident than the complexity genuinely supports.
   if (preferSimple && combinedComplexity === "very-high") cap("low");
   else if (preferSimple && combinedComplexity === "high") cap("medium");
+
+  // Fix (multidimensional confidence) — the single blended `confidence` above stays exactly as-is
+  // for existing consumers, but it can hide exactly the kind of mismatch this was built to surface:
+  // a combination can be technically compatible and genuinely novel while fitting this SPECIFIC
+  // customer poorly, or vice versa. Every dimension below is a deterministic banding of a score
+  // this function already computed — no new scoring machinery, just naming what's already there.
+  const HISTORICAL_CONFIDENCE_BY_SCOPE = { city: "high", state: "high", country: "medium", season_global: "medium", global: "low", limited: "low" };
+  const historicalConfidence = HISTORICAL_CONFIDENCE_BY_SCOPE[evidenceScope] || "low";
+
+  const minNoteCount = Math.min(...comboProducts.map((p) => (p.notes || []).length));
+  const dataConfidence = minNoteCount >= 3 ? "high" : minNoteCount >= 1 ? "medium" : "low";
+
+  const compatibilityConfidence = risks.length === 0 && rolesComplementary ? "high" : risks.length <= 1 ? "medium" : "low";
+
+  const noveltyConfidence = analogousExistingCombinations.length >= 2 ? "high" : analogousExistingCombinations.length >= 1 ? "medium" : "low";
+
+  const customerFitRaw = preferenceScore + styleMatchScore + lifestyleMatchScore;
+  const customerFitConfidence = !profileComplete ? "low" : customerFitRaw >= 8 ? "high" : customerFitRaw >= 3 ? "medium" : "low";
+
+  // Never measured anywhere in this system — no real longevity/projection/sillage data exists in
+  // the source data at all, so this can never honestly read as anything but low, regardless of how
+  // strong every other dimension is.
+  const performanceConfidence = "low";
+
+  const confidenceBreakdown = {
+    data: { value: dataConfidence, reason: dataConfidence === "high" ? "Every component has a full, real note list on file." : "At least one component's real note list is thin." },
+    historical: { value: historicalConfidence, reason: `Evidence scope: ${evidenceScope}.` },
+    compatibility: { value: compatibilityConfidence, reason: risks.length ? `${risks.length} real compatibility risk(s) identified.` : "No compatibility risks identified; roles are complementary." },
+    novelty: { value: noveltyConfidence, reason: analogousExistingCombinations.length ? `${analogousExistingCombinations.length} analogous existing combination(s) share real notes with this one.` : "No closely analogous existing combination found." },
+    customerFit: { value: customerFitConfidence, reason: !profileComplete ? "Profile is missing required signal (location/likes/style)." : `Preference/style/lifestyle match score: ${customerFitRaw}.` },
+    performance: { value: performanceConfidence, reason: "No measured longevity, projection, or sillage data is available; strength is inferred from note roles only." },
+  };
+  // Fix (multidimensional confidence) — customer-fit and data quality are the two dimensions most
+  // likely to silently diverge from a healthy-looking blended score (a combination can be
+  // compatible, novel, and well-evidenced while still fitting THIS customer poorly, or be built on
+  // thin note data) — both explicitly cap the overall field the same way every other hard cap above
+  // does, rather than staying siloed inside confidenceBreakdown where nothing else reads them.
+  if (dataConfidence === "low") cap("low");
+  if (customerFitConfidence === "low") cap("medium");
 
   const roledForRatio = roledProducts;
   const recommendedRatio = computeRatios(roledForRatio);
@@ -755,6 +830,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     avoidedDirectionPenalty,
     complexityPenalty,
     typeSimplicityScore,
+    lifestyleMatchScore,
+    lifestyleConflictPenalty,
+    powderyContextPenalty,
+    matchedLifestyles: lifestyleContext?.lifestyles || [],
     combinedComplexity,
     finalScore,
     recommendedRatio,
@@ -765,6 +844,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     existsAlready: false,
     evidenceScope,
     confidence,
+    // Fix (multidimensional confidence) — additive only; existing consumers reading `confidence`
+    // directly are unaffected. `confidence` itself is still the single overall field, now capped by
+    // customerFit/data confidence in addition to its existing hard caps.
+    confidenceBreakdown,
     customerFacingName,
     customerFacingDescription,
     customerFacingWhySuits,
@@ -796,6 +879,8 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // Fix (Aniq spec) — computed ONCE per generation call; drives hard pre-generation filters
   // (anchor/support eligibility below) as well as complexity-aware scoring/type bias downstream.
   const preferenceIntent = interpretCustomerPreferences(profile);
+  // Fix (lifestyle scoring) — computed ONCE per generation call, same as preferenceIntent.
+  const lifestyleContext = interpretLifestyleContext(profile);
 
   const anchors = (candidateProducts || [])
     .filter((c) =>
@@ -842,6 +927,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
           anchor,
           allCombinations,
           notesByNormalizedTitle,
+          lifestyleContext,
           vocabUsedWords,
           preferenceIntent,
         });

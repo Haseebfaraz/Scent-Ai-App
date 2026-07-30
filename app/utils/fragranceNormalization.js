@@ -113,3 +113,82 @@ export function resolveLocationInput(input, regionMaps) {
   // Not an exact match against real data, and not a known typo — ambiguous. Never guess here.
   return { resolved: false, needsConfirmation: true, value: null, originalInput: input };
 }
+
+// ============================================================
+// Preference vocabulary correction (likes/dislikes/preferredStyle/occasion/additionalPreferences)
+// ============================================================
+
+// A small, explicit, human-reviewed list of common misspellings of the fragrance-vocabulary words
+// this engine actually matches against (PREFERENCE_FAMILIES/COMPATIBILITY_TAGS in
+// fragranceCompatibility.js) — deliberately NOT a fuzzy/edit-distance corrector, for the same
+// reason KNOWN_LOCATION_CORRECTIONS above isn't one: an unrestricted corrector can silently turn
+// one real word into a different real word. Only a whole word (never a fragment) matching this
+// list exactly, case-insensitively, is ever corrected — everything else in the customer's text is
+// left completely untouched.
+const PREFERENCE_VOCABULARY_CORRECTIONS = {
+  spricy: "spicy",
+  spicey: "spicy",
+  gourmant: "gourmand",
+  gourmound: "gourmand",
+  fruty: "fruity",
+  fruitty: "fruity",
+  frutiy: "fruity",
+  aquitic: "aquatic",
+  aquatik: "aquatic",
+  freash: "fresh",
+  floreal: "floral",
+  florel: "floral",
+  woddy: "woody",
+  woddey: "woody",
+  vanila: "vanilla",
+  vannila: "vanilla",
+  citris: "citrus",
+  citrous: "citrus",
+  smokey: "smoky",
+  aromattic: "aromatic",
+  relaxin: "relaxing",
+  relaxeing: "relaxing",
+  powdary: "powdery",
+};
+
+/**
+ * Corrects known fragrance-vocabulary misspellings within a single free-text string, preserving
+ * everything else verbatim (word order, punctuation, unrelated words, and a best-effort match of
+ * the original word's capitalization pattern).
+ * @param {string} text
+ * @returns {{corrected: string, corrections: Array<{original: string, corrected: string}>}}
+ */
+export function correctPreferenceVocabulary(text) {
+  if (!text || typeof text !== "string") return { corrected: text ?? "", corrections: [] };
+  const corrections = [];
+  const corrected = text.replace(/[a-zA-Z]+/g, (word) => {
+    const fix = PREFERENCE_VOCABULARY_CORRECTIONS[word.toLowerCase()];
+    if (!fix) return word;
+    corrections.push({ original: word, corrected: fix });
+    if (word === word.toUpperCase()) return fix.toUpperCase();
+    if (word[0] === word[0].toUpperCase()) return fix.charAt(0).toUpperCase() + fix.slice(1);
+    return fix;
+  });
+  return { corrected, corrections };
+}
+
+/**
+ * Same correction, applied per-item across an array (likes/dislikes/additionalPreferences are
+ * string arrays, not single strings) — corrections from every item are combined into one list.
+ * @param {string[]} items
+ * @returns {{corrected: string[], corrections: Array<{original: string, corrected: string}>}}
+ */
+export function correctPreferenceVocabularyList(items) {
+  const corrected = [];
+  const corrections = [];
+  for (const item of items || []) {
+    if (typeof item !== "string") {
+      corrected.push(item);
+      continue;
+    }
+    const result = correctPreferenceVocabulary(item);
+    corrected.push(result.corrected);
+    corrections.push(...result.corrections);
+  }
+  return { corrected, corrections };
+}

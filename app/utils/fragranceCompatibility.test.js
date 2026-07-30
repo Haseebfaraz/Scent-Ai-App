@@ -7,10 +7,12 @@ import {
   assessCombinationRisks,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
+  interpretLifestyleContext,
   computeComplexityLevel,
   passesIntensityFilter,
   countPreferredDirectionMatches,
   countAvoidedDirectionMatches,
+  classifyAlmondCharacter,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -177,6 +179,95 @@ describe("passesIntensityFilter (hard pre-generation sensitivity filter)", () =>
   it("never filters when the customer has no high sensitivity", () => {
     expect(passesIntensityFilter(["Black Pepper", "Saffron", "Cinnamon", "Oud"], { sensitivityLevel: "none" })).toBe(true);
     expect(passesIntensityFilter(["Black Pepper", "Saffron", "Cinnamon", "Oud"], null)).toBe(true);
+  });
+});
+
+describe("powdery family and almond context", () => {
+  it("detects real orris/iris/violet/heliotrope/powder notes as the powdery family", () => {
+    expect(detectFamilies(["Orris"], PREFERENCE_FAMILIES)).toContain("powdery");
+    expect(detectFamilies(["Iris", "Violet"], PREFERENCE_FAMILIES)).toContain("powdery");
+    expect(detectFamilies(["Heliotrope"], PREFERENCE_FAMILIES)).toContain("powdery");
+  });
+
+  it("a customer stating a like/dislike of 'powdery' maps to the powdery family", () => {
+    expect(textToPreferenceFamilies(["Powdery"])).toEqual(["powdery"]);
+  });
+
+  it("classifyAlmondCharacter: almond alone reads as nutty by default", () => {
+    expect(classifyAlmondCharacter(["Almond", "Bergamot"])).toBe("nutty");
+  });
+
+  it("classifyAlmondCharacter: almond with orris/iris/violet/heliotrope reads as powdery", () => {
+    expect(classifyAlmondCharacter(["Almond", "Iris"])).toBe("powdery");
+    expect(classifyAlmondCharacter(["Almond", "Orris"])).toBe("powdery");
+  });
+
+  it("classifyAlmondCharacter: almond with vanilla/tonka/caramel/honey reads as gourmand", () => {
+    expect(classifyAlmondCharacter(["Almond", "Vanilla"])).toBe("gourmand");
+    expect(classifyAlmondCharacter(["Almond", "Tonka Bean"])).toBe("gourmand");
+  });
+
+  it("classifyAlmondCharacter: returns null when there's no almond at all", () => {
+    expect(classifyAlmondCharacter(["Bergamot", "Musk"])).toBeNull();
+  });
+
+  it("a pure-almond-only product never counts toward powdery family detection on its own", () => {
+    // Confirms the family keyword list deliberately excludes "almond" — see fragranceCompatibility.js.
+    expect(detectFamilies(["Almond"], PREFERENCE_FAMILIES)).not.toContain("powdery");
+  });
+});
+
+describe("assessCombinationRisks: powdery overload", () => {
+  it("flags 2+ powdery products", () => {
+    const products = [
+      { title: "A", notes: ["Orris", "Bergamot"] },
+      { title: "B", notes: ["Iris", "Musk"] },
+    ];
+    expect(assessCombinationRisks(products).some((r) => r.includes("powdery"))).toBe(true);
+  });
+
+  it("does not flag a single powdery product", () => {
+    const products = [
+      { title: "A", notes: ["Orris", "Bergamot"] },
+      { title: "B", notes: ["Vanilla", "Musk"] },
+    ];
+    expect(assessCombinationRisks(products).some((r) => r.includes("powdery"))).toBe(false);
+  });
+});
+
+describe("interpretLifestyleContext", () => {
+  it("recognizes a gym/workout context", () => {
+    const result = interpretLifestyleContext({ occasion: "for the gym, working out most mornings" });
+    expect(result.lifestyles).toContain("gym");
+    expect([...result.preferredDirections.keys()]).toEqual(expect.arrayContaining(["airy", "crisp"]));
+  });
+
+  it("recognizes a relaxation/unwind context", () => {
+    const result = interpretLifestyleContext({ occasion: "just want to relax and unwind at home" });
+    expect(result.lifestyles).toContain("relaxation");
+    expect([...result.preferredDirections.keys()]).toEqual(expect.arrayContaining(["relaxing"]));
+  });
+
+  it("treats 'safety officer' as a professional/workplace context", () => {
+    const result = interpretLifestyleContext({ occasion: "I work as a safety officer" });
+    expect(result.lifestyles).toContain("office");
+  });
+
+  it("supports multiple simultaneous lifestyles via weighted intersection (office + gym + unwind)", () => {
+    const result = interpretLifestyleContext({ occasion: "I work in an office, hit the gym after work, then like to unwind in the evening" });
+    expect(result.lifestyles).toEqual(expect.arrayContaining(["office", "gym", "relaxation"]));
+    // Each matched lifestyle's directions are weighted by 1/matchCount — with 3 lifestyles matched,
+    // no single one should carry the full weight of 1.
+    for (const weight of result.preferredDirections.values()) {
+      expect(weight).toBeLessThanOrEqual(1);
+      expect(weight).toBeGreaterThan(0);
+    }
+  });
+
+  it("returns empty results when no lifestyle is mentioned at all", () => {
+    const result = interpretLifestyleContext({ occasion: "just want something nice" });
+    expect(result.lifestyles).toEqual([]);
+    expect(result.preferredDirections.size).toBe(0);
   });
 });
 

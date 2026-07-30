@@ -11,7 +11,10 @@
 import prisma from "../db.server.js";
 import { SEASON_ALIASES } from "../utils/fragranceNormalization.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLevel } from "../utils/fragranceScoring.js";
-import { textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter } from "../utils/fragranceCompatibility.js";
+import {
+  textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter,
+  interpretLifestyleContext, countPreferredDirectionMatches,
+} from "../utils/fragranceCompatibility.js";
 
 // Matches the MIN_SAMPLE_SIZE convention already established in app/routes/chat.jsx's
 // getPopularNotesForRegion — a regional signal only counts once it's backed by a real sample.
@@ -183,6 +186,10 @@ export async function analyzeCustomerProductCandidates(profile) {
   // final combination scoring — a highly sensitive customer never even sees an intense product as
   // a candidate to begin with.
   const preferenceIntent = interpretCustomerPreferences(profile);
+  // Fix (lifestyle scoring) — lifestyle must affect candidate ranking too, not just combination
+  // ranking and copy — a small per-candidate bonus, same weighted-intersection directions used at
+  // the combination stage.
+  const lifestyleContext = interpretLifestyleContext(profile);
 
   const candidates = [];
   for (const normalizedProductName of candidateNames) {
@@ -216,6 +223,13 @@ export async function analyzeCustomerProductCandidates(profile) {
     relevanceScore += dislikeConflict.matchedFamilies.length * SCORE_WEIGHTS.conflictsDislike;
     if (repeatPurchaseCustomers > 0) relevanceScore += SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer;
     if (distinctSimilarCustomers >= POPULARITY_THRESHOLD) relevanceScore += SCORE_WEIGHTS.popularAmongSimilarCustomers;
+
+    // Fix (lifestyle scoring) — a small real bonus per matched lifestyle-preferred direction,
+    // weighted the same way the combination stage weights simultaneous lifestyles, so a product
+    // whose real notes fit the customer's stated lifestyle(s) ranks higher as a candidate too.
+    for (const [direction, weight] of lifestyleContext.preferredDirections) {
+      if (countPreferredDirectionMatches(notes, [direction]) > 0) relevanceScore += 2 * weight;
+    }
 
     candidates.push({
       productName: product.title,

@@ -49,7 +49,27 @@ export const PREFERENCE_FAMILIES = {
   // matchable family here — not just a COMPATIBILITY_TAGS entry usable for pair-compatibility only.
   woody: ["woody", "wood", "sandalwood", "cedar", "vetiver", "patchouli", "guaiac"],
   musk: ["musk", "musky"],
+  // Fix (powdery family) — orris/iris/violet/heliotrope/powder give a cosmetic-powder impression.
+  // "almond" is deliberately NOT listed here: on its own it reads as plain nutty, only becoming
+  // powdery (or gourmand) in combination with other real notes — see classifyAlmondCharacter below,
+  // which is the single place that contextual read is decided.
+  powdery: ["powdery", "orris", "iris", "violet", "heliotrope", "powder"],
 };
+
+// Fix (powdery family) — "almond" alone is a plain nutty note; it only reads as powdery or
+// gourmand alongside the real notes that actually give it that character in perfumery. Kept as its
+// own explicit function (not folded into the `powdery` keyword list) so a product containing only
+// almond can never count toward powdery-overload on its own — every caller that cares about an
+// almond-bearing product's real character should call this rather than assume from "almond" alone.
+const ALMOND_POWDERY_CONTEXT = ["orris", "iris", "violet", "heliotrope"];
+const ALMOND_GOURMAND_CONTEXT = ["vanilla", "tonka", "caramel", "honey"];
+export function classifyAlmondCharacter(notes) {
+  const noteText = (Array.isArray(notes) ? notes : []).join(" | ").toLowerCase();
+  if (!noteText.includes("almond")) return null;
+  if (ALMOND_POWDERY_CONTEXT.some((kw) => noteText.includes(kw))) return "powdery";
+  if (ALMOND_GOURMAND_CONTEXT.some((kw) => noteText.includes(kw))) return "gourmand";
+  return "nutty";
+}
 
 // `fruity`/`sweet`/`fresh`/`spicy`/`strongHeavy` keywords above double as matchers for both real
 // product notes ("Sweet Cherry", "Fresh Jasmine") AND a customer's own short preference words
@@ -192,6 +212,15 @@ export const RISK_RULES = [
     check(products) {
       return products.length >= 4
         ? "Four products in one blend raises the risk of a muddled, over-complex result"
+        : null;
+    },
+  },
+  {
+    id: "powdery_overload",
+    check(products) {
+      const powdery = products.filter((p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("powdery"));
+      return powdery.length >= 2
+        ? "Multiple powdery orris/iris/violet/heliotrope notes may build into a heavy, cosmetic-powder impression"
         : null;
     },
   },
@@ -402,6 +431,89 @@ export function countPreferredDirectionMatches(notes, preferredDirections) {
     if (keywords?.some((kw) => noteText.includes(kw))) count++;
   }
   return count;
+}
+
+// ============================================================
+// Lifestyle / occasion context interpretation
+// ============================================================
+// Deterministic phrase-based lifestyle classification from the customer's own occasion/
+// additionalPreferences text — same approach as interpretCustomerPreferences (no LLM call, same
+// input always produces the same output). Unlike STYLE_DIRECTION_MAP (which picks the FIRST
+// matching style), a customer can genuinely describe more than one lifestyle at once ("I work in
+// an office, hit the gym after, then like to unwind") — every matching category contributes,
+// weighted by 1/(number matched) so no single category silently drowns out the others (a "weighted
+// intersection," not a first-match-wins pick). Every preferredDirections/avoidedDirections value
+// used below is a real key already present in PREFERRED_DIRECTION_MATCHERS/DIRECTION_RISK_NOTES —
+// this reuses those existing note-keyword mappings rather than inventing a parallel vocabulary.
+const LIFESTYLE_PATTERNS = [
+  {
+    name: "office",
+    // "safety officer" is an occupation implying a professional/workplace context, not a literal
+    // office — \bofficer\b matching it directly is the intended behavior, not a false positive.
+    pattern: /\boffice\b|\bofficer\b|\bwork(ing)?\b|\bprofessional\b|\bworkplace\b|\bmeeting\b|\bcorporate\b/i,
+    preferredDirections: ["clean", "polished", "understated", "refined"],
+    avoidedDirections: ["smoky", "dense-spicy", "heavy-amber"],
+  },
+  {
+    name: "gym",
+    pattern: /\bgym\b|\bworkout\b|\bwork\s*out\b|\bexercis(e|ing)\b|\bactive\b|\bsport(s)?\b|\btraining\b|\brunning\b/i,
+    preferredDirections: ["airy", "crisp", "citrus-forward", "watery"],
+    avoidedDirections: ["heavy-amber", "resinous", "dense-spicy", "smoky"],
+  },
+  {
+    name: "relaxation",
+    pattern: /\brelax|\bcalm|\bunwind|\bsoothing\b|\bgentle\b|\beasy\b|\bcomfort\b|\bcozy\b/i,
+    preferredDirections: ["relaxing", "soft-musky", "green-tea"],
+    avoidedDirections: ["smoky", "pepper-heavy"],
+  },
+  {
+    name: "daytime",
+    pattern: /\bdaytime\b|\bday\s*wear\b|\bmorning\b|\bafternoon\b/i,
+    preferredDirections: ["airy", "light-fruity", "crisp"],
+    avoidedDirections: ["heavy-amber"],
+  },
+  {
+    name: "evening",
+    pattern: /\bevening\b|\bnight\s*(out|wear)?\b|\bdate\b|\bformal\b|\bdinner\b/i,
+    preferredDirections: ["refined", "playful"],
+    avoidedDirections: [],
+  },
+  {
+    name: "outdoor-heat",
+    pattern: /\boutdoor\b|\bbeach\b|\bsummer\s*heat\b|\bhot\s*weather\b|\bhumid\b/i,
+    preferredDirections: ["airy", "watery", "crisp"],
+    avoidedDirections: ["heavy-amber", "dense-spicy", "resinous"],
+  },
+  {
+    name: "special-event",
+    pattern: /\bwedding\b|\bspecial\s*event\b|\bcelebration\b|\bparty\b|\bgala\b/i,
+    preferredDirections: ["playful", "refined"],
+    avoidedDirections: [],
+  },
+];
+
+/**
+ * @param {object} profile
+ * @returns {{lifestyles: string[], preferredDirections: Map<string, number>, avoidedDirections: Map<string, number>}}
+ *   Maps are direction -> accumulated weight (each matched lifestyle contributes 1/matchCount).
+ */
+export function interpretLifestyleContext(profile) {
+  const textBlob = [
+    profile?.occasion,
+    Array.isArray(profile?.additionalPreferences) ? profile.additionalPreferences.join(" . ") : profile?.additionalPreferences,
+  ].filter(Boolean).join(" . ");
+
+  const matched = LIFESTYLE_PATTERNS.filter((l) => l.pattern.test(textBlob));
+  if (!matched.length) return { lifestyles: [], preferredDirections: new Map(), avoidedDirections: new Map() };
+
+  const weight = 1 / matched.length;
+  const preferredDirections = new Map();
+  const avoidedDirections = new Map();
+  for (const lifestyle of matched) {
+    for (const d of lifestyle.preferredDirections) preferredDirections.set(d, (preferredDirections.get(d) || 0) + weight);
+    for (const d of lifestyle.avoidedDirections) avoidedDirections.set(d, (avoidedDirections.get(d) || 0) + weight);
+  }
+  return { lifestyles: matched.map((l) => l.name), preferredDirections, avoidedDirections };
 }
 
 // How many of the customer's specific avoidedDirections (e.g. from a high-sensitivity profile)
