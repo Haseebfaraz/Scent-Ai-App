@@ -21,8 +21,8 @@ import {
   markRecommendationDraft, markRecommendationSaved,
   computeBlendedPricePer5ml, estimateTotalPrice,
 } from "../services/fragranceBuild.server";
+import { resolveShopDomain } from "../services/shopDomain.server";
 
-const DEFAULT_SHOP_DOMAIN = "test-3d-products.myshopify.com";
 const POSITION_LABELS = { top: "Top Notes", middle: "Middle Notes", base: "Base Notes" };
 
 export function links() {
@@ -32,12 +32,6 @@ export function links() {
       href: "https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600&family=Work+Sans:wght@300;400;500;600&display=swap",
     },
   ];
-}
-
-function resolveShopDomain(request) {
-  const originHeader = request.headers.get("Origin") || request.headers.get("Referer") || "";
-  const domain = originHeader.replace(/^https?:\/\//, "").split("/")[0];
-  return domain && domain.includes(".") ? domain : DEFAULT_SHOP_DOMAIN;
 }
 
 // Shopify's numeric REST-style ID from a GraphQL GID (e.g. "gid://shopify/ProductVariant/123" ->
@@ -104,7 +98,7 @@ export async function action({ request }) {
     return Response.json({ error: "Recommendation not found." }, { status: 404 });
   }
 
-  const shopDomain = resolveShopDomain(request);
+  const shopDomain = await resolveShopDomain();
 
   if (intent === "recreate") {
     // 1. Save current preview state as an internal draft only — no Shopify product/variant, no
@@ -125,11 +119,13 @@ export async function action({ request }) {
 
     let shopifyProductId = recommendation.shopifyProductId;
     let shopifyVariantId = recommendation.shopifyVariantId;
+    let productUrl = null;
 
     try {
+      const { admin } = await unauthenticated.admin(shopDomain);
+
       if (!shopifyProductId) {
         // First-time creation — the Top/Middle/Base Note product shape api.save-build.jsx expects.
-        const { admin } = await unauthenticated.admin(shopDomain);
         const identityProfile = await getCustomerProfile(recommendation.conversationId);
         const result = await createShopifyBuildProduct({
           admin, shopDomain, recommendation,
@@ -139,6 +135,7 @@ export async function action({ request }) {
         });
         shopifyProductId = result.productId;
         shopifyVariantId = result.variantId;
+        productUrl = result.productUrl;
       } else {
         // A product already exists — reuse the existing, already-correct endpoint exactly as it
         // was designed for (resolve or create the variant matching this ratio), rather than
@@ -151,6 +148,16 @@ export async function action({ request }) {
         const saveBuildJson = await saveBuildResponse.json();
         if (saveBuildJson.error) throw new Error(saveBuildJson.error);
         shopifyVariantId = saveBuildJson.variantId;
+
+        // Save Build now navigates to the real product page, so a re-save on an already-created
+        // product needs that product's handle too — one cheap lookup, not stored anywhere else.
+        const handleResponse = await admin.graphql(
+          `query getProductHandle($id: ID!) { product(id: $id) { handle } }`,
+          { variables: { id: shopifyProductId } },
+        );
+        const handleJson = await handleResponse.json();
+        const handle = handleJson.data?.product?.handle;
+        productUrl = handle ? `https://${shopDomain}/products/${handle}` : null;
       }
     } catch (err) {
       console.error("fragrance-preview build error:", err);
@@ -160,7 +167,7 @@ export async function action({ request }) {
     await markRecommendationSaved(recommendationId, { shopifyProductId, shopifyVariantId });
 
     if (intent === "save_build") {
-      return Response.json({ status: "saved", shopifyProductId, shopifyVariantId });
+      return Response.json({ status: "saved", shopifyProductId, shopifyVariantId, productUrl });
     }
 
     // Add to Cart — Shopify's cart permalink adds the variant AND opens the cart in one
@@ -196,8 +203,8 @@ const PAGE_STYLES = `
   }
   .cs-hero {
     display: grid;
-    grid-template-columns: 1.1fr 1.3fr;
-    gap: 40px;
+    grid-template-columns: 1.1fr 1.3fr 1fr;
+    gap: 32px;
     padding: 48px 56px;
     align-items: start;
   }
@@ -304,13 +311,58 @@ const PAGE_STYLES = `
   }
   #cs-bottle-3d { width: 100%; height: 100%; min-height: 480px; cursor: grab; }
 
-  .cs-profile { margin-top: 40px; opacity: 0; animation: cs-fade-up 0.7s ease forwards 0.5s; }
+  .cs-profile { opacity: 0; animation: cs-fade-up 0.7s ease forwards 0.5s; }
   .cs-profile-box {
     border: 1px solid var(--cs-taupe);
     border-radius: 10px;
     padding: 22px;
     margin-bottom: 24px;
   }
+  .cs-feature-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    margin-bottom: 18px;
+  }
+  .cs-feature-icon {
+    width: 44px;
+    height: 44px;
+    flex-shrink: 0;
+    border: 1px solid var(--cs-taupe);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+  }
+  .cs-feature-title { font-size: 15px; font-weight: 500; }
+  .cs-feature-sub { font-size: 13px; color: var(--cs-wine); opacity: 0.9; }
+
+  .cs-loading-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    background: rgba(246, 241, 234, 0.92);
+  }
+  .cs-loading-spinner {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 3px solid var(--cs-taupe-light);
+    border-top-color: var(--cs-wine);
+    animation: cs-spin 0.9s linear infinite;
+  }
+  .cs-loading-text {
+    font-family: 'Cormorant Garamond', serif;
+    font-size: 20px;
+    color: var(--cs-ink);
+  }
+  @keyframes cs-spin { to { transform: rotate(360deg); } }
   .cs-profile-label {
     font-size: 15px;
     letter-spacing: 0.1em;
@@ -392,6 +444,7 @@ const PAGE_STYLES = `
     .cs-hero { grid-template-columns: 1fr; padding: 32px 24px; }
     .cs-title-input { font-size: 40px; }
     .cs-bottle-stage { min-height: 50vh; order: -1; }
+    .cs-profile { grid-column: 1 / -1; }
   }
   @media (max-width: 640px) {
     .cs-hero { padding: 20px 16px; }
@@ -767,13 +820,19 @@ function adjustRatios(current, changedKey, newValue) {
   return rounded;
 }
 
+const OVERLAY_MESSAGES = {
+  recreate: "Returning to your conversation…",
+  save_build: "Creating your fragrance…",
+  add_to_cart: "Adding your fragrance to cart…",
+};
+
 export default function FragrancePreview() {
   const data = useLoaderData();
   const fetcher = useFetcher();
   const [name, setName] = useState(data.name);
   const [ratios, setRatios] = useState(data.ratios);
   const [excludedNotes, setExcludedNotes] = useState(data.excludedNotes);
-  const [savedState, setSavedState] = useState(data.buildStatus === "saved" ? "saved" : "idle");
+  const [pendingIntent, setPendingIntent] = useState(null);
 
   const toggleExclude = (note) => {
     setExcludedNotes((prev) => (prev.includes(note) ? prev.filter((n) => n !== note) : [...prev, note]));
@@ -785,7 +844,7 @@ export default function FragrancePreview() {
   const handleSlide = (position, value) => setRatios((prev) => adjustRatios(prev, position, value));
 
   const submit = (intent) => {
-    if (intent === "save_build") setSavedState("saving");
+    setPendingIntent(intent);
     fetcher.submit(
       {
         intent, recommendationId: data.recommendationId, name,
@@ -795,15 +854,26 @@ export default function FragrancePreview() {
     );
   };
 
-  if (fetcher.data?.status === "saved" && savedState !== "saved") setSavedState("saved");
-  if (fetcher.data?.status === "recreate" && fetcher.data.redirectUrl) {
-    window.location.href = fetcher.data.redirectUrl;
-  }
-  if (fetcher.data?.status === "added" && fetcher.data.cartUrl) {
-    window.location.href = fetcher.data.cartUrl;
-  }
+  // All three intents end in a real browser navigation once the action succeeds — Recreate back
+  // to the storefront chat, Save Build to the real product page, Add to Cart to the cart itself —
+  // so nothing here needs to update local component state on success, only navigate. An error
+  // clears pendingIntent so the loading overlay gives way to the visible error message instead.
+  useEffect(() => {
+    if (fetcher.state !== "idle" || !fetcher.data) return;
+    if (fetcher.data.error) {
+      setPendingIntent(null);
+      return;
+    }
+    if (fetcher.data.status === "recreate" && fetcher.data.redirectUrl) {
+      window.location.href = fetcher.data.redirectUrl;
+    } else if (fetcher.data.status === "saved" && fetcher.data.productUrl) {
+      window.location.href = fetcher.data.productUrl;
+    } else if (fetcher.data.status === "added" && fetcher.data.cartUrl) {
+      window.location.href = fetcher.data.cartUrl;
+    }
+  }, [fetcher.state, fetcher.data]);
 
-  const isBusy = fetcher.state !== "idle";
+  const isBusy = fetcher.state !== "idle" || (pendingIntent && !fetcher.data?.error);
 
   return (
     <div className="cs-page">
@@ -823,6 +893,13 @@ export default function FragrancePreview() {
         }}
       />
 
+      {pendingIntent && !fetcher.data?.error && (
+        <div className="cs-loading-overlay">
+          <div className="cs-loading-spinner" />
+          <div className="cs-loading-text">{OVERLAY_MESSAGES[pendingIntent]}</div>
+        </div>
+      )}
+
       <div className="cs-hero">
         <div className="cs-hero-left">
           <div className="cs-eyebrow">The Digital Atelier</div>
@@ -839,31 +916,46 @@ export default function FragrancePreview() {
             <NoteRow position="middle" notes={data.buckets.middle} percent={ratios.middle} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
             <NoteRow position="base" notes={data.buckets.base} percent={ratios.base} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
           </div>
-
-          <div className="cs-profile">
-            <div className="cs-profile-box">
-              <div className="cs-profile-label">Molecular Profile</div>
-              <div className="cs-pill-grid">
-                {data.profilePills.map((note) => (
-                  <span key={note} className="cs-pill">{note}</span>
-                ))}
-              </div>
-            </div>
-
-            {/* "Products Used" — real component names shown here only, never inside the note rows above. */}
-            <div className="cs-profile-box">
-              <div className="cs-profile-label">Products Used</div>
-              <ul className="cs-products-used">
-                {data.productsUsed.map((p) => (
-                  <li key={p.title}>{p.title}{p.contribution ? ` — ${p.contribution}` : ""}</li>
-                ))}
-              </ul>
-            </div>
-          </div>
         </div>
 
         <div className="cs-bottle-stage">
           <BottleVisualization ratios={ratios} />
+        </div>
+
+        <div className="cs-profile">
+          <div className="cs-profile-box">
+            <div className="cs-profile-label">Molecular Profile</div>
+            <div className="cs-pill-grid">
+              {data.profilePills.map((note) => (
+                <span key={note} className="cs-pill">{note}</span>
+              ))}
+            </div>
+          </div>
+
+          {/* "Products Used" — real component names shown here only, never inside the note rows above. */}
+          <div className="cs-profile-box">
+            <div className="cs-profile-label">Products Used</div>
+            <ul className="cs-products-used">
+              {data.productsUsed.map((p) => (
+                <li key={p.title}>{p.title}{p.contribution ? ` — ${p.contribution}` : ""}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="cs-feature-row">
+            <div className="cs-feature-icon">&#9879;</div>
+            <div>
+              <div className="cs-feature-title">Lab Certified</div>
+              <div className="cs-feature-sub">Phthalate &amp; Paraben Free</div>
+            </div>
+          </div>
+          <div className="cs-feature-row">
+            <div className="cs-feature-icon">&#8734;</div>
+            <div>
+              <div className="cs-feature-title">Infinite Refills</div>
+              <div className="cs-feature-sub">Sustainable Glass Program</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -876,9 +968,7 @@ export default function FragrancePreview() {
         </div>
         <div className="cs-actionbar-left">
           <button type="button" className="cs-btn-ghost" disabled={isBusy} onClick={() => submit("recreate")}>Recreate</button>
-          <button type="button" className="cs-btn-ghost" disabled={isBusy} onClick={() => submit("save_build")}>
-            {savedState === "saved" ? "Saved" : "Save Build"}
-          </button>
+          <button type="button" className="cs-btn-ghost" disabled={isBusy} onClick={() => submit("save_build")}>Save Build</button>
         </div>
         <div className="cs-actionbar-right">
           <button type="button" className="cs-btn-primary" disabled={isBusy} onClick={() => submit("add_to_cart")}>Add to Cart</button>
