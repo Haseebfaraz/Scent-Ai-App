@@ -123,6 +123,54 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
   console.log(stage, JSON.stringify({ conversationId, recommendationId, previewId, eventType, previewUrl }));
 }
 
+// Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list
+// into an automatically-opened preview. Used by both generate_new_product_combinations AND
+// refine_combination_recommendations — a customer who says "make it sweeter" or "remove the dark
+// chocolate" after Recreate must land on an auto-opened preview exactly the same way a first-time
+// generation does, never back on a "pick one of N" list. `withIds` must already be rank-sorted
+// best-first (both generateNewProductCombinations call sites are). Walking it in order and
+// confirming the first one that actually re-verifies is "the highest-ranked VALID recommendation"
+// — a rare re-verification failure (e.g. a component vanished from the catalog microseconds after
+// generation) falls through to the next-best real candidate instead of silently failing the turn
+// or opening a broken preview.
+async function autoSelectAndConfirmBest(withIds, conversationId, context) {
+  logPreviewEvent("RECOMMENDATIONS_RANKED", {
+    conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
+  });
+
+  for (const candidate of withIds) {
+    const confirmResult = await confirmRecommendation({
+      recommendationId: candidate.recommendationId,
+      customerName: context.customerName,
+      customerEmail: context.customerEmail,
+    });
+    if (!confirmResult.ok) continue;
+
+    await saveCustomerProfileFields(conversationId, { selectedRecommendationId: candidate.recommendationId });
+    const previewUrl = buildPreviewUrl(candidate.recommendationId);
+    logPreviewEvent("BEST_RECOMMENDATION_SELECTED", {
+      conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
+      eventType: "preview_ready", previewUrl,
+    });
+    logPreviewEvent("PREVIEW_READY_EMITTED", {
+      conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
+      eventType: "preview_ready", previewUrl,
+    });
+    return {
+      ok: true,
+      modelContent: `The best recommendation (recommendationId ${candidate.recommendationId}) was selected and confirmed automatically. The preview page is opening on its own right now — do NOT list any combinations, do NOT ask the customer to pick one, do NOT ask "how do these sound", and do NOT say anything further about this turn.`,
+      sseEvent: { type: "preview_ready", recommendationId: candidate.recommendationId, previewId: candidate.recommendationId, previewUrl },
+    };
+  }
+
+  // Every ranked candidate failed re-verification (rare) — never silently open a broken preview;
+  // tell the model plainly instead so it can inform the customer honestly.
+  return {
+    ok: false,
+    modelContent: "every generated combination failed re-verification (catalog changed, ratio drift, or a dislike conflict) — tell the customer there was a temporary issue preparing their fragrance and ask if they'd like to try again.",
+  };
+}
+
 /**
  * @param {string} conversationId
  * @param {object} [profile] - when given, clears cached candidateProducts/lastCombinations if the
@@ -334,7 +382,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "refine_combination_recommendations",
-      description: "Re-generate combination recommendations based on the customer's feedback on the last set shown (e.g. 'make it sweeter', 'remove spicy notes', 'show me fresher combinations', 'give me only new combinations', 'give me a Hybrid only'). Reuses the existing profile and candidate analysis rather than restarting the conversation.",
+      description: "Re-generate combinations based on the customer's feedback (e.g. 'make it sweeter', 'remove the dark chocolate', 'give me a Hybrid only') — used after Recreate asks 'What would you like to change?', or any other time the customer wants an existing recommendation adjusted. Just like generate_new_product_combinations, this automatically selects and confirms the best refined result and opens the fragrance preview page on its own — it does NOT return a list for the customer to pick from. After calling this, do not list combinations, do not ask the customer to choose one — just stop; the preview is already opening.",
       parameters: {
         type: "object",
         properties: { feedback: { type: "string", description: "The customer's own refinement request, verbatim or closely paraphrased." } },
@@ -665,49 +713,12 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           });
         }
 
-        logPreviewEvent("RECOMMENDATIONS_RANKED", {
-          conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
-        });
-
-        // Fix (auto-preview flow) — the customer must never see a "pick one of five" screen or be
-        // required to type "1"/"yes"/"preview": the highest-ranked recommendation that still passes
-        // confirmRecommendation's full re-verification (same checks confirm_product_combination
-        // always ran — products still exist, ratios still sum to 100%, no high-severity dislike
-        // conflict, etc.) is selected and confirmed automatically, right here, deterministically —
-        // never left to the model to narrate a list and wait for free-form customer text to resolve
-        // via a separate tool call. `withIds` is already rank-sorted best-first (see
-        // recommendationEngine.server.js's `results.sort((a, b) => b.finalScore - a.finalScore)`),
-        // so walking it in order and taking the first one that actually confirms is "the highest-
-        // ranked VALID recommendation" — a rare re-verification failure (e.g. a component vanished
-        // from the catalog microseconds after generation) falls through to the next-best real
-        // candidate instead of silently failing the whole turn or creating a misleading preview.
-        for (const candidate of withIds) {
-          const confirmResult = await confirmRecommendation({
-            recommendationId: candidate.recommendationId,
-            customerName: context.customerName,
-            customerEmail: context.customerEmail,
-          });
-          if (!confirmResult.ok) continue;
-
-          await saveCustomerProfileFields(conversationId, { selectedRecommendationId: candidate.recommendationId });
-          const previewUrl = buildPreviewUrl(candidate.recommendationId);
-          logPreviewEvent("BEST_RECOMMENDATION_SELECTED", {
-            conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
-            eventType: "preview_ready", previewUrl,
-          });
-          logPreviewEvent("PREVIEW_READY_EMITTED", {
-            conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
-            eventType: "preview_ready", previewUrl,
-          });
-          return ok(
-            `The best recommendation (recommendationId ${candidate.recommendationId}) was selected and confirmed automatically. The preview page is opening on its own right now — do NOT list any combinations, do NOT ask the customer to pick one, do NOT ask "how do these sound", and do NOT say anything further about this turn.`,
-            { type: "preview_ready", recommendationId: candidate.recommendationId, previewId: candidate.recommendationId, previewUrl },
-          );
-        }
-
-        // Every ranked candidate failed re-verification (rare) — never silently open a broken
-        // preview; tell the model plainly instead so it can inform the customer honestly.
-        return fail("every generated combination failed re-verification (catalog changed, ratio drift, or a dislike conflict) — tell the customer there was a temporary issue preparing their fragrance and ask if they'd like to try again.");
+        // Fix (auto-preview flow) — the customer must never see a "pick one of five" screen; the
+        // highest-ranked recommendation that still passes full re-verification is selected and
+        // confirmed automatically. Shared with refine_combination_recommendations below — a
+        // refinement request must open the preview the same way, never fall back to a list.
+        const result = await autoSelectAndConfirmBest(withIds, conversationId, context);
+        return result.ok ? ok(result.modelContent, result.sseEvent) : fail(result.modelContent);
       }
 
       case "refine_combination_recommendations": {
@@ -738,11 +749,18 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         );
         const withIds = combinations.map((c, i) => ({ recommendationId: recommendationIds[i], ...c }));
         scratch.lastCombinations = withIds;
-        const customerSafe = withIds.map(toCustomerSafeCombo);
-        return ok(
-          `Refined combination proposals based on "${parsed.data.feedback}": ${JSON.stringify(customerSafe)}`,
-          { type: "recommendation_refined", combinations: customerSafe },
-        );
+        if (!withIds.length) {
+          return ok(`No genuinely new combinations could be generated from "${parsed.data.feedback}" — every viable pairing already exists, or none had a clear complementary role.`, {
+            type: "combination_recommendations",
+            combinations: [],
+          });
+        }
+
+        // Fix (auto-preview flow) — a refinement request ("make it sweeter", "remove the dark
+        // chocolate") must open the preview automatically too, exactly like the first generation —
+        // never fall back to a "pick one of N" list with Select/Refine/Create buttons.
+        const result = await autoSelectAndConfirmBest(withIds, conversationId, context);
+        return result.ok ? ok(result.modelContent, result.sseEvent) : fail(result.modelContent);
       }
 
       case "confirm_product_combination": {
