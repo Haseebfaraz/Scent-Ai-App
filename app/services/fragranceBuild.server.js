@@ -48,6 +48,40 @@ export function computeDefaultRatios(buckets) {
 }
 
 /**
+ * A single blended $/ml rate across every real component (weighted by each product's own
+ * recommendedRatio share) — real component products no longer map 1:1 to a note position (a
+ * single component's notes can land in more than one bucket), so a per-position rate can't be
+ * attributed any more precisely than this without inventing a split the data doesn't support.
+ * Read-only (no Shopify calls) — safe to call from the preview page's loader for a price estimate,
+ * not just at real product-creation time.
+ * @param {Array<{title: string}>} internalProducts
+ * @param {Array<{productTitle: string, ratioPercent: number}>} ratiosByProduct
+ * @returns {Promise<number>} $/ml, blended.
+ */
+export async function computeBlendedPricePer5ml(internalProducts, ratiosByProduct) {
+  const catalogRows = await prisma.fragranceProduct.findMany({
+    where: { normalizedTitle: { in: (internalProducts || []).map((p) => normalizeProductName(p.title)) } },
+    select: { normalizedTitle: true, pricePer5ml: true },
+  });
+  const priceByNormalizedTitle = new Map(catalogRows.map((r) => [r.normalizedTitle, r.pricePer5ml]));
+  return (
+    (ratiosByProduct || []).reduce((sum, r) => {
+      const price = priceByNormalizedTitle.get(normalizeProductName(r.productTitle));
+      return sum + (r.ratioPercent / 100) * (typeof price === "number" ? price : FALLBACK_PRICE_PER_5ML);
+    }, 0) || FALLBACK_PRICE_PER_5ML
+  );
+}
+
+// Total estimated price for the 34ml bottle at the given Top/Middle/Base split — same math
+// createShopifyBuildProduct uses at real creation time, exposed here so the preview page can show
+// a live-updating estimate before anything is actually created.
+export function estimateTotalPrice(pricePer5ml, ratios) {
+  const totalPct = (ratios.top || 0) + (ratios.middle || 0) + (ratios.base || 0);
+  const ml = (totalPct / 100) * BOTTLE_ML;
+  return (pricePer5ml / 5) * ml;
+}
+
+/**
  * First-time Shopify product creation for a confirmed recommendation, using the Top/Middle/Base
  * Note option shape api.save-build.jsx already expects. Never called if
  * recommendation.shopifyProductId is already set — ratio adjustments on an existing product go
@@ -73,20 +107,8 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
   const internalProducts = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
   const buckets = computeNotePositionBuckets(internalProducts, excludedNotes);
 
-  // A single blended $/ml rate across every real component (weighted by each product's own
-  // recommendedRatio share) — real component products no longer map 1:1 to a note position (a
-  // single component's notes can land in more than one bucket), so a per-position rate can't be
-  // attributed any more precisely than this without inventing a split the data doesn't support.
-  const catalogRows = await prisma.fragranceProduct.findMany({
-    where: { normalizedTitle: { in: internalProducts.map((p) => normalizeProductName(p.title)) } },
-    select: { normalizedTitle: true, pricePer5ml: true },
-  });
-  const priceByNormalizedTitle = new Map(catalogRows.map((r) => [r.normalizedTitle, r.pricePer5ml]));
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
-  const avgPricePer5ml = ratiosByProduct.reduce((sum, r) => {
-    const price = priceByNormalizedTitle.get(normalizeProductName(r.productTitle));
-    return sum + (r.ratioPercent / 100) * (typeof price === "number" ? price : FALLBACK_PRICE_PER_5ML);
-  }, 0) || FALLBACK_PRICE_PER_5ML;
+  const avgPricePer5ml = await computeBlendedPricePer5ml(internalProducts, ratiosByProduct);
 
   const layers = ["top", "middle", "base"].map((position) => {
     const quantityMl = Math.round(((ratios[position] / 100) * BOTTLE_ML) * 10) / 10;
