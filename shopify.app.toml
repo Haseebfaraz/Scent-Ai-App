@@ -33,5 +33,5 @@ embedded = false
 
 [customer_authentication]
 redirect_uris = [
-  "https://scent-ai-app.onrender.com/auth/callback"
+  "https://scent-ai-app.onrender.com/auth/customer/callback"
 ]
