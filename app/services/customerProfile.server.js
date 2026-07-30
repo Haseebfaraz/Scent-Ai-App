@@ -47,6 +47,11 @@ export function emptyProfile() {
     },
     likes: [],
     dislikes: [],
+    // Fix (preference vocabulary normalization) — every whole-word misspelling correction ever
+    // applied to likes/dislikes/preferredStyle/occasion/additionalPreferences, in order, each
+    // recording which field it happened in plus the original and corrected word — never silently
+    // rewritten with no trace. Appended to, never replaced.
+    preferenceVocabularyCorrections: [],
     preferredStyle: null,
     // Set only when the customer's stated preferredStyle was actually a non-answer ("you should
     // know", "surprise me", etc.) — a deterministic style guess derived from likes/dislikes/season/

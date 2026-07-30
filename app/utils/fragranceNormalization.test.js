@@ -1,5 +1,8 @@
 import { describe, it, expect } from "vitest";
-import { normalizeProductName, normalizeRegionText, resolveLocationInput, SEASON_ALIASES } from "./fragranceNormalization.js";
+import {
+  normalizeProductName, normalizeRegionText, resolveLocationInput, SEASON_ALIASES,
+  correctPreferenceVocabulary, correctPreferenceVocabularyList,
+} from "./fragranceNormalization.js";
 
 describe("normalizeProductName", () => {
   it("lowercases, trims, and strips punctuation", () => {
@@ -67,6 +70,64 @@ describe("resolveLocationInput", () => {
   it("returns not-resolved/no-confirmation-needed for empty input", () => {
     expect(resolveLocationInput("", regionMaps)).toMatchObject({ resolved: false, needsConfirmation: false });
     expect(resolveLocationInput(null, regionMaps)).toMatchObject({ resolved: false, needsConfirmation: false });
+  });
+});
+
+describe("correctPreferenceVocabulary", () => {
+  it("corrects the acceptance-scenario misspellings", () => {
+    expect(correctPreferenceVocabulary("spricy").corrected).toBe("spicy");
+    expect(correctPreferenceVocabulary("gourmant").corrected).toBe("gourmand");
+    expect(correctPreferenceVocabulary("fruty").corrected).toBe("fruity");
+    expect(correctPreferenceVocabulary("aquitic").corrected).toBe("aquatic");
+  });
+
+  it("corrects a misspelled word within a full sentence, leaving everything else untouched", () => {
+    const result = correctPreferenceVocabulary("I like spricy and fruty scents for the gym");
+    expect(result.corrected).toBe("I like spicy and fruity scents for the gym");
+    expect(result.corrections).toEqual(
+      expect.arrayContaining([
+        { original: "spricy", corrected: "spicy" },
+        { original: "fruty", corrected: "fruity" },
+      ]),
+    );
+  });
+
+  it("preserves capitalization pattern", () => {
+    expect(correctPreferenceVocabulary("Spricy").corrected).toBe("Spicy");
+    expect(correctPreferenceVocabulary("SPRICY").corrected).toBe("SPICY");
+  });
+
+  it("does not touch real words that aren't in the controlled list — no unrestricted fuzzy correction", () => {
+    expect(correctPreferenceVocabulary("I like spicy and woody scents").corrected).toBe("I like spicy and woody scents");
+    expect(correctPreferenceVocabulary("A totally unrelated sentence about cats").corrected).toBe("A totally unrelated sentence about cats");
+  });
+
+  it("never modifies a real product name (product names are not run through this corrector)", () => {
+    // This function has no concept of a "product name" argument at all — normalizeProductName is
+    // the only function that ever touches product titles, and it's untouched by this feature.
+    expect(normalizeProductName("Fruty")).toBe("fruty"); // normalizeProductName never corrects spelling
+  });
+
+  it("returns no corrections and the original text for empty/non-string input", () => {
+    expect(correctPreferenceVocabulary("")).toEqual({ corrected: "", corrections: [] });
+    expect(correctPreferenceVocabulary(null)).toEqual({ corrected: "", corrections: [] });
+  });
+});
+
+describe("correctPreferenceVocabularyList", () => {
+  it("corrects each item in an array independently and combines corrections", () => {
+    const result = correctPreferenceVocabularyList(["Spricy", "Woody", "Gourmant"]);
+    expect(result.corrected).toEqual(["Spicy", "Woody", "Gourmand"]);
+    expect(result.corrections).toEqual(
+      expect.arrayContaining([
+        { original: "Spricy", corrected: "spicy" },
+        { original: "Gourmant", corrected: "gourmand" },
+      ]),
+    );
+  });
+
+  it("returns an empty result for an empty array", () => {
+    expect(correctPreferenceVocabularyList([])).toEqual({ corrected: [], corrections: [] });
   });
 });
 

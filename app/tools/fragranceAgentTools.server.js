@@ -33,6 +33,12 @@ import {
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
 import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
+import { correctPreferenceVocabulary, correctPreferenceVocabularyList } from "../utils/fragranceNormalization.js";
+
+// Fix (preference vocabulary normalization) — the profile fields a customer's own free-text
+// wording actually flows into; only these get the misspelling corrector applied. requestedSeasonStyle
+// is a fixed enum (never free text) and doesn't need it.
+const VOCABULARY_CORRECTED_FIELDS = new Set(["likes", "dislikes", "preferredStyle", "occasion", "additionalPreferences"]);
 
 // Fix (profile normalization) — a preferredStyle answer that's actually a non-answer ("you should
 // know", "surprise me") carries no real style signal. Deriving a deterministic guess from whatever
@@ -66,7 +72,7 @@ function effectiveQuerySeason(profile) {
 // the customerFacing* fields flattened, not nested under customerFacingJson).
 function toCustomerSafeCombo(withIdCombo) {
   const {
-    recommendationId, type, existsAlready, evidenceScope, confidence,
+    recommendationId, type, existsAlready, evidenceScope, confidence, confidenceBreakdown,
     customerFacingName, customerFacingDescription, customerFacingWhySuits,
     customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
     customerFacingNotesByProduct,
@@ -77,7 +83,7 @@ function toCustomerSafeCombo(withIdCombo) {
     customerFacingHistoricalEvidence, existingCombinationEvidence,
   } = withIdCombo;
   return {
-    recommendationId, type, existsAlready, evidenceScope, confidence,
+    recommendationId, type, existsAlready, evidenceScope, confidence, confidenceBreakdown,
     customerFacingName, customerFacingDescription, customerFacingWhySuits,
     customerFacingBestUse, customerFacingWeatherSuitability, customerFacingStrength, customerFacingRisk,
     customerFacingNotesByProduct,
@@ -107,6 +113,10 @@ function computeProfileHash(profile) {
     likes: profile?.likes, dislikes: profile?.dislikes, preferredStyle: profile?.preferredStyle,
     inferredStyle: profile?.inferredStyle, additionalPreferences: profile?.additionalPreferences,
     strengthPreference: profile?.strengthPreference,
+    // Fix (lifestyle scoring) — occasion is where interpretLifestyleContext reads its signal from;
+    // without this, a customer changing their stated occasion mid-conversation (e.g. adding "I'm
+    // usually at the gym") would keep scoring against the OLD, now-stale lifestyle context.
+    occasion: profile?.occasion,
   };
   return crypto.createHash("sha256").update(JSON.stringify(relevant)).digest("hex");
 }
@@ -481,6 +491,26 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           return ok(`Email is already known and trusted — no need to save or ask again.`);
         }
 
+        // Fix (preference vocabulary normalization) — a controlled, whole-word misspelling
+        // corrector for the fragrance-vocabulary terms this engine actually matches against
+        // (PREFERENCE_FAMILIES/COMPATIBILITY_TAGS), applied only to the free-text profile fields a
+        // customer's own wording flows into, BEFORE the NA-filter/non-answer-style checks below so
+        // those see corrected text too. Deliberately not unrestricted fuzzy correction — see
+        // PREFERENCE_VOCABULARY_CORRECTIONS's own comment. Every correction is recorded, never
+        // silently applied with no trace.
+        let vocabularyCorrections = [];
+        if (VOCABULARY_CORRECTED_FIELDS.has(parsed.data.field)) {
+          if (Array.isArray(parsed.data.value)) {
+            const result = correctPreferenceVocabularyList(parsed.data.value);
+            parsed.data.value = result.corrected;
+            vocabularyCorrections = result.corrections;
+          } else if (typeof parsed.data.value === "string") {
+            const result = correctPreferenceVocabulary(parsed.data.value);
+            parsed.data.value = result.corrected;
+            vocabularyCorrections = result.corrections;
+          }
+        }
+
         // Fix (profile normalization) — "NA"/"none"/"nothing" under dislikes means no stated
         // dislikes, not a literal disliked note called "NA".
         if (parsed.data.field === "dislikes" && Array.isArray(parsed.data.value)) {
@@ -506,7 +536,15 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (!valueParsed.success) {
           return fail(`invalid value for field "${parsed.data.field}": ${valueParsed.error.issues.map((i) => i.message).join("; ")}`);
         }
-        const profile = await saveCustomerProfileField(conversationId, parsed.data.field, valueParsed.data);
+        const fieldsToSave = { [parsed.data.field]: valueParsed.data };
+        if (vocabularyCorrections.length) {
+          const currentProfile = await getCustomerProfile(conversationId);
+          fieldsToSave.preferenceVocabularyCorrections = [
+            ...(currentProfile.preferenceVocabularyCorrections || []),
+            ...vocabularyCorrections.map((c) => ({ field: parsed.data.field, ...c })),
+          ];
+        }
+        const profile = await saveCustomerProfileFields(conversationId, fieldsToSave);
         const missing = getMissingRequiredFields(profile);
 
         // Only discuss season when the customer volunteers a style — check for a genuine conflict

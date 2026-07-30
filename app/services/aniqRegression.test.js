@@ -14,6 +14,7 @@ import { describe, it, expect } from "vitest";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import { generateNewProductCombinations } from "./recommendationEngine.server.js";
 import { executeFragranceTool, __getScratchForTesting } from "../tools/fragranceAgentTools.server.js";
+import { saveCustomerProfileFields } from "./customerProfile.server.js";
 import prisma from "../db.server.js";
 
 const ANIQ_PROFILE = {
@@ -192,8 +193,13 @@ describe("Test 8: cache invalidation — a real profile change regenerates candi
     const conversationId = `vitest-cache-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const ctx = { conversationId, customerName: "Test", customerEmail: "test@example.com" };
     try {
-      // Los Angeles resolves via the fast, real order-history path — no live geocoding needed.
-      await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx);
+      // Fix (test reliability) — sets the same fields verify_customer_location would have set,
+      // without calling it: that tool also fetches real live weather (fetchCurrentWeather), a real
+      // network call this cache-invalidation test has nothing to do with. Los Angeles resolves via
+      // the fast, real order-history path for the city/country fields themselves either way.
+      await saveCustomerProfileFields(conversationId, {
+        city: "Los Angeles", country: "United States", locationVerified: true, locationSource: "order_history",
+      });
       await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
 
       const firstGenerate = await executeFragranceTool("generate_new_product_combinations", "{}", ctx);

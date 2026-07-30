@@ -218,6 +218,7 @@ const PAGE_STYLES = `
     animation: cs-fade-up 0.7s ease forwards 0.1s;
   }
   .cs-title-input {
+    display: block;
     font-family: 'Cormorant Garamond', serif;
     font-size: 68px;
     line-height: 1.05;
@@ -231,6 +232,9 @@ const PAGE_STYLES = `
     padding: 0;
     opacity: 0;
     animation: cs-fade-up 0.7s ease forwards 0.25s;
+    resize: none;
+    overflow: hidden;
+    overflow-wrap: break-word;
   }
   .cs-title-input:focus { outline: none; border-bottom-color: var(--cs-taupe); }
   .cs-type-badge {
@@ -398,6 +402,8 @@ const PAGE_STYLES = `
     box-shadow: 0px 20px 32px 4px rgb(181 181 181 / 35%);
     border: 1px solid #ededed;
     border-radius: 15px;
+    width: 60%;
+    margin: 0px auto;
   }
   .cs-actionbar-price { display: flex; align-items: baseline; gap: 10px; white-space: nowrap; }
   .cs-actionbar-price .cs-price { font-family: 'Cormorant Garamond', serif; font-size: 38px; }
@@ -767,6 +773,32 @@ function BottleVisualization({ ratios }) {
   return <div id="cs-bottle-3d" ref={mountRef} />;
 }
 
+// Fix (title overflow) — a plain single-line <input> never wraps, so a name longer than the
+// visible width just got clipped/scrolled off-screen at this heading's large font-size. A
+// textarea wraps naturally; this keeps it looking like a single fluid heading by re-measuring and
+// setting its own height to its content's real scrollHeight on every change, instead of ever
+// scrolling internally the way a real multi-line box would.
+function AutoGrowTitleInput({ value, onChange }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+
+  return (
+    <textarea
+      ref={ref}
+      className="cs-title-input"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      aria-label="Fragrance name"
+      rows={1}
+    />
+  );
+}
+
 // Matches the reference page's own per-position slider colors exactly (see LAYER_GRADIENTS in
 // BottleVisualization below — same three colors, applied here as a flat 2D fill).
 const SLIDER_FILL_COLOR = { top: "#2655d8", middle: "#D9AE68", base: "#8C4A3C" };
@@ -911,12 +943,7 @@ export default function FragrancePreview() {
       <div className="cs-hero">
         <div className="cs-hero-left">
           <div className="cs-eyebrow">The Digital Atelier</div>
-          <input
-            className="cs-title-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            aria-label="Fragrance name"
-          />
+          <AutoGrowTitleInput value={name} onChange={setName} />
           <div className="cs-type-badge">{data.type}</div>
 
           <div className="cs-notes">
@@ -941,14 +968,14 @@ export default function FragrancePreview() {
           </div>
 
           {/* "Products Used" — real component names shown here only, never inside the note rows above. */}
-          <div className="cs-profile-box">
+          {/* <div className="cs-profile-box">
             <div className="cs-profile-label">Products Used</div>
             <ul className="cs-products-used">
               {data.productsUsed.map((p) => (
                 <li key={p.title}>{p.title}{p.contribution ? ` — ${p.contribution}` : ""}</li>
               ))}
             </ul>
-          </div>
+          </div> */}
 
           <div className="cs-feature-row">
             <div className="cs-feature-icon">&#9879;</div>

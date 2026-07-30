@@ -10,10 +10,22 @@ import { executeFragranceTool } from "../tools/fragranceAgentTools.server.js";
 import { saveRecommendation } from "./recommendationConfirmation.server.js";
 import { resolveLegacyPreviewShortCircuit } from "./legacyPreviewRecovery.server.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
+import { saveCustomerProfileFields } from "./customerProfile.server.js";
 import prisma from "../db.server.js";
 
 function freshConversationId(label) {
   return `vitest-autopreview-${label}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+// Fix (test reliability) — sets the same city/country/locationVerified fields
+// verify_customer_location would have set, without calling it: that tool also fetches real live
+// weather (fetchCurrentWeather), a real network call these auto-preview-flow tests have nothing to
+// do with. Los Angeles resolves via the fast, real order-history path for the city/country fields
+// themselves either way, so this is the same real data, just without the unrelated live weather call.
+async function verifyLosAngelesWithoutNetwork(conversationId) {
+  await saveCustomerProfileFields(conversationId, {
+    city: "Los Angeles", country: "United States", locationVerified: true, locationSource: "order_history",
+  });
 }
 
 describe("generate_new_product_combinations — auto-select + auto-confirm (Test 1/2)", () => {
@@ -21,7 +33,7 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
     const conversationId = freshConversationId("best");
     const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
     try {
-      await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx);
+      await verifyLosAngelesWithoutNetwork(conversationId);
       await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
 
       const result = await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
@@ -51,7 +63,7 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
     const conversationId = freshConversationId("instruction");
     const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
     try {
-      await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx);
+      await verifyLosAngelesWithoutNetwork(conversationId);
       await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
 
       const result = await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
@@ -67,7 +79,7 @@ describe("refine_combination_recommendations — auto-select + auto-confirm (rea
     const conversationId = freshConversationId("refine");
     const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
     try {
-      await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx);
+      await verifyLosAngelesWithoutNetwork(conversationId);
       await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
       // Exactly the reported flow: an initial generation, then feedback ("Dont want Dark
       // Chocolate") that used to fall back to the old Select/Refine/Create card list.
