@@ -267,6 +267,22 @@
       },
 
       /**
+       * Same full-screen bottle overlay as showProductCreatingAnimation, but for the preview_ready
+       * redirect — a single fixed message, no phase-cycling (nothing is actually being created
+       * here, so "Infusing Top Notes…" et al. would be misleading), just enough to cover the brief
+       * gap before the new page finishes loading instead of an abrupt blank flash.
+       */
+      showPreviewOpeningAnimation: function() {
+        this.showProductCreatingAnimation();
+        if (this._productOverlayInterval) {
+          clearInterval(this._productOverlayInterval);
+          this._productOverlayInterval = null;
+        }
+        const statusEl = this._productOverlayEl && this._productOverlayEl.querySelector('.shop-ai-product-overlay-status');
+        if (statusEl) statusEl.textContent = 'Opening your fragrance preview…';
+      },
+
+      /**
        * Fade out and remove the full-screen creation overlay once the API call actually resolves
        * (success or error) — never yanked away instantly, so the transition reads as deliberate.
        */
@@ -701,6 +717,7 @@
           previewUrl: target.toString()
         });
         ShopAIChat.UI.removeTypingIndicator();
+        ShopAIChat.UI.showPreviewOpeningAnimation();
 
         console.info('PREVIEW_REDIRECT_STARTED', { previewUrl: target.toString() });
         window.location.assign(target.toString());
