@@ -11,7 +11,7 @@
 // AFTER a build is saved) — same fonts/palette/note-row/slider/action-bar language, plus the same
 // animated 3D bottle, so Recreate/Save Build/Add to Cart feel like one continuous experience
 // rather than a plain page before and a designed one after.
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import { unauthenticated } from "../shopify.server";
 import prisma from "../db.server";
@@ -19,8 +19,9 @@ import { getCustomerProfile, saveCustomerProfileFields } from "../services/custo
 import {
   computeNotePositionBuckets, computeDefaultRatios, createShopifyBuildProduct,
   markRecommendationDraft, markRecommendationSaved,
-  computePricePer5mlByPosition, estimateTotalPrice,
+  computePricePer5mlByPosition,
 } from "../services/fragranceBuild.server";
+import { estimateTotalPrice } from "../utils/fragrancePricing";
 import { resolveShopDomain } from "../services/shopDomain.server";
 
 const POSITION_LABELS = { top: "Top Notes", middle: "Middle Notes", base: "Base Notes" };
@@ -59,12 +60,11 @@ export async function loader({ request }) {
   const ratios = recommendation.draftRatiosJson || computeDefaultRatios(buckets);
   const customerFacingName = recommendation.customerFacingJson?.customerFacingName || "Custom Blend";
 
-  // Read-only price estimate (same per-position-rate math createShopifyBuildProduct uses at real
-  // creation time) — shown on the action bar before anything is actually created, purely for
-  // display; the real, authoritative price is only ever set at Save Build/Add to Cart time.
+  // Read-only per-position rates (same math createShopifyBuildProduct uses at real creation time)
+  // — the component derives a live price estimate from these as the customer drags a slider; the
+  // real, authoritative price is only ever set at Save Build/Add to Cart time.
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
   const pricePer5mlByPosition = await computePricePer5mlByPosition(internalProducts, ratiosByProduct);
-  const estimatedPrice = estimateTotalPrice(pricePer5mlByPosition, ratios);
 
   // "Molecular Profile" pills — every real note across all three positions, deduped, capped to 8.
   const profilePills = [...new Set([...buckets.top, ...buckets.middle, ...buckets.base])].slice(0, 8);
@@ -78,7 +78,9 @@ export async function loader({ request }) {
     excludedNotes,
     buildStatus: recommendation.buildStatus,
     shopifyProductId: recommendation.shopifyProductId,
-    estimatedPrice,
+    // Fix (price didn't update while dragging) — exposed so the component can recompute a live
+    // estimate as ratios change client-side, via the same shared estimateTotalPrice used below.
+    pricePer5mlByPosition,
     profilePills,
     // "Products Used" — real names, shown separately, never inside the note-position rows above.
     productsUsed: internalProducts.map((p) => ({ title: p.title, contribution: p.contribution })),
@@ -223,7 +225,7 @@ const PAGE_STYLES = `
     font-size: 68px;
     line-height: 1.05;
     font-weight: 500;
-    margin: 0 0 22px;
+    margin: 0 0 6px;
     border: none;
     border-bottom: 1px solid transparent;
     background: transparent;
@@ -237,6 +239,16 @@ const PAGE_STYLES = `
     overflow-wrap: break-word;
   }
   .cs-title-input:focus { outline: none; border-bottom-color: var(--cs-taupe); }
+  /* Fix (no affordance that the name is editable) — the only signal that this is a real, typeable
+     field rather than static heading text. */
+  .cs-title-edit-hint {
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--cs-wine);
+    opacity: 0.75;
+    margin: 0 0 22px;
+  }
   .cs-type-badge {
     display: inline-block;
     font-size: 13px;
@@ -838,19 +850,38 @@ function NoteRow({ position, notes, percent, excluded, onToggleExclude, onSlide 
   );
 }
 
-// Redistributes the other two positions proportionally so all three always sum to exactly 100 —
-// never lets one slider move without the others compensating.
+// Fix (slider stuck at 0%, can't recover) — the previous version redistributed the "remaining"
+// percentage among the other two positions PROPORTIONALLY TO THEIR CURRENT VALUE. Once any position
+// hit exactly 0, its share of any future redistribution was 0/otherSum = 0 forever — dragging a
+// DIFFERENT slider could never give it anything back; only dragging that exact slider's own handle
+// could, and even then the math checked out, so the real-world "stuck" symptom was this: a position
+// at 0 has no way to recover except by being dragged directly, which reads as broken to a customer
+// who naturally drags a different (larger) slider down expecting the empty one to grow.
+// Ported from the live custom-scent-product theme section's own redistribute() (same MIN_PCT=5,
+// same delta-based approach) for two reasons: it never lets any position reach a true zero-weight
+// state in the first place (so this bug class can't recur), and it keeps preview-page dragging
+// feeling identical to the real product page.
+const MIN_PCT = 5;
 function adjustRatios(current, changedKey, newValue) {
-  const others = Object.keys(current).filter((k) => k !== changedKey);
-  const clamped = Math.max(0, Math.min(100, newValue));
-  const remaining = 100 - clamped;
-  const otherSum = others.reduce((s, k) => s + current[k], 0);
-  const updated = { ...current, [changedKey]: clamped };
-  if (otherSum <= 0) {
-    others.forEach((k, i) => { updated[k] = i === 0 ? remaining : 0; });
-  } else {
-    others.forEach((k) => { updated[k] = (current[k] / otherSum) * remaining; });
+  const keys = Object.keys(current);
+  const others = keys.filter((k) => k !== changedKey);
+  if (others.length === 0) return { ...current, [changedKey]: 100 };
+
+  const maxPct = 100 - MIN_PCT * others.length;
+  const newPct = Math.max(MIN_PCT, Math.min(maxPct, newValue));
+  const delta = newPct - current[changedKey];
+
+  const updated = { ...current, [changedKey]: newPct };
+  const othersTotal = others.reduce((s, k) => s + current[k], 0);
+  if (othersTotal > 0) {
+    others.forEach((k) => {
+      const share = current[k] / othersTotal;
+      updated[k] = Math.max(MIN_PCT, current[k] - delta * share);
+    });
   }
+  const total = keys.reduce((s, k) => s + updated[k], 0);
+  updated[changedKey] += 100 - total;
+
   const rounded = Object.fromEntries(Object.entries(updated).map(([k, v]) => [k, Math.round(v)]));
   const diff = 100 - Object.values(rounded).reduce((a, b) => a + b, 0);
   if (diff !== 0) {
@@ -877,12 +908,16 @@ export default function FragrancePreview() {
   const toggleExclude = (note) => {
     setExcludedNotes((prev) => (prev.includes(note) ? prev.filter((n) => n !== note) : [...prev, note]));
   };
-  // Fix (price didn't change with ratio) — each position now has its own real $/5ml rate
-  // (fragranceBuild.server.js's computePricePer5mlByPosition), so dragging Top/Middle/Base
-  // sliders DOES change the true total. This page still only shows the loader's static estimate
-  // while dragging (no client-side live recompute here) — same as before this fix, just no longer
-  // for the reason that the total was mathematically constant.
   const handleSlide = (position, value) => setRatios((prev) => adjustRatios(prev, position, value));
+
+  // Fix (price didn't update while dragging) — each position now has its own real $/5ml rate
+  // (fragranceBuild.server.js's computePricePer5mlByPosition, passed down as
+  // data.pricePer5mlByPosition), so the total genuinely changes as ratios move. Recomputed with the
+  // same shared estimateTotalPrice the loader used for its initial estimate — never re-implemented.
+  const displayPrice = useMemo(
+    () => estimateTotalPrice(data.pricePer5mlByPosition, ratios),
+    [data.pricePer5mlByPosition, ratios],
+  );
 
   const submit = (intent) => {
     setPendingIntent(intent);
@@ -945,6 +980,9 @@ export default function FragrancePreview() {
         <div className="cs-hero-left">
           <div className="cs-eyebrow">The Digital Atelier</div>
           <AutoGrowTitleInput value={name} onChange={setName} />
+          {/* Fix (no affordance that the name is editable) — the title looked like plain static
+              heading text, with nothing indicating a customer could type over it. */}
+          <div className="cs-title-edit-hint">&#9998; Click to rename</div>
           <div className="cs-type-badge">{data.type}</div>
 
           <div className="cs-notes">
@@ -999,7 +1037,7 @@ export default function FragrancePreview() {
 
       <div className="cs-actionbar">
         <div className="cs-actionbar-price">
-          <span className="cs-price">${data.estimatedPrice.toFixed(2)}</span>
+          <span className="cs-price">${displayPrice.toFixed(2)}</span>
           <span className="cs-price-size">34ML<br />Parfum</span>
         </div>
         <div className="cs-actionbar-left">

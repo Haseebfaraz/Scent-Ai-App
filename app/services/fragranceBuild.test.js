@@ -3,7 +3,8 @@
 // at the identical $158.23. Root cause: every position was assigned the exact same blended $/5ml
 // rate, so `rate * (top_ml + middle_ml + base_ml)` collapsed to a constant regardless of split.
 import { describe, it, expect } from "vitest";
-import { estimateTotalPrice, computePricePer5mlByPosition } from "./fragranceBuild.server.js";
+import { computePricePer5mlByPosition } from "./fragranceBuild.server.js";
+import { estimateTotalPrice } from "../utils/fragrancePricing.js";
 
 describe("estimateTotalPrice — price must actually change when the ratio changes", () => {
   it("returns different totals for different ratio splits when positions have different rates", () => {
