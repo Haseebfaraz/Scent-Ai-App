@@ -44,45 +44,6 @@ function withRatioSuffix(baseValue, pct) {
 }
 
 const OPTION_NAME_TO_POSITION = { "Top Note": "top", "Middle Note": "middle", "Base Note": "base" };
-const POSITION_LABELS = { top: "Top Note", middle: "Middle Note", base: "Base Note" };
-
-// Fix (stale description) — descriptionHtml is written once at product creation
-// (fragranceBuild.server.js's fullDescription, with whatever the ORIGINAL ratio was) and this
-// endpoint never touched it again, so dragging a slider to a new ratio and clicking Save Build
-// updated the price/variant but left the description's percentages frozen at creation time —
-// confirmed live (description showed "Top Note (34%)" while the sliders had already been saved
-// at 15%). Rebuilds the same descriptionHtml shape fragranceBuild.server.js uses, but with the
-// ratio actually just saved. Best-effort: a failure here shouldn't fail the whole save-build call,
-// since the price/variant (the part that actually affects checkout) already succeeded.
-async function updateProductDescription(admin, productId, layers, ratios, combinationType) {
-  const notesByPosition = {};
-  for (const layer of layers) {
-    if (!notesByPosition[layer.position]) notesByPosition[layer.position] = layer.notes || [];
-  }
-  const notesSummaryHtml = ["top", "middle", "base"]
-    .filter((position) => notesByPosition[position]?.length)
-    .map((position) => `<strong>${POSITION_LABELS[position]}</strong> (${Math.round(ratios[position] ?? 0)}%): ${notesByPosition[position].join(", ")}`)
-    .join("<br>");
-  const descriptionHtml =
-    `<p>${notesSummaryHtml}</p>` +
-    (combinationType ? `<p><strong>Type:</strong> ${combinationType}</p>` : "") +
-    `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>`;
-
-  try {
-    const response = await admin.graphql(`
-      mutation updateBuildDescription($input: ProductInput!) {
-        productUpdate(input: $input) { userErrors { field message } }
-      }
-    `, { variables: { input: { id: productId, descriptionHtml } } });
-    const json = await response.json();
-    const errors = json.data?.productUpdate?.userErrors;
-    if (errors && errors.length > 0) {
-      console.error("productUpdate (description) userErrors:", JSON.stringify(errors));
-    }
-  } catch (err) {
-    console.error("Failed to update product description:", err);
-  }
-}
 
 // Two ratios this close together are treated as "the same build" — imprecise dragging easily
 // lands a pixel or two off a previous attempt (46% vs 48%), and without this every tiny wobble
@@ -122,6 +83,28 @@ async function ensureVariantUntracked(admin, inventoryItemId) {
   }
 }
 
+// Fix (editable product name on the live product page) — the theme's title field now sends
+// whatever the customer typed alongside the ratio; best-effort the same way ensureVariantUntracked
+// above is — a rename failure shouldn't fail the price/variant save, which is what actually matters
+// for checkout.
+async function renameProductIfProvided(admin, productId, name) {
+  if (typeof name !== "string" || !name.trim()) return;
+  try {
+    const response = await admin.graphql(`
+      mutation renameBuildProduct($input: ProductInput!) {
+        productUpdate(input: $input) { userErrors { field message } }
+      }
+    `, { variables: { input: { id: productId, title: name.trim() } } });
+    const json = await response.json();
+    const errors = json.data?.productUpdate?.userErrors;
+    if (errors && errors.length > 0) {
+      console.error("productUpdate (rename) userErrors:", JSON.stringify(errors));
+    }
+  } catch (err) {
+    console.error("Failed to rename product:", err);
+  }
+}
+
 export async function action({ request }) {
   if (request.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
@@ -133,13 +116,14 @@ export async function action({ request }) {
 
     const { admin } = await unauthenticated.admin(shopDomain);
 
-    const { productId, ratios } = await request.json();
+    const { productId, ratios, name } = await request.json();
     if (!productId || !ratios) {
       return new Response(JSON.stringify({ error: "productId and ratios are required." }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
       });
     }
+    await renameProductIfProvided(admin, productId, name);
 
     const productResponse = await admin.graphql(`
       query getProductForPricing($id: ID!) {
@@ -162,7 +146,7 @@ export async function action({ request }) {
       });
     }
 
-    const { layers, combinationType } = JSON.parse(metafieldValue);
+    const { layers } = JSON.parse(metafieldValue);
 
     // Same grouping as the theme section: blended $/ml rate per position, from whatever
     // containers/quantities were actually confirmed at creation time.
@@ -227,7 +211,6 @@ export async function action({ request }) {
       if (closestEdge.node.inventoryItem?.tracked) {
         await ensureVariantUntracked(admin, closestEdge.node.inventoryItem.id);
       }
-      await updateProductDescription(admin, productId, layers, ratios, combinationType);
       return new Response(JSON.stringify({ price: closestEdge.node.price, variantId: closestEdge.node.id, created: false }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
@@ -275,7 +258,6 @@ export async function action({ request }) {
     }
 
     const newVariant = variantCreateJson.data.productVariantsBulkCreate.productVariants[0];
-    await updateProductDescription(admin, productId, layers, ratios, combinationType);
 
     // Lets the client know this is a brand-new variant (as opposed to one reused via the
     // tolerance match above) — Shopify takes a few seconds to propagate a freshly created

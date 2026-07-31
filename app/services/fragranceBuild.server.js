@@ -106,16 +106,6 @@ export async function computePricePer5mlByPosition(internalProducts, ratiosByPro
   return rates;
 }
 
-// Total estimated price for the 34ml bottle at the given Top/Middle/Base split — same math
-// createShopifyBuildProduct uses at real creation time, exposed here so the preview page can show
-// a live-updating estimate before anything is actually created.
-export function estimateTotalPrice(pricePer5mlByPosition, ratios) {
-  return ["top", "middle", "base"].reduce((sum, position) => {
-    const ml = ((ratios[position] || 0) / 100) * BOTTLE_ML;
-    return sum + (pricePer5mlByPosition[position] / 5) * ml;
-  }, 0);
-}
-
 /**
  * First-time Shopify product creation for a confirmed recommendation, using the Top/Middle/Base
  * Note option shape api.save-build.jsx already expects. Never called if
@@ -161,13 +151,18 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
     values: [{ name: `${l.notes.join(", ")} (${Math.round(ratios[l.position])}%)` }],
   }));
 
-  const notesSummaryHtml = layers
-    .map((l) => `<strong>${POSITION_LABELS[l.position]}</strong> (${Math.round(ratios[l.position])}%): ${l.notes.join(", ")}`)
-    .join("<br>");
+  // Fix (description showing raw notes) — the real note breakdown already lives in the interactive
+  // Top/Middle/Base rows (both on this preview page and the live custom-scent-product theme
+  // section) and in the note_composition metafield; repeating it here as static description text
+  // was pure duplication, and since it embedded the ratio percentages, it went stale the moment a
+  // customer changed the ratio (fixed separately in api.save-build.jsx, but that fix is now moot —
+  // there's nothing ratio-dependent left in this text to keep in sync). This description is
+  // genuine marketing copy about the product itself, not a data dump — never changes per ratio.
   const fullDescription =
-    `<p>${notesSummaryHtml}</p>` +
+    `<p>A bespoke fragrance blend, crafted just for you from real, hand-selected DUA notes — your own signature scent, not a stock formula.</p>` +
     `<p><strong>Type:</strong> ${recommendation.combinationType}</p>` +
-    `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>`;
+    `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>` +
+    `<p><strong>Quality:</strong> Lab certified, phthalate &amp; paraben free.</p>`;
 
   const createResponse = await admin.graphql(`
     mutation createProduct($input: ProductInput!) {
