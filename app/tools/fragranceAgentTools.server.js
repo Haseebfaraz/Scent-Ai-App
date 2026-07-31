@@ -422,34 +422,62 @@ const REFINEMENT_TYPE_KEYWORDS = [
   { pattern: /\btribrid\b/i, types: ["TRIBRID"] },
   { pattern: /\bquadbrid\b/i, types: ["QUADBRID"] },
 ];
-const REFINEMENT_LIKE_KEYWORDS = [
+// Fix (Recreate refinement no-op bug) — every family a customer might plausibly ask for MORE or
+// LESS of, in one place, matched with word-form awareness (plain/comparative/adjective forms), then
+// combined with NEGATION_PATTERN below to decide direction. Previously likes and dislikes were two
+// separate hand-maintained lists — dislikes only ever covered "spicy"/"strong" via a few fixed
+// literal phrases ("remove spicy", "less strong", ...) — so a real request like "less woody" or "no
+// musk" matched nothing on either list, the "adjusted" profile ended up identical to the original,
+// and refine_combination_recommendations silently regenerated the exact same combination (confirmed
+// live: same notes, new id/name, after a real refinement request). One list checked for both
+// directions fixes that, and also fixes a real bug where "less sweet" used to add sweet as a LIKE —
+// there was no negation check anywhere before.
+const REFINEMENT_FAMILY_KEYWORDS = [
   { pattern: /\bfresh(er)?\b/i, family: "Fresh" },
   { pattern: /\bsweet(er)?\b/i, family: "Sweet" },
   { pattern: /\bfruit(y|ier)?\b/i, family: "Fruity" },
-  // Previously missing entirely — a refinement request like "focus on spicy" or "spicier" silently
-  // matched nothing here, so it never actually biased regeneration despite the model's narration
-  // claiming otherwise. Confirmed against real production data (recommendation batches that kept
-  // returning sweet/fresh combinations after repeated "spicier" refinement requests).
   { pattern: /\bspic(y|ier|e)?\b/i, family: "Spicy" },
   { pattern: /\bwood(y|ier)?\b/i, family: "Woody" },
   { pattern: /\bmusk(y)?\b/i, family: "Musk" },
+  { pattern: /\bpowder(y|ier)?\b/i, family: "Powdery" },
+  { pattern: /\b(strong(er)?|heav(y|ier))\b/i, family: "Strong" },
 ];
-const REFINEMENT_DISLIKE_KEYWORDS = [
-  { pattern: /\bremove spicy|\bless spicy|no spicy/i, family: "Spicy" },
-  { pattern: /\bless strong|not (as )?strong|lighter/i, family: "Strong" },
-];
+const NEGATION_PATTERN = /\b(no|not|don'?t|without|remove|less|avoid|take out|excluding|get rid of)\b/i;
 const ONLY_NEW_PATTERN = /\bonly new\b|\bnew combinations? only\b/i;
 
+// ponytail: family detection is a fixed adjective list, not full NLP — a literal single-note ask
+// ("remove the almond") won't match since notes aren't part of this vocabulary (dislikes work at
+// the family level everywhere else in this engine too); upgrade path is component-level exclusion
+// if that's ever requested.
 function deriveRefinementAdjustments(feedback) {
-  const addLikes = REFINEMENT_LIKE_KEYWORDS.filter((k) => k.pattern.test(feedback)).map((k) => k.family);
-  const addDislikes = REFINEMENT_DISLIKE_KEYWORDS.filter((k) => k.pattern.test(feedback)).map((k) => k.family);
+  // Split into clauses so "less woody, more fruity" resolves each family against ITS OWN clause's
+  // negation, not the sentence as a whole.
+  const clauses = feedback.split(/[,;]|\band\b|\bbut\b/i).map((c) => c.trim()).filter(Boolean);
+  const addLikes = new Set();
+  const addDislikes = new Set();
+  for (const clause of clauses.length ? clauses : [feedback]) {
+    const negated = NEGATION_PATTERN.test(clause);
+    for (const { pattern, family } of REFINEMENT_FAMILY_KEYWORDS) {
+      if (pattern.test(clause)) (negated ? addDislikes : addLikes).add(family);
+    }
+  }
+  // A stated exclusion wins over an incidental positive mention of the same family elsewhere in
+  // the same message.
+  addDislikes.forEach((f) => addLikes.delete(f));
+
   const typeMatch = REFINEMENT_TYPE_KEYWORDS.find((k) => k.pattern.test(feedback));
   return {
-    addLikes,
-    addDislikes,
+    addLikes: [...addLikes],
+    addDislikes: [...addDislikes],
     allowedTypes: typeMatch ? typeMatch.types : undefined,
     onlyNew: ONLY_NEW_PATTERN.test(feedback), // always true anyway — this engine never proposes existing combos
   };
+}
+
+// Test-only escape hatch, same pattern as __getScratchForTesting above — lets the regression suite
+// check like/dislike direction deterministically without going through a full tool call.
+export function __deriveRefinementAdjustmentsForTesting(feedback) {
+  return deriveRefinementAdjustments(feedback);
 }
 
 // ============================================================

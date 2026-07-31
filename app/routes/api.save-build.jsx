@@ -12,9 +12,23 @@ import { unauthenticated } from "../shopify.server";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, ngrok-skip-browser-warning",
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 };
+
+// Fix (Save Build/Add to Cart CORS failure) — confirmed via a live curl test against this same
+// server (see chat.jsx's CHAT_CORS_HEADERS comment) that React Router routes a browser's CORS
+// preflight OPTIONS request to a route's loader, not its action, even though action() below also
+// has its own (dead-in-production) OPTIONS branch. This route only ever exported an action, so the
+// preflight hit nothing with CORS headers at all and the browser blocked the real POST before it
+// was ever sent — exactly the "Failed to fetch" / "No Access-Control-Allow-Origin header" error
+// seen live from the custom-scent-product theme section.
+export async function loader({ request }) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  return new Response(null, { status: 405, headers: corsHeaders });
+}
 
 // Shopify caps every product at 3 options total, so a separate 4th option to track the ratio
 // (e.g. "5-90-5") isn't possible once a product already uses Top/Middle/Base Note for its note
@@ -30,6 +44,45 @@ function withRatioSuffix(baseValue, pct) {
 }
 
 const OPTION_NAME_TO_POSITION = { "Top Note": "top", "Middle Note": "middle", "Base Note": "base" };
+const POSITION_LABELS = { top: "Top Note", middle: "Middle Note", base: "Base Note" };
+
+// Fix (stale description) — descriptionHtml is written once at product creation
+// (fragranceBuild.server.js's fullDescription, with whatever the ORIGINAL ratio was) and this
+// endpoint never touched it again, so dragging a slider to a new ratio and clicking Save Build
+// updated the price/variant but left the description's percentages frozen at creation time —
+// confirmed live (description showed "Top Note (34%)" while the sliders had already been saved
+// at 15%). Rebuilds the same descriptionHtml shape fragranceBuild.server.js uses, but with the
+// ratio actually just saved. Best-effort: a failure here shouldn't fail the whole save-build call,
+// since the price/variant (the part that actually affects checkout) already succeeded.
+async function updateProductDescription(admin, productId, layers, ratios, combinationType) {
+  const notesByPosition = {};
+  for (const layer of layers) {
+    if (!notesByPosition[layer.position]) notesByPosition[layer.position] = layer.notes || [];
+  }
+  const notesSummaryHtml = ["top", "middle", "base"]
+    .filter((position) => notesByPosition[position]?.length)
+    .map((position) => `<strong>${POSITION_LABELS[position]}</strong> (${Math.round(ratios[position] ?? 0)}%): ${notesByPosition[position].join(", ")}`)
+    .join("<br>");
+  const descriptionHtml =
+    `<p>${notesSummaryHtml}</p>` +
+    (combinationType ? `<p><strong>Type:</strong> ${combinationType}</p>` : "") +
+    `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>`;
+
+  try {
+    const response = await admin.graphql(`
+      mutation updateBuildDescription($input: ProductInput!) {
+        productUpdate(input: $input) { userErrors { field message } }
+      }
+    `, { variables: { input: { id: productId, descriptionHtml } } });
+    const json = await response.json();
+    const errors = json.data?.productUpdate?.userErrors;
+    if (errors && errors.length > 0) {
+      console.error("productUpdate (description) userErrors:", JSON.stringify(errors));
+    }
+  } catch (err) {
+    console.error("Failed to update product description:", err);
+  }
+}
 
 // Two ratios this close together are treated as "the same build" — imprecise dragging easily
 // lands a pixel or two off a previous attempt (46% vs 48%), and without this every tiny wobble
@@ -109,7 +162,7 @@ export async function action({ request }) {
       });
     }
 
-    const { layers } = JSON.parse(metafieldValue);
+    const { layers, combinationType } = JSON.parse(metafieldValue);
 
     // Same grouping as the theme section: blended $/ml rate per position, from whatever
     // containers/quantities were actually confirmed at creation time.
@@ -174,6 +227,7 @@ export async function action({ request }) {
       if (closestEdge.node.inventoryItem?.tracked) {
         await ensureVariantUntracked(admin, closestEdge.node.inventoryItem.id);
       }
+      await updateProductDescription(admin, productId, layers, ratios, combinationType);
       return new Response(JSON.stringify({ price: closestEdge.node.price, variantId: closestEdge.node.id, created: false }), {
         status: 200,
         headers: { ...corsHeaders, "Content-Type": "application/json" }
@@ -221,6 +275,7 @@ export async function action({ request }) {
     }
 
     const newVariant = variantCreateJson.data.productVariantsBulkCreate.productVariants[0];
+    await updateProductDescription(admin, productId, layers, ratios, combinationType);
 
     // Lets the client know this is a brand-new variant (as opposed to one reused via the
     // tolerance match above) — Shopify takes a few seconds to propagate a freshly created
