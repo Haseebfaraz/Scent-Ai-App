@@ -12,9 +12,23 @@ import { unauthenticated } from "../shopify.server";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type",
+  "Access-Control-Allow-Headers": "Content-Type, ngrok-skip-browser-warning",
   "Access-Control-Allow-Methods": "POST, OPTIONS"
 };
+
+// Fix (Save Build/Add to Cart CORS failure) — confirmed via a live curl test against this same
+// server (see chat.jsx's CHAT_CORS_HEADERS comment) that React Router routes a browser's CORS
+// preflight OPTIONS request to a route's loader, not its action, even though action() below also
+// has its own (dead-in-production) OPTIONS branch. This route only ever exported an action, so the
+// preflight hit nothing with CORS headers at all and the browser blocked the real POST before it
+// was ever sent — exactly the "Failed to fetch" / "No Access-Control-Allow-Origin header" error
+// seen live from the custom-scent-product theme section.
+export async function loader({ request }) {
+  if (request.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: corsHeaders });
+  }
+  return new Response(null, { status: 405, headers: corsHeaders });
+}
 
 // Shopify caps every product at 3 options total, so a separate 4th option to track the ratio
 // (e.g. "5-90-5") isn't possible once a product already uses Top/Middle/Base Note for its note
