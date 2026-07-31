@@ -6,7 +6,7 @@
 // an EXISTING product; this service only ever handles the FIRST creation).
 import prisma from "../db.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
-import { assignNotePositions } from "../utils/notePositionMapping.js";
+import { assignNotePositions, classifyNote } from "../utils/notePositionMapping.js";
 
 const BOTTLE_ML = 34;
 const FALLBACK_PRICE_PER_5ML = 20;
@@ -48,37 +48,72 @@ export function computeDefaultRatios(buckets) {
 }
 
 /**
- * A single blended $/ml rate across every real component (weighted by each product's own
- * recommendedRatio share) — real component products no longer map 1:1 to a note position (a
- * single component's notes can land in more than one bucket), so a per-position rate can't be
- * attributed any more precisely than this without inventing a split the data doesn't support.
+ * A distinct $/5ml rate for EACH of top/middle/base, so moving volume between positions (the
+ * Top/Middle/Base sliders) actually changes the price instead of being invariant by construction.
+ * Fix (price doesn't change with ratio) — the previous version blended every real component into
+ * ONE rate and applied it to all three positions identically; since the three ratios always sum to
+ * 100% of the fixed 34ml bottle, `rate * (top_ml + middle_ml + base_ml)` collapses to a constant
+ * regardless of how that 100% is split — confirmed live (34/33/33, 10/80/10, and 5/90/5 all priced
+ * identically at $158.23). Each real component contributes its own real ml share (ratioPercent) at
+ * its own real catalog price, further split across positions by how many of THAT component's own
+ * notes classify into each position (via classifyNote — the same keyword rules the merged display
+ * buckets use) — a real, product-attributable split, not an invented one.
  * Read-only (no Shopify calls) — safe to call from the preview page's loader for a price estimate,
  * not just at real product-creation time.
- * @param {Array<{title: string}>} internalProducts
+ * @param {Array<{title: string, notes: string[]}>} internalProducts
  * @param {Array<{productTitle: string, ratioPercent: number}>} ratiosByProduct
- * @returns {Promise<number>} $/ml, blended.
+ * @returns {Promise<{top: number, middle: number, base: number}>} $/5ml, per position.
  */
-export async function computeBlendedPricePer5ml(internalProducts, ratiosByProduct) {
+export async function computePricePer5mlByPosition(internalProducts, ratiosByProduct) {
   const catalogRows = await prisma.fragranceProduct.findMany({
     where: { normalizedTitle: { in: (internalProducts || []).map((p) => normalizeProductName(p.title)) } },
     select: { normalizedTitle: true, pricePer5ml: true },
   });
   const priceByNormalizedTitle = new Map(catalogRows.map((r) => [r.normalizedTitle, r.pricePer5ml]));
-  return (
-    (ratiosByProduct || []).reduce((sum, r) => {
-      const price = priceByNormalizedTitle.get(normalizeProductName(r.productTitle));
-      return sum + (r.ratioPercent / 100) * (typeof price === "number" ? price : FALLBACK_PRICE_PER_5ML);
-    }, 0) || FALLBACK_PRICE_PER_5ML
+  const ratioByNormalizedTitle = new Map(
+    (ratiosByProduct || []).map((r) => [normalizeProductName(r.productTitle), r.ratioPercent]),
   );
+  const products = internalProducts || [];
+
+  const positionCost = { top: 0, middle: 0, base: 0 };
+  const positionMl = { top: 0, middle: 0, base: 0 };
+
+  for (const product of products) {
+    const normalizedTitle = normalizeProductName(product.title);
+    const price = priceByNormalizedTitle.get(normalizedTitle);
+    const pricePer5ml = typeof price === "number" ? price : FALLBACK_PRICE_PER_5ML;
+    const ratioPercent = ratioByNormalizedTitle.get(normalizedTitle) ?? (100 / (products.length || 1));
+    const productMl = (ratioPercent / 100) * BOTTLE_ML;
+    const productCost = (productMl / 5) * pricePer5ml;
+
+    const noteCounts = { top: 0, middle: 0, base: 0 };
+    for (const note of product.notes || []) noteCounts[classifyNote(note)]++;
+    const totalNotes = noteCounts.top + noteCounts.middle + noteCounts.base;
+
+    for (const position of ["top", "middle", "base"]) {
+      // No real notes to classify (shouldn't happen for a real catalog product, but never divide
+      // by zero) — split this product's contribution evenly across positions instead.
+      const share = totalNotes > 0 ? noteCounts[position] / totalNotes : 1 / 3;
+      positionMl[position] += productMl * share;
+      positionCost[position] += productCost * share;
+    }
+  }
+
+  const rates = {};
+  for (const position of ["top", "middle", "base"]) {
+    rates[position] = positionMl[position] > 0 ? (positionCost[position] / positionMl[position]) * 5 : FALLBACK_PRICE_PER_5ML;
+  }
+  return rates;
 }
 
 // Total estimated price for the 34ml bottle at the given Top/Middle/Base split — same math
 // createShopifyBuildProduct uses at real creation time, exposed here so the preview page can show
 // a live-updating estimate before anything is actually created.
-export function estimateTotalPrice(pricePer5ml, ratios) {
-  const totalPct = (ratios.top || 0) + (ratios.middle || 0) + (ratios.base || 0);
-  const ml = (totalPct / 100) * BOTTLE_ML;
-  return (pricePer5ml / 5) * ml;
+export function estimateTotalPrice(pricePer5mlByPosition, ratios) {
+  return ["top", "middle", "base"].reduce((sum, position) => {
+    const ml = ((ratios[position] || 0) / 100) * BOTTLE_ML;
+    return sum + (pricePer5mlByPosition[position] / 5) * ml;
+  }, 0);
 }
 
 /**
@@ -108,11 +143,11 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
   const buckets = computeNotePositionBuckets(internalProducts, excludedNotes);
 
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
-  const avgPricePer5ml = await computeBlendedPricePer5ml(internalProducts, ratiosByProduct);
+  const pricePer5mlByPosition = await computePricePer5mlByPosition(internalProducts, ratiosByProduct);
 
   const layers = ["top", "middle", "base"].map((position) => {
     const quantityMl = Math.round(((ratios[position] / 100) * BOTTLE_ML) * 10) / 10;
-    return { position, notes: buckets[position], quantityMl, pricePer5ml: avgPricePer5ml };
+    return { position, notes: buckets[position], quantityMl, pricePer5ml: pricePer5mlByPosition[position] };
   });
 
   const totalPrice = layers.reduce((sum, l) => sum + (l.pricePer5ml / 5) * l.quantityMl, 0);

@@ -35,7 +35,10 @@ const BASE_KEYWORDS = [
   "resin", "incense", "leather", "tobacco", "tonka", "musky",
 ];
 
-function classifyNote(note) {
+// Exported so per-product price attribution (fragranceBuild.server.js) can classify a single
+// product's own notes with the exact same keyword rules used for the merged display buckets below,
+// without duplicating TOP/MIDDLE/BASE_KEYWORDS or reimplementing the classification logic.
+export function classifyNote(note) {
   const lower = String(note).toLowerCase();
   if (TOP_KEYWORDS.some((kw) => lower.includes(kw))) return "top";
   if (MIDDLE_KEYWORDS.some((kw) => lower.includes(kw))) return "middle";
