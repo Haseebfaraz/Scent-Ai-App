@@ -19,7 +19,7 @@ import { getCustomerProfile, saveCustomerProfileFields } from "../services/custo
 import {
   computeNotePositionBuckets, computeDefaultRatios, createShopifyBuildProduct,
   markRecommendationDraft, markRecommendationSaved,
-  computeBlendedPricePer5ml, estimateTotalPrice,
+  computePricePer5mlByPosition, estimateTotalPrice,
 } from "../services/fragranceBuild.server";
 import { resolveShopDomain } from "../services/shopDomain.server";
 
@@ -59,12 +59,12 @@ export async function loader({ request }) {
   const ratios = recommendation.draftRatiosJson || computeDefaultRatios(buckets);
   const customerFacingName = recommendation.customerFacingJson?.customerFacingName || "Custom Blend";
 
-  // Read-only price estimate (same blended-rate math createShopifyBuildProduct uses at real
+  // Read-only price estimate (same per-position-rate math createShopifyBuildProduct uses at real
   // creation time) — shown on the action bar before anything is actually created, purely for
   // display; the real, authoritative price is only ever set at Save Build/Add to Cart time.
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
-  const blendedPricePer5ml = await computeBlendedPricePer5ml(internalProducts, ratiosByProduct);
-  const estimatedPrice = estimateTotalPrice(blendedPricePer5ml, ratios);
+  const pricePer5mlByPosition = await computePricePer5mlByPosition(internalProducts, ratiosByProduct);
+  const estimatedPrice = estimateTotalPrice(pricePer5mlByPosition, ratios);
 
   // "Molecular Profile" pills — every real note across all three positions, deduped, capped to 8.
   const profilePills = [...new Set([...buckets.top, ...buckets.middle, ...buckets.base])].slice(0, 8);
@@ -877,10 +877,11 @@ export default function FragrancePreview() {
   const toggleExclude = (note) => {
     setExcludedNotes((prev) => (prev.includes(note) ? prev.filter((n) => n !== note) : [...prev, note]));
   };
-  // Price is one blended $/ml rate across the whole 34ml bottle (see
-  // fragranceBuild.server.js's computeBlendedPricePer5ml) — dragging Top/Middle/Base sliders
-  // redistributes volume WITHIN that same fixed 34ml, so the total never actually moves; showing
-  // a "live" recompute here would just be re-deriving the same constant every time.
+  // Fix (price didn't change with ratio) — each position now has its own real $/5ml rate
+  // (fragranceBuild.server.js's computePricePer5mlByPosition), so dragging Top/Middle/Base
+  // sliders DOES change the true total. This page still only shows the loader's static estimate
+  // while dragging (no client-side live recompute here) — same as before this fix, just no longer
+  // for the reason that the total was mathematically constant.
   const handleSlide = (position, value) => setRatios((prev) => adjustRatios(prev, position, value));
 
   const submit = (intent) => {
