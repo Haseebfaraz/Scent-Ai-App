@@ -6,7 +6,7 @@
 // exercises the real fix directly against the real catalog/database, the same pattern
 // aniqRegression.test.js already uses.
 import { describe, it, expect } from "vitest";
-import { executeFragranceTool } from "../tools/fragranceAgentTools.server.js";
+import { executeFragranceTool, __deriveRefinementAdjustmentsForTesting as deriveRefinementAdjustments } from "../tools/fragranceAgentTools.server.js";
 import { saveRecommendation } from "./recommendationConfirmation.server.js";
 import { resolveLegacyPreviewShortCircuit } from "./legacyPreviewRecovery.server.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
@@ -100,6 +100,62 @@ describe("refine_combination_recommendations — auto-select + auto-confirm (rea
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
       expect(record.status).toBe("confirmed");
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+});
+
+describe("deriveRefinementAdjustments — direction fix (real bug: 'less X' matched nothing, or landed as a like)", () => {
+  it("puts a negated family in dislikes, not likes", () => {
+    const result = deriveRefinementAdjustments("less sweet");
+    expect(result.addDislikes).toContain("Sweet");
+    expect(result.addLikes).not.toContain("Sweet");
+  });
+
+  it("resolves each clause's own family against ITS OWN negation", () => {
+    const result = deriveRefinementAdjustments("less woody, more fruity");
+    expect(result.addDislikes).toContain("Woody");
+    expect(result.addLikes).toContain("Fruity");
+    expect(result.addDislikes).not.toContain("Fruity");
+    expect(result.addLikes).not.toContain("Woody");
+  });
+
+  it("recognizes generic negation phrasing beyond the old fixed 'remove spicy'/'less strong' phrases", () => {
+    expect(deriveRefinementAdjustments("no musk please").addDislikes).toContain("Musk");
+    expect(deriveRefinementAdjustments("I don't want it too powdery").addDislikes).toContain("Powdery");
+    expect(deriveRefinementAdjustments("can you take out the heavy notes").addDislikes).toContain("Strong");
+  });
+});
+
+describe("refine_combination_recommendations — no-op bug (real bug: refinement outside the old 5-keyword list changed nothing)", () => {
+  it("actually carries a family the old keyword list didn't recognize into the regenerated recommendation's profile", async () => {
+    const conversationId = freshConversationId("refine-dislike");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await verifyLosAngelesWithoutNetwork(conversationId);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
+      await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
+
+      // "no musk" matched nothing under the old REFINEMENT_DISLIKE_KEYWORDS list (it only covered
+      // "spicy"/"strong" via a few fixed literal phrases) — deriveRefinementAdjustments returned
+      // empty addDislikes, so the profile passed into generateNewProductCombinations was byte-
+      // identical to the original and the "refined" result was the same combination back, just with
+      // a new id/name. This proves the family now actually reaches the regenerated profile — the
+      // resulting scoring/severity tradeoff (a product doesn't get hard-rejected for one minor
+      // supporting note, per classifyDislikeConflict's own deliberate design) is untouched by this
+      // fix and is out of scope here.
+      const result = await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "no musk please" }),
+        ctx,
+      );
+
+      expect(result.modelContent).not.toMatch(/^Error/);
+      expect(result.sseEvent.type).toBe("preview_ready");
+
+      const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
+      expect(record.customerProfileJson.dislikes).toContain("Musk");
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
