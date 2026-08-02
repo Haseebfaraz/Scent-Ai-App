@@ -443,23 +443,37 @@ const REFINEMENT_FAMILY_KEYWORDS = [
   { pattern: /\b(strong(er)?|heav(y|ier))\b/i, family: "Strong" },
 ];
 const NEGATION_PATTERN = /\b(no|not|don'?t|without|remove|less|avoid|take out|excluding|get rid of)\b/i;
+// Fix (sticky negation across a list) — "remove patchouli, vanilla, sandalwood" only carries the
+// negation word "remove" in its first clause; treating each comma-split clause as independently
+// negated (the previous version) meant only the FIRST named item ever became a dislike — confirmed
+// live, repeated refine requests naming several specific notes never actually removed any but the
+// first. Polarity now carries forward across clauses in the same message until an explicit positive
+// signal flips it back — how a customer naturally lists several unwanted things in one sentence.
+const POSITIVE_OVERRIDE_PATTERN = /\b(more|want|add|keep|prefer|love|like)\b/i;
 const ONLY_NEW_PATTERN = /\bonly new\b|\bnew combinations? only\b/i;
 
-// ponytail: family detection is a fixed adjective list, not full NLP — a literal single-note ask
-// ("remove the almond") won't match since notes aren't part of this vocabulary (dislikes work at
-// the family level everywhere else in this engine too); upgrade path is component-level exclusion
-// if that's ever requested.
 function deriveRefinementAdjustments(feedback) {
   // Split into clauses so "less woody, more fruity" resolves each family against ITS OWN clause's
-  // negation, not the sentence as a whole.
+  // polarity, not the sentence as a whole.
   const clauses = feedback.split(/[,;]|\band\b|\bbut\b/i).map((c) => c.trim()).filter(Boolean);
   const addLikes = new Set();
   const addDislikes = new Set();
+  let polarity = "like";
   for (const clause of clauses.length ? clauses : [feedback]) {
-    const negated = NEGATION_PATTERN.test(clause);
+    if (NEGATION_PATTERN.test(clause)) polarity = "dislike";
+    else if (POSITIVE_OVERRIDE_PATTERN.test(clause)) polarity = "like";
+    const target = polarity === "dislike" ? addDislikes : addLikes;
+
     for (const { pattern, family } of REFINEMENT_FAMILY_KEYWORDS) {
-      if (pattern.test(clause)) (negated ? addDislikes : addLikes).add(family);
+      if (pattern.test(clause)) target.add(family);
     }
+    // Fix (literal note names not recognized) — REFINEMENT_FAMILY_KEYWORDS above only covers
+    // generic descriptor words (sweet/woody/spicy...); a customer naming actual notes ("remove
+    // patchouli, vanilla, sandalwood") matched nothing at all before, since those literal note
+    // names only live in PREFERENCE_FAMILIES' own keyword lists — confirmed live. Reuses
+    // textToPreferenceFamilies exactly as the rest of this file already does, instead of a
+    // separate, narrower duplicate.
+    for (const family of textToPreferenceFamilies([clause])) target.add(family);
   }
   // A stated exclusion wins over an incidental positive mention of the same family elsewhere in
   // the same message.
