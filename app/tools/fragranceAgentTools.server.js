@@ -216,6 +216,7 @@ const PROFILE_FIELD_SCHEMAS = {
   dislikes: z.array(z.string().min(1)).max(20),
   preferredStyle: z.string().min(1).max(200),
   occasion: z.string().min(1).max(200),
+  giftRecipient: z.string().min(1).max(200),
   strengthPreference: z.enum(VALID_STRENGTH_PREFERENCES),
   additionalPreferences: z.array(z.string().min(1)).max(20),
 };
@@ -246,7 +247,7 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "save_customer_profile_field",
-      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, requestedSeasonStyle, likes, dislikes, preferredStyle, occasion, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory. requestedSeasonStyle is ONLY for when the customer volunteers a specific seasonal style unprompted (e.g. 'I want something wintery') — never ask them what season it is or what season they associate with an occasion; live weather is handled automatically once their city is verified.",
+      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, requestedSeasonStyle, likes, dislikes, preferredStyle, occasion, giftRecipient, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory. requestedSeasonStyle is ONLY for when the customer volunteers a specific seasonal style unprompted (e.g. 'I want something wintery') — never ask them what season it is or what season they associate with an occasion; live weather is handled automatically once their city is verified. giftRecipient is ONLY set when the customer indicates this is a gift for someone else (e.g. 'husband', 'wife', 'friend') — once set, likes/dislikes/preferredStyle/occasion describe that recipient, not necessarily the person chatting.",
       parameters: {
         type: "object",
         properties: {

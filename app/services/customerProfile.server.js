@@ -59,6 +59,11 @@ export function emptyProfile() {
     // real signal to generate from without ever inventing a preference the customer didn't give.
     inferredStyle: null,
     occasion: null,
+    // Fix (gift-shopping branch) — set the moment the customer indicates this is for someone else
+    // (e.g. "husband", "wife", "friend"). When set, likes/dislikes/preferredStyle/occasion below
+    // describe the RECIPIENT, not necessarily the person chatting — the buyer's own name/email/city
+    // are unaffected. Never asked for directly; only ever set when the customer volunteers it.
+    giftRecipient: null,
     strengthPreference: null,
     additionalPreferences: [],
     // Location verification is intentionally separate from the plain `city`/`country` fields —
