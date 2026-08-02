@@ -126,6 +126,24 @@ describe("deriveRefinementAdjustments — direction fix (real bug: 'less X' matc
     expect(deriveRefinementAdjustments("I don't want it too powdery").addDislikes).toContain("Powdery");
     expect(deriveRefinementAdjustments("can you take out the heavy notes").addDislikes).toContain("Strong");
   });
+
+  // Real bug: a customer naming actual notes ("remove patchouli vanilla, Sandal wood") got nothing
+  // removed but the very first named note — REFINEMENT_FAMILY_KEYWORDS never covered literal note
+  // names at all, and the negation from "remove" didn't carry past the first comma-split clause.
+  it("recognizes literal note names, not just generic descriptor words", () => {
+    const result = deriveRefinementAdjustments("remove patchouli, vanilla, sandalwood");
+    expect(result.addDislikes.some((f) => f.toLowerCase().includes("wood"))).toBe(true);
+    expect(result.addDislikes.some((f) => f.toLowerCase().includes("sweet"))).toBe(true);
+    expect(result.addLikes.length).toBe(0);
+  });
+
+  it("carries a negation forward across a comma-separated list until a positive word flips it back", () => {
+    const result = deriveRefinementAdjustments("remove patchouli vanilla, Sandal wood");
+    // "Sandal wood" is the SECOND clause, after the comma, with no negation word of its own — the
+    // bug was this clause defaulting back to a like.
+    expect(result.addDislikes.some((f) => f.toLowerCase().includes("wood"))).toBe(true);
+    expect(result.addLikes.some((f) => f.toLowerCase().includes("wood"))).toBe(false);
+  });
 });
 
 describe("refine_combination_recommendations — no-op bug (real bug: refinement outside the old 5-keyword list changed nothing)", () => {
