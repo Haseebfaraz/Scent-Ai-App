@@ -160,7 +160,6 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
   // genuine marketing copy about the product itself, not a data dump — never changes per ratio.
   const fullDescription =
     `<p>A bespoke fragrance blend, crafted just for you from real, hand-selected DUA notes — your own signature scent, not a stock formula.</p>` +
-    `<p><strong>Type:</strong> ${recommendation.combinationType}</p>` +
     `<p><strong>Longevity:</strong> A rich, parfum-concentration blend crafted for long-lasting wear.</p>` +
     `<p><strong>Quality:</strong> Lab certified, phthalate &amp; paraben free.</p>`;
 
