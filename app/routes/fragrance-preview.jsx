@@ -72,7 +72,6 @@ export async function loader({ request }) {
   return {
     recommendationId,
     name: recommendation.draftName || customerFacingName,
-    type: recommendation.combinationType,
     buckets,
     ratios,
     excludedNotes,
@@ -248,17 +247,6 @@ const PAGE_STYLES = `
     color: var(--cs-wine);
     opacity: 0.75;
     margin: 0 0 22px;
-  }
-  .cs-type-badge {
-    display: inline-block;
-    font-size: 13px;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--cs-wine);
-    border: 1px solid var(--cs-wine);
-    border-radius: 20px;
-    padding: 5px 14px;
-    margin-bottom: 32px;
   }
   .cs-notes {
     margin-top: 8px;
@@ -983,7 +971,6 @@ export default function FragrancePreview() {
           {/* Fix (no affordance that the name is editable) — the title looked like plain static
               heading text, with nothing indicating a customer could type over it. */}
           <div className="cs-title-edit-hint">&#9998; Click to rename</div>
-          <div className="cs-type-badge">{data.type}</div>
 
           <div className="cs-notes">
             <NoteRow position="top" notes={data.buckets.top} percent={ratios.top} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
