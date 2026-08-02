@@ -21,6 +21,36 @@ describe("assignRoles", () => {
     expect(roled[0].role).toBe("Contrast");
     expect(roled[0].hasDetectedFamily).toBe(false);
   });
+
+  // Real bug: role used to be whichever family was checked FIRST in priority order and matched
+  // ANY note at all — "fresh" is checked first, so a single stray citrus/mint note tipped an
+  // otherwise heavy/gourmand product to "Freshness" regardless of how few fresh notes it had.
+  // Confirmed live: a Quadbrid had all four components labeled "(Freshness)", which also broke the
+  // ratio math (every "Freshness" role gets identical weight in computeRatios) into a flat,
+  // meaningless 25/25/25/25 split.
+  it("picks the family with the MOST matching notes, not just the first one present", () => {
+    const roled = assignRoles([
+      // 5 fresh notes (grapefruit/lime/mandarin/orange/mint) vs. 6 woody+musk+amber notes —
+      // should read as the heavier, dominant character, not "Freshness".
+      {
+        title: "Burlington Gardens",
+        notes: [
+          "Grapefruit", "Lime", "Mandarin", "Bitter Orange", "Mint",
+          "Ginger", "Cinnamon", "Cumin", "Saffron",
+          "Patchouli", "Oakmoss", "Cedar Wood", "Cashmere Wood",
+          "Rum", "Tobacco", "Benzoin", "Vanilla", "Labdanum", "Ambergris", "Musk",
+        ],
+      },
+      // 1 fresh note (peppermint) vs. 2 sweet notes (marshmallow, whipped cream) — should read as
+      // Sweetness, not Freshness.
+      {
+        title: "White Hot Chocolate & Rum",
+        notes: ["Peppermint", "White Chocolate", "Marshmallows", "Whipped Cream", "Rum"],
+      },
+    ]);
+    expect(roled[0].role).toBe("Musk/wood base");
+    expect(roled[1].role).toBe("Sweetness");
+  });
 });
 
 describe("computeRatios", () => {

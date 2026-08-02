@@ -457,10 +457,17 @@ const PAGE_STYLES = `
   @media (max-width: 640px) {
     .cs-hero { padding: 20px 16px; }
     .cs-title-input { font-size: 32px; }
-    .cs-actionbar { flex-direction: column; align-items: stretch; margin: 24px 16px 0; }
+    .cs-actionbar { flex-direction: column; align-items: stretch; margin: 0px auto; width: 78%; }
     .cs-actionbar-price { justify-content: center; }
     .cs-actionbar-left, .cs-actionbar-right { justify-content: center; flex-wrap: wrap; }
     .cs-btn-primary { width: 100%; }
+
+#cs-bottle-3d canvas {
+    width: 320px;
+    height: 260px;
+}
+
+
   }
 `;
 

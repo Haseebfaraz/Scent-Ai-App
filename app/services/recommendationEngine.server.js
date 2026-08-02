@@ -161,6 +161,40 @@ const FAMILY_ROLE_PRIORITY = [
   ["strongHeavy", "Longevity support"],
 ];
 
+// Fix (role misclassification) — this used to pick whichever family appeared FIRST in
+// FAMILY_ROLE_PRIORITY that matched ANY note at all. Since "fresh" is checked first and citrus/mint
+// notes are common accents even in heavy, gourmand, or woody products, a single stray "Peppermint"
+// or "Mandarin Orange" note was enough to label an overwhelmingly heavy component "Freshness" —
+// confirmed live: a Quadbrid combining a gourmand anchor with three complex, mostly woody/spicy/
+// musky support products had ALL FOUR labeled "(Freshness)", which also silently broke the ratio
+// math (computeRatios weights every "Freshness" role identically, so all four landed on the same
+// meaningless 25%/25%/25%/25% split instead of one reflecting their real, different characters).
+// Role is now whichever family has the MOST matching real notes overall, not just the first one
+// present — e.g. Burlington Gardens' 6 woody/musk/amber notes now correctly outweigh its 5 fresh
+// ones. Ties still resolve by FAMILY_ROLE_PRIORITY's existing order (first-listed role wins).
+function dominantRole(notes) {
+  const list = Array.isArray(notes) ? notes : [];
+  const countsByRole = {};
+  for (const [family, role] of FAMILY_ROLE_PRIORITY) {
+    const keywords = ALL_FAMILIES[family];
+    if (!keywords) continue;
+    const count = list.filter((note) => {
+      const lower = String(note).toLowerCase();
+      return keywords.some((kw) => lower.includes(kw));
+    }).length;
+    countsByRole[role] = (countsByRole[role] || 0) + count;
+  }
+  let bestRole = null;
+  let bestCount = 0;
+  for (const [role, count] of Object.entries(countsByRole)) {
+    if (count > bestCount) {
+      bestCount = count;
+      bestRole = role;
+    }
+  }
+  return bestRole;
+}
+
 // Fix 6 (multi-dimensional roles) — a product is classified from its COMPLETE note list, not just
 // whichever family matches first. `role`/`hasDetectedFamily` are kept exactly as before (the ratio
 // math in computeRatios and existing tests key off `.role`'s exact string) — this is additive:
@@ -174,11 +208,11 @@ const FAMILY_ROLE_PRIORITY = [
 export function assignRoles(comboProducts) {
   return comboProducts.map((p) => {
     const families = familiesOf(p.notes);
-    const match = FAMILY_ROLE_PRIORITY.find(([family]) => families.includes(family));
-    const primaryFamily = match ? match[0] : null;
+    const role = dominantRole(p.notes);
+    const primaryFamily = role ? FAMILY_ROLE_PRIORITY.find(([, r]) => r === role)?.[0] : null;
     return {
       ...p,
-      role: match ? match[1] : "Contrast",
+      role: role || "Contrast",
       hasDetectedFamily: families.length > 0,
       secondaryRoles: families.filter((f) => f !== primaryFamily),
       intensityDrivers: detectIntensityDrivers(p.notes),
