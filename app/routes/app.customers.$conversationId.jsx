@@ -68,6 +68,7 @@ export default function CustomerDetail() {
 
       <s-section heading="Profile">
         <s-stack direction="block" gap="small">
+          <s-text>Name: {profile.name || "—"}</s-text>
           <s-text>Email: {profile.email || "—"}</s-text>
           <s-text>
             Location: {[profile.city, profile.stateRegion, profile.country].filter(Boolean).join(", ") || "—"}
