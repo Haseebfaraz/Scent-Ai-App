@@ -104,7 +104,8 @@ export default function CustomersIndex() {
               <s-table-header>Location</s-table-header>
               <s-table-header>Likes</s-table-header>
               <s-table-header>Dislikes</s-table-header>
-              <s-table-header>Style / Occasion</s-table-header>
+              <s-table-header>Style</s-table-header>
+              <s-table-header>Occasion</s-table-header>
               <s-table-header>Combinations</s-table-header>
               <s-table-header>Last active</s-table-header>
             </s-table-header-row>
@@ -118,7 +119,12 @@ export default function CustomersIndex() {
                   <s-table-cell>{formatLocation(c)}</s-table-cell>
                   <s-table-cell>{formatList(c.likes)}</s-table-cell>
                   <s-table-cell>{formatList(c.dislikes)}</s-table-cell>
-                  <s-table-cell>{[c.preferredStyle, c.occasion].filter(Boolean).join(" / ") || "—"}</s-table-cell>
+                  {/* Fix (gendered style language) — a customer's own free-text style wording
+                      (e.g. "for men") sometimes lands here; shown as-is, never asked for or
+                      inferred as a demographic attribute — this is just their stated style, split
+                      into its own column instead of merged with occasion. */}
+                  <s-table-cell>{c.preferredStyle || "—"}</s-table-cell>
+                  <s-table-cell>{c.occasion || "—"}</s-table-cell>
                   <s-table-cell>{c.combinationCount}</s-table-cell>
                   <s-table-cell>{new Date(c.updatedAt).toLocaleString()}</s-table-cell>
                 </s-table-row>
