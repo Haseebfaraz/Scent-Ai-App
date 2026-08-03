@@ -68,6 +68,49 @@ describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
     expect(literalNoteMatchCount(["Peach", "Musk", "Vanilla"], terms)).toBe(1);
     expect(literalNoteMatchCount(["Apple", "Peach", "Vanilla"], terms)).toBe(2);
   });
+
+  // Fix (Pineapple counted as Apple) — real bug found in a targeted audit: plain substring matching
+  // treated "apple" as present inside "pineapple". Word-boundary matching fixes both directions.
+  it("never lets Pineapple count as a match for a customer who named Apple", () => {
+    const terms = literalNoteTermsFromLikes(["Apple"]);
+    expect(literalNoteMatchCount(["Pineapple Slice"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Pink Lady Apple"], terms)).toBe(1);
+  });
+
+  it("never lets a customer who named Pineapple also register the shorter 'apple' fragment inside it", () => {
+    const terms = literalNoteTermsFromLikes(["Pineapple"]);
+    expect(terms).toContain("pineapple");
+    expect(terms).not.toContain("apple");
+    expect(literalNoteMatchCount(["Pink Lady Apple"], terms)).toBe(0);
+  });
+
+  // Explicitly requested regression: Pear must never count as a match for Peach, and vice versa —
+  // confirmed still correct after the word-boundary fix (no substring relationship between them).
+  it("never lets Pear count as a match for Peach, or Peach count as a match for Pear", () => {
+    const peachTerms = literalNoteTermsFromLikes(["Peach"]);
+    expect(literalNoteMatchCount(["Pear"], peachTerms)).toBe(0);
+    const pearTerms = literalNoteTermsFromLikes(["Pear"]);
+    expect(literalNoteMatchCount(["Peach"], pearTerms)).toBe(0);
+  });
+
+  // Fix ("berr" catch-all counted as Strawberry) — the fruity family's own generic fragment for
+  // catching Raspberry/Blackberry/etc under the spec's "berries" example is real and useful for
+  // FAMILY detection, but was also leaking into literal-term extraction, letting any berry note
+  // count as a match for a customer who specifically named Strawberry.
+  it("never lets a generic berry note count as a match for a customer who named Strawberry specifically", () => {
+    const terms = literalNoteTermsFromLikes(["Strawberry"]);
+    expect(terms).not.toContain("berr");
+    expect(literalNoteMatchCount(["Raspberry", "Blackberry", "Blueberry"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Strawberry Purée"], terms)).toBe(1);
+  });
+
+  // Same word-boundary fix, different family — "wood" is a real fruity/woody keyword, but it's also
+  // a suffix hiding inside "Sandalwood"; a customer who names plain "Wood" must not match it.
+  it("never lets Sandalwood count as a match for a customer who named plain Wood", () => {
+    const terms = literalNoteTermsFromLikes(["Wood"]);
+    expect(literalNoteMatchCount(["Sandalwood"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Aged Wood Accord"], terms)).toBe(1);
+  });
 });
 
 describe("pairIsCompatible", () => {

@@ -117,23 +117,46 @@ export function textToPreferenceFamilies(strings) {
 // ("Apple", "Strawberry", "Peach") has all three collapsed into one `fruity` family tag by
 // textToPreferenceFamilies above, so a product matching via unrelated fruity notes (e.g. Pear,
 // Blackcurrant) scores identically to one containing what the customer actually named. These are
-// the family keywords that are themselves just a generic style/descriptor word, not a specific real
-// note — excluded here so "Fruity"/"Fresh" don't count as literal note terms, only "Apple" etc do.
+// the family keywords that are themselves just a generic style/descriptor word, or a deliberately
+// truncated catch-all fragment, rather than one specific real note — excluded here so "Fruity"/
+// "Fresh"/"Citrus" don't count as literal note terms, only "Apple"/"Bergamot" etc do.
+// "berr" is the fruity family's own catch-all fragment for catching Raspberry/Blackberry/etc under
+// the spec's "berries" example — real, useful for FAMILY detection, but never a customer's literal
+// named note on its own, so it must not stand in for a specific berry like "Strawberry".
 const FAMILY_DESCRIPTOR_WORDS = new Set([
   "fruity", "sweet", "fresh", "spicy", "spice", "strong", "heavy", "woody", "musk", "musky", "powdery",
+  "berr", "citrus", "aquatic", "marine", "green", "aromatic",
 ]);
 
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Fix (Pineapple counted as Apple, any berry counted as Strawberry) — plain substring matching
+// (`.includes`) treats "apple" as present inside "pineapple", and the same in reverse would let a
+// customer's literal "Pineapple" also register the shorter keyword "apple" hiding inside it.
+// Word-boundary matching (`\bterm\b`) fixes both directions: "apple" only matches the standalone
+// word "Apple" (as in "Pink Lady Apple"), never the middle of "Pineapple" — confirmed live as a real
+// bug during a targeted audit. Case-insensitive since callers already lowercase on one side or the
+// other inconsistently; matching case-insensitively here removes that footgun entirely.
+function containsWholeWord(text, term) {
+  return new RegExp(`\\b${escapeRegex(term)}\\b`, "i").test(text);
+}
+
 // Extracts the specific real-note keyword(s) each liked string actually matched (skipping pure
-// descriptor words), so a caller can prefer/boost products that genuinely contain the customer's
-// named notes over ones that only share the broader family.
+// descriptor words and generic catch-all fragments), so a caller can prefer/boost products that
+// genuinely contain the customer's named notes over ones that only share the broader family.
+// Normalized aliases/genuine note variants (if ever needed) belong in an explicit table here, never
+// as an unrestricted substring match against a family's generic keyword list.
 export function literalNoteTermsFromLikes(strings) {
   const terms = new Set();
   for (const s of strings || []) {
     if (!s) continue;
-    const lower = String(s).toLowerCase();
+    const trimmed = String(s).trim();
+    if (!trimmed) continue;
     for (const keywords of Object.values(PREFERENCE_FAMILIES)) {
       for (const kw of keywords) {
-        if (!FAMILY_DESCRIPTOR_WORDS.has(kw) && lower.includes(kw)) terms.add(kw);
+        if (!FAMILY_DESCRIPTOR_WORDS.has(kw) && containsWholeWord(trimmed, kw)) terms.add(kw);
       }
     }
   }
@@ -145,8 +168,8 @@ export function literalNoteTermsFromLikes(strings) {
 // real, existing catalog match; this only decides which of several family-matching products wins).
 export function literalNoteMatchCount(notes, literalTerms) {
   if (!literalTerms?.length || !notes?.length) return 0;
-  const noteText = notes.join(" | ").toLowerCase();
-  return literalTerms.filter((term) => noteText.includes(term)).length;
+  const noteText = notes.join(" | ");
+  return literalTerms.filter((term) => containsWholeWord(noteText, term)).length;
 }
 
 // Phase 6 "note compatibility guidance" — each pair is a PREFERENCE_FAMILIES or
