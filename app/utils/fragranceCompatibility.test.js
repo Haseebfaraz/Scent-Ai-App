@@ -18,6 +18,8 @@ import {
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
   exactNoteCoverageScore,
+  matchedLiteralTerms,
+  missingLiteralTerms,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -140,6 +142,31 @@ describe("exactNoteCoverageScore", () => {
   // smaller score.
   it("even a single exact match outweighs the flat family-match bonus of 5", () => {
     expect(exactNoteCoverageScore(1)).toBeGreaterThan(5);
+  });
+});
+
+// Fix (final-batch preference coverage) — literalNoteMatchCount only returns a COUNT; these return
+// WHICH specific terms matched or didn't, needed to check batch-wide coverage of every named note.
+describe("matchedLiteralTerms / missingLiteralTerms", () => {
+  it("splits a customer's named notes into matched vs. missing against a product's real notes", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry", "Peach"]);
+    const notes = ["Peach Purée", "Musk", "Vanilla"];
+    expect(matchedLiteralTerms(notes, terms)).toEqual(["peach"]);
+    expect(missingLiteralTerms(notes, terms)).toEqual(expect.arrayContaining(["apple", "strawberry"]));
+    expect(missingLiteralTerms(notes, terms)).not.toContain("peach");
+  });
+
+  it("reports everything missing when nothing matches at all", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry"]);
+    expect(matchedLiteralTerms(["Musk", "Cedar"], terms)).toEqual([]);
+    expect(missingLiteralTerms(["Musk", "Cedar"], terms)).toEqual(expect.arrayContaining(["apple", "strawberry"]));
+  });
+
+  it("reports nothing missing when every named term is covered", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Peach"]);
+    const notes = ["Apple Sauce", "Peach Purée"];
+    expect(missingLiteralTerms(notes, terms)).toEqual([]);
+    expect(matchedLiteralTerms(notes, terms)).toHaveLength(2);
   });
 });
 

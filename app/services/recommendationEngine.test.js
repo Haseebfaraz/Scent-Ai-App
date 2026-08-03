@@ -2,9 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
   validateCombinationShape, computeEvidenceScope, computeHistoryScore, MAX_HISTORY_SCORE,
+  buildFallbackAnchorsForMissingTerms,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength } from "../utils/fragranceScoring.js";
-import { literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore } from "../utils/fragranceCompatibility.js";
+import { literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore, matchedLiteralTerms } from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
@@ -251,6 +252,51 @@ describe("generateNewProductCombinations (real data)", () => {
     for (const combo of combinations) {
       const allNotes = combo.internalProducts.flatMap((p) => p.notes || []);
       expect(literalNoteMatchCount(allNotes, literalTerms)).toBeGreaterThan(0);
+    }
+  });
+
+  // Fix (final-batch preference coverage) — an individual combo only ever had to contain ONE named
+  // note, so the batch as a whole could still leave one (e.g. Strawberry) completely uncovered even
+  // though every combo individually satisfied its own requirement. Every one of the customer's
+  // literally named notes must now appear SOMEWHERE across the final batch, and every combo must
+  // carry a matchedExactNotes/missingExactNotes breakdown that partitions the full named-note set.
+  it("covers every one of the customer's literally named notes somewhere across the final batch", async () => {
+    const profile = {
+      city: "Karachi", country: "Pakistan", season: "Summer",
+      likes: ["Fruity", "Fresh", "Apple", "Strawberry", "Peach"], dislikes: ["Amber", "Sandalwood"],
+      occasion: "office", locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(combinations.length).toBeGreaterThan(0);
+
+    const literalTerms = literalNoteTermsFromLikes(profile.likes);
+    const coveredAcrossBatch = new Set(combinations.flatMap((c) => c.matchedExactNotes));
+    for (const term of literalTerms) {
+      expect(coveredAcrossBatch.has(term)).toBe(true);
+    }
+
+    for (const combo of combinations) {
+      expect(combo.matchedExactNotes).toBeInstanceOf(Array);
+      expect(combo.missingExactNotes).toBeInstanceOf(Array);
+      expect(new Set([...combo.matchedExactNotes, ...combo.missingExactNotes])).toEqual(new Set(literalTerms));
+      expect(combo.matchedExactNotes.some((t) => combo.missingExactNotes.includes(t))).toBe(false);
+    }
+  });
+
+  // Direct, deterministic test of the regeneration mechanism itself (buildFallbackAnchorsForMissingTerms)
+  // against the real catalog, independent of which anchors a specific candidate pool happens to rank
+  // top — proves it can actually find real Strawberry-containing products to seed as extra anchors.
+  it("finds real catalog anchors that literally contain a missing named note (Strawberry)", async () => {
+    const allProducts = await prisma.fragranceProduct.findMany({
+      select: { title: true, normalizedTitle: true, notesJson: true, collection: true },
+    });
+    const anchors = buildFallbackAnchorsForMissingTerms(["strawberry"], {
+      allProducts, finishedCombinationTitles: new Set(), preferenceIntent: {}, candidateProducts: [],
+    });
+    expect(anchors.length).toBeGreaterThan(0);
+    for (const anchor of anchors) {
+      expect(matchedLiteralTerms(anchor.orderHistoryNotes, ["strawberry"]).length).toBeGreaterThan(0);
     }
   });
 

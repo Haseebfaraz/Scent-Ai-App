@@ -36,6 +36,8 @@ import {
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
   exactNoteCoverageScore,
+  matchedLiteralTerms,
+  missingLiteralTerms,
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, likeMatchStrength } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
@@ -948,6 +950,92 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   };
 }
 
+// Every valid, newly-scored proposal buildable from ONE anchor — extracted out of
+// generateNewProductCombinations' main loop so the exact same logic can also run for the
+// fallback anchors the final-batch coverage check below seeds when a customer's named note is
+// completely absent from the normal pass, instead of duplicating the anchor/type/support-combo
+// triple loop a second time.
+function generateCombosForAnchor(anchor, ctx) {
+  const { allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile, allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords, existingComponentKeys, seenComponentKeys } = ctx;
+  const proposals = [];
+  const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
+  if (!shortlist.length) return proposals;
+
+  for (const type of allowedTypes) {
+    const supportCount = (COMPONENT_COUNT_BY_TYPE[type] ?? 0) - 1;
+    if (supportCount < 1 || supportCount > shortlist.length) continue;
+
+    for (const supportCombo of combinationsOf(shortlist, supportCount)) {
+      const comboProducts = [
+        { title: anchor.productName, notes: anchor.orderHistoryNotes },
+        ...supportCombo.map((s) => ({ title: s.product.title, notes: s.product.notesJson || [] })),
+      ];
+      const componentKey = createCombinationKey(comboProducts.map((p) => p.title));
+      if (seenComponentKeys.has(componentKey)) continue;
+      seenComponentKeys.add(componentKey);
+
+      // Spec: only recommend combinations that do NOT already exist as an exact Hybrid/Tribrid/
+      // Quadbrid in the imported combination database.
+      if (existingComponentKeys.has(componentKey)) continue;
+
+      const proposal = scoreProposedCombination({
+        comboProducts,
+        type,
+        componentKey,
+        profile,
+        anchor,
+        allCombinations,
+        notesByNormalizedTitle,
+        lifestyleContext,
+        vocabUsedWords,
+        preferenceIntent,
+      });
+      if (proposal) proposals.push(proposal);
+    }
+  }
+  return proposals;
+}
+
+// Fix (final-batch preference coverage) — the per-combination literal-note gate only ever required
+// ONE named note per combo, so a whole batch could still leave a note like "Strawberry" completely
+// uncovered even though every individual combo satisfies its own requirement. For each such missing
+// term, finds real catalog products that literally contain it (reusing real regional evidence from
+// candidateProducts when the same product is already there, otherwise a zero-evidence pseudo-anchor
+// — "preserve zero-history catalog products when they strongly match explicit customer notes").
+// Bounded to a small number of real products per missing term; this is a targeted top-up, not a
+// full catalog re-scan.
+const FALLBACK_ANCHORS_PER_MISSING_TERM = 3;
+export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts }) {
+  const byNormalizedTitle = new Map((candidateProducts || []).map((c) => [c.normalizedProductName, c]));
+  const seen = new Set();
+  const anchors = [];
+  for (const term of missingTerms) {
+    let added = 0;
+    for (const product of allProducts) {
+      if (added >= FALLBACK_ANCHORS_PER_MISSING_TERM) break;
+      if (seen.has(product.normalizedTitle)) continue;
+      if (!isEligibleCombinationComponent(product, finishedCombinationTitles)) continue;
+      if (!passesIntensityFilter(product.notesJson, preferenceIntent)) continue;
+      if (matchedLiteralTerms(product.notesJson, [term]).length === 0) continue;
+
+      seen.add(product.normalizedTitle);
+      added++;
+      const existing = byNormalizedTitle.get(product.normalizedTitle);
+      anchors.push(
+        existing || {
+          productName: product.title,
+          normalizedProductName: product.normalizedTitle,
+          collection: product.collection,
+          orderHistoryNotes: product.notesJson || [],
+          sameCityOrders: 0, sameStateOrders: 0, sameCountryOrders: 0, sameSeasonOrders: 0,
+          distinctSimilarCustomers: 0, repeatPurchaseCustomers: 0,
+        },
+      );
+    }
+  }
+  return anchors;
+}
+
 /**
  * @param {object} args
  * @param {object} args.profile - CustomerFragranceProfile-shaped (season, likes, dislikes used here).
@@ -986,47 +1074,51 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // Threaded across the WHOLE batch (Fix 2) so no two cards in the same result set repeat the
   // same adjective — reset per generateNewProductCombinations call, not global.
   const vocabUsedWords = new Set();
+  const genCtx = {
+    allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile,
+    allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords,
+    existingComponentKeys, seenComponentKeys,
+  };
 
   for (const anchor of anchors) {
-    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
-    if (!shortlist.length) continue;
-
-    for (const type of allowedTypes) {
-      const supportCount = (COMPONENT_COUNT_BY_TYPE[type] ?? 0) - 1;
-      if (supportCount < 1 || supportCount > shortlist.length) continue;
-
-      for (const supportCombo of combinationsOf(shortlist, supportCount)) {
-        const comboProducts = [
-          { title: anchor.productName, notes: anchor.orderHistoryNotes },
-          ...supportCombo.map((s) => ({ title: s.product.title, notes: s.product.notesJson || [] })),
-        ];
-        const componentKey = createCombinationKey(comboProducts.map((p) => p.title));
-        if (seenComponentKeys.has(componentKey)) continue;
-        seenComponentKeys.add(componentKey);
-
-        // Spec: only recommend combinations that do NOT already exist as an exact Hybrid/Tribrid/
-        // Quadbrid in the imported combination database.
-        if (existingComponentKeys.has(componentKey)) continue;
-
-        const proposal = scoreProposedCombination({
-          comboProducts,
-          type,
-          componentKey,
-          profile,
-          anchor,
-          allCombinations,
-          notesByNormalizedTitle,
-          lifestyleContext,
-          vocabUsedWords,
-          preferenceIntent,
-        });
-        if (proposal) results.push(proposal);
-      }
-    }
+    results.push(...generateCombosForAnchor(anchor, genCtx));
   }
 
   results.sort((a, b) => b.finalScore - a.finalScore);
-  const finalResults = selectDiverseResults(results, maximumResults);
+  let finalResults = selectDiverseResults(results, maximumResults);
+
+  // Fix (final-batch preference coverage) — an individual combo only ever had to contain ONE of the
+  // customer's literally named notes (see scoreProposedCombination's hard gate), so the batch as a
+  // whole could still leave a note like "Strawberry" completely uncovered even though every combo
+  // individually satisfies its own requirement. Confirmed live: exactly this pattern, just one level
+  // up from the per-combo bug already fixed. When that happens, seed a small, targeted set of real
+  // catalog products that literally contain the missing note as EXTRA anchors and regenerate — never
+  // a full re-scan, and never required to succeed (a note nothing eligible actually contains stays
+  // honestly reported as missing, not silently dropped).
+  const literalLikeTerms = literalNoteTermsFromLikes(profile?.likes || []);
+  if (literalLikeTerms.length > 0) {
+    const batchNotes = finalResults.flatMap((r) => r.internalProducts.flatMap((p) => p.notes || []));
+    const missing = missingLiteralTerms(batchNotes, literalLikeTerms);
+    if (missing.length) {
+      const fallbackAnchors = buildFallbackAnchorsForMissingTerms(missing, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts });
+      for (const anchor of fallbackAnchors) {
+        results.push(...generateCombosForAnchor(anchor, genCtx));
+      }
+      results.sort((a, b) => b.finalScore - a.finalScore);
+      finalResults = selectDiverseResults(results, maximumResults);
+    }
+  }
+
+  // Fix (final-batch preference coverage) — every returned recommendation now carries exactly which
+  // of the customer's literally named notes IT covers and which it doesn't, regardless of whether
+  // the regeneration pass above found anything — internal/debug metadata only (see
+  // recommendationConfirmation.server.js's scoreJson persistence and toCustomerSafeRecommendation's
+  // explicit allow-list, which never exposes this).
+  for (const r of finalResults) {
+    const notes = r.internalProducts.flatMap((p) => p.notes || []);
+    r.matchedExactNotes = matchedLiteralTerms(notes, literalLikeTerms);
+    r.missingExactNotes = missingLiteralTerms(notes, literalLikeTerms);
+  }
 
   // Fix (vagueness diagnosis) — only the proposals actually being returned pay for a real,
   // note-aware copy-generation call; every other scored-but-discarded candidate (up to ~450 per

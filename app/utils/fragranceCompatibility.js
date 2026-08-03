@@ -172,6 +172,21 @@ export function literalNoteMatchCount(notes, literalTerms) {
   return literalTerms.filter((term) => containsWholeWord(noteText, term)).length;
 }
 
+// Fix (final-batch preference coverage) — literalNoteMatchCount above only ever returns a COUNT;
+// checking whether EVERY customer-named note appears somewhere across a whole batch of
+// recommendations (not just any one of them) needs to know WHICH specific terms matched or didn't.
+export function matchedLiteralTerms(notes, literalTerms) {
+  if (!literalTerms?.length || !notes?.length) return [];
+  const noteText = notes.join(" | ");
+  return literalTerms.filter((term) => containsWholeWord(noteText, term));
+}
+
+export function missingLiteralTerms(notes, literalTerms) {
+  if (!literalTerms?.length) return [];
+  const noteText = (notes || []).join(" | ");
+  return literalTerms.filter((term) => !containsWholeWord(noteText, term));
+}
+
 // Fix (tiered exact-note coverage scoring) — a flat per-match boost treated a customer's 1st and
 // 4th named note as equally significant. Distinct literal-note coverage now scores on a diminishing
 // tier instead: 1st distinct note covered +10, 2nd +7, 3rd (and every one beyond) +5 — always a
