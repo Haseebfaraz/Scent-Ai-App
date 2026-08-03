@@ -47,4 +47,17 @@ describe("assignNotePositions", () => {
     const result = assignNotePositions(["Zzznotarealnoteatall"]);
     expect(result.middle).toContain("Zzznotarealnoteatall");
   });
+
+  // Fix (customer's own liked notes silently dropped from display) — a middle bucket over the
+  // 5-note cap used to keep whichever 5 arrived first, with zero regard for stated likes. Confirmed
+  // live: "Apple" (a real fruity note in the actual combination) lost its slot to unrelated
+  // default-bucketed notes that merely appeared earlier in the raw note list.
+  it("keeps a customer's liked notes over unrelated ones when a bucket exceeds the 5-note cap", () => {
+    const notes = ["Lily of the Valley", "Ambrette", "Freesia", "Geranium", "Osmanthus", "Apple"];
+    const withoutLikes = assignNotePositions(notes);
+    expect(withoutLikes.middle).not.toContain("Apple");
+
+    const withLikes = assignNotePositions(notes, ["fruity"]);
+    expect(withLikes.middle).toContain("Apple");
+  });
 });

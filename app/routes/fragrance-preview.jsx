@@ -56,7 +56,8 @@ export async function loader({ request }) {
 
   const internalProducts = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
   const excludedNotes = Array.isArray(recommendation.draftExcludedNotes) ? recommendation.draftExcludedNotes : [];
-  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes);
+  const customerLikes = recommendation.customerProfileJson?.likes || [];
+  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes, customerLikes);
   const ratios = recommendation.draftRatiosJson || computeDefaultRatios(buckets);
   const customerFacingName = recommendation.customerFacingJson?.customerFacingName || "Custom Blend";
 

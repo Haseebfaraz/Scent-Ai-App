@@ -7,6 +7,7 @@
 import prisma from "../db.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
 import { assignNotePositions, classifyNote } from "../utils/notePositionMapping.js";
+import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
 
 const BOTTLE_ML = 34;
 const FALLBACK_PRICE_PER_5ML = 20;
@@ -18,13 +19,19 @@ const BOTTLE_IMAGE_URL = "https://cdn.shopify.com/s/files/1/1005/4379/1236/files
  * shared, deterministic utility — never duplicated in frontend code. `excludedNotes` (customer
  * edits from the preview page) are filtered out of the DISPLAY lists only; they never change the
  * real formula/pricing, which is always driven by the real component products.
+ * Fix (customer's own liked notes silently dropped from display) — `customerLikes` (the profile's
+ * stated likes, e.g. ["Fruity", "Fresh", "Apple"]) lets assignNotePositions keep a customer's own
+ * liked notes over arbitrary others when a position has more real notes than the 5-note display
+ * cap — never changes which position a note belongs to, only which ones survive that cap.
  * @param {Array<{title: string, notes: string[]}>} internalProducts
  * @param {string[]} [excludedNotes]
+ * @param {string[]} [customerLikes]
  */
-export function computeNotePositionBuckets(internalProducts, excludedNotes = []) {
+export function computeNotePositionBuckets(internalProducts, excludedNotes = [], customerLikes = []) {
   const excludedLower = new Set((excludedNotes || []).map((n) => String(n).toLowerCase()));
   const allNotes = (internalProducts || []).flatMap((p) => p.notes || []);
-  const buckets = assignNotePositions(allNotes);
+  const likeFamilies = textToPreferenceFamilies(customerLikes);
+  const buckets = assignNotePositions(allNotes, likeFamilies);
   return {
     top: buckets.top.filter((n) => !excludedLower.has(n.toLowerCase())),
     middle: buckets.middle.filter((n) => !excludedLower.has(n.toLowerCase())),
@@ -130,7 +137,8 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
   }
 
   const internalProducts = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
-  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes);
+  const customerLikes = recommendation.customerProfileJson?.likes || [];
+  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes, customerLikes);
 
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
   const pricePer5mlByPosition = await computePricePer5mlByPosition(internalProducts, ratiosByProduct);
