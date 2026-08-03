@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
-  validateCombinationShape, computeEvidenceScope,
+  validateCombinationShape, computeEvidenceScope, likeMatchStrength,
 } from "./recommendationEngine.server.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
@@ -50,6 +50,35 @@ describe("assignRoles", () => {
     ]);
     expect(roled[0].role).toBe("Musk/wood base");
     expect(roled[1].role).toBe("Sweetness");
+  });
+});
+
+// Real bug: preferenceScore used to give a flat bonus for a family matching ANY note at all, so a
+// product with one token match scored identically to one genuinely built around that family.
+// Confirmed live: a customer whose only stated like was "Sweet" got dense 18-note floral/musk
+// blends (real example: "Lady Elixir" — Bergamot, Rose de Mai, Jasmine from Grasse, Lily of the
+// Valley, Heliotrope, Ylang-Ylang, Geranium, Violet Leaves, Peach, Raspberry, Cinnamon, Kashmir,
+// Cedar, Vanilla, Iris, Musk, Sandalwood, Musk Mallow — only "Vanilla" is sweet) narrated as
+// "designed around your preference for sweet scents."
+describe("likeMatchStrength", () => {
+  it("returns a low fraction for a token match buried in an otherwise-unrelated product", () => {
+    const ladyElixirNotes = [
+      "Bergamot", "Rose de Mai", "Jasmine from Grasse", "Lily of the Valley", "Heliotrope",
+      "Ylang-Ylang", "Geranium", "Violet Leaves", "Peach", "Raspberry", "Cinnamon", "Kashmir",
+      "Cedar", "Vanilla", "Iris", "Musk", "Sandalwood", "Musk Mallow",
+    ];
+    const strength = likeMatchStrength(ladyElixirNotes, "sweet");
+    expect(strength).toBeCloseTo(1 / 18, 5);
+    expect(strength).toBeLessThan(0.1);
+  });
+
+  it("returns a high fraction when the family is genuinely the product's dominant character", () => {
+    const strength = likeMatchStrength(["Vanilla", "Sugar", "Caramel", "Honey", "Cedar"], "sweet");
+    expect(strength).toBe(0.8);
+  });
+
+  it("returns 0 for no match at all", () => {
+    expect(likeMatchStrength(["Oud", "Leather", "Smoke"], "sweet")).toBe(0);
   });
 });
 

@@ -482,6 +482,26 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
   return analogous.sort((a, b) => b.overlapCount - a.overlapCount).slice(0, 3);
 }
 
+// Fix (preference score ignored HOW MUCH of a product is the liked family) — matchedLikes only
+// ever checks whether a family matches AT LEAST ONE note, so a product with a single incidental
+// "Vanilla" note among 18 completely different notes earned the exact same +5 bonus as one
+// genuinely built around sweetness — confirmed live: a customer whose only stated like was "Sweet"
+// was getting dense 18-20 note floral/musk blends with one token vanilla note, all narrated as
+// "designed around your preference for sweet scents." Scaled by what fraction of the product's real
+// notes actually fall in that family — floored at 0.2 so a genuine but minor match still earns real,
+// non-zero credit (perfumery blends legitimately combine many accords; a liked note doesn't need to
+// dominate to be a real contributor), but a token single note in a large, otherwise-unrelated
+// product no longer scores identically to a product actually built around it.
+export function likeMatchStrength(notes, family) {
+  const keywords = PREFERENCE_FAMILIES[family];
+  if (!keywords || !notes?.length) return 0;
+  const matchingCount = notes.filter((note) => {
+    const lower = String(note).toLowerCase();
+    return keywords.some((kw) => lower.includes(kw));
+  }).length;
+  return matchingCount / notes.length;
+}
+
 function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent, lifestyleContext }) {
   // Reject if ANY two products in the combo are near-duplicates of each other (not just of the
   // anchor) — two shortlisted supporting products can each individually pass the anchor's
@@ -523,10 +543,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const matchedPreferenceFamilies = new Set();
   for (const p of comboProducts) {
     const matches = matchedLikes(p.notes, likeFamilies);
-    if (matches.length) {
-      preferenceScore += matches.length * SCORE_WEIGHTS.matchesLike;
-      matches.forEach((m) => matchedPreferenceFamilies.add(m));
-    }
+    matches.forEach((family) => {
+      matchedPreferenceFamilies.add(family);
+      preferenceScore += SCORE_WEIGHTS.matchesLike * Math.max(0.2, likeMatchStrength(p.notes, family));
+    });
   }
 
   // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a
