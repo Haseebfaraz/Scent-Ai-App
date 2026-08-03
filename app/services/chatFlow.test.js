@@ -4,7 +4,7 @@
 // forbade it, twice in a row. hasConcreteContext is the deterministic check that decides whether
 // buildSystemPrompt hands the model the short, fragrance-free prompt or the full one.
 import { describe, it, expect } from "vitest";
-import { hasConcreteContext } from "./chat.jsx";
+import { hasConcreteContext } from "../routes/chat.jsx";
 
 describe("hasConcreteContext", () => {
   it("returns false for bare mood/filler replies with no real signal", () => {
