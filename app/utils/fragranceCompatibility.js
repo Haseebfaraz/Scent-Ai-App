@@ -206,12 +206,33 @@ export function pairIsCompatible(familyA, familyB) {
   );
 }
 
+// Every product sharing one identical primary family, with no contrasting role at all — extracted
+// as its own helper (not just inlined in the duplicate_direction rule below) so the risk-grouping
+// logic further down can ask "which family is duplicated?" directly, instead of parsing it back out
+// of the rule's own message string.
+function findDuplicatedDirection(products) {
+  const directionCounts = {};
+  for (const p of products) {
+    for (const family of detectFamilies(p.notes, PREFERENCE_FAMILIES)) {
+      directionCounts[family] = (directionCounts[family] || 0) + 1;
+    }
+  }
+  const duplicated = Object.entries(directionCounts).find(([, count]) => count === products.length && products.length > 1);
+  return duplicated ? duplicated[0] : null;
+}
+
 // Phase 6 risk rules. Each takes the list of products in a proposed combination (each shaped as
 // { title, notes: string[] }) and returns a risk message, or null if that risk isn't present.
 // Detection is by literal note keywords only — never inferred from a product title or category.
+// Fix (flat risk-count penalty replaced with severity) — every rule now also carries a `severity`
+// (advisory/low/medium/high/critical) used by assessCombinationRiskDetails below instead of the old
+// flat "-10 per risk" penalty. None of the current rules are "critical" (hard reject) — that tier
+// exists for a genuinely disqualifying problem, which none of these 8 heuristics rise to; each is a
+// real but survivable aesthetic risk, appropriately a penalty rather than an outright rejection.
 export const RISK_RULES = [
   {
     id: "excessive_gourmand_heat",
+    severity: "medium",
     // "Excessive sugar + caramel + marshmallow + honey in hot weather" — the weather condition is
     // evaluated by the caller (recommendationEngine), which passes `season` in.
     check(products, { season } = {}) {
@@ -227,6 +248,7 @@ export const RISK_RULES = [
   },
   {
     id: "multiple_heavy_components",
+    severity: "medium",
     check(products) {
       const heavy = products.filter(
         (p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("strongHeavy"),
@@ -238,6 +260,7 @@ export const RISK_RULES = [
   },
   {
     id: "competing_fruits",
+    severity: "low",
     check(products) {
       const fruity = products.filter(
         (p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("fruity"),
@@ -249,6 +272,7 @@ export const RISK_RULES = [
   },
   {
     id: "spice_conflict",
+    severity: "low",
     check(products) {
       const spicy = products.filter(
         (p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("spicy"),
@@ -258,6 +282,7 @@ export const RISK_RULES = [
   },
   {
     id: "citrus_smoke_clash",
+    severity: "advisory",
     check(products) {
       const hasCitrus = products.some((p) => detectFamilies(p.notes, COMPATIBILITY_TAGS).includes("citrus"));
       const hasSmoke = products.some((p) => detectFamilies(p.notes, COMPATIBILITY_TAGS).includes("smoky"));
@@ -268,6 +293,10 @@ export const RISK_RULES = [
   },
   {
     id: "quadbrid_complexity",
+    // Advisory — a Quadbrid is a legitimate, sometimes explicitly requested category, and its
+    // complexity is already scored separately (complexityPenalty/typeSimplicityScore in
+    // recommendationEngine.server.js); this flag would otherwise double-penalize the same size.
+    severity: "advisory",
     check(products) {
       return products.length >= 4
         ? "Four products in one blend raises the risk of a muddled, over-complex result"
@@ -276,6 +305,7 @@ export const RISK_RULES = [
   },
   {
     id: "powdery_overload",
+    severity: "medium",
     check(products) {
       const powdery = products.filter((p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("powdery"));
       return powdery.length >= 2
@@ -285,23 +315,89 @@ export const RISK_RULES = [
   },
   {
     id: "duplicate_direction",
+    // High — a combination with zero contrasting role anywhere is the most structurally broken of
+    // these 8 heuristics (the others flag "too much of one thing among several"; this one flags
+    // "there IS only one thing").
+    severity: "high",
     check(products) {
-      const directionCounts = {};
-      for (const p of products) {
-        for (const family of detectFamilies(p.notes, PREFERENCE_FAMILIES)) {
-          directionCounts[family] = (directionCounts[family] || 0) + 1;
-        }
-      }
-      const duplicated = Object.entries(directionCounts).find(([, count]) => count === products.length && products.length > 1);
-      return duplicated
-        ? `Every product shares the same "${duplicated[0]}" direction with no contrasting role`
-        : null;
+      const family = findDuplicatedDirection(products);
+      return family ? `Every product shares the same "${family}" direction with no contrasting role` : null;
     },
   },
 ];
 
 export function assessCombinationRisks(products, context = {}) {
   return RISK_RULES.map((rule) => rule.check(products, context)).filter(Boolean);
+}
+
+// Fix (flat risk-count penalty replaced with severity, correlated risks grouped) — a Tribrid/
+// Quadbrid built from several products in the SAME family mechanically trips both a family-specific
+// rule (competing_fruits/spice_conflict/multiple_heavy_components/powdery_overload) AND
+// duplicate_direction for that identical family — two rules flagging the same real problem, which
+// used to be double-penalized (-10 each, flat). Grouped by a shared correlation key so only the
+// single highest-severity hit per real underlying problem counts toward the total penalty; every
+// hit still appears in the returned breakdown (with `counted: false` for the suppressed duplicate)
+// so nothing is silently hidden.
+const RISK_SEVERITY_PENALTY = { advisory: -1, low: -2, medium: -5, high: -10, critical: -10 };
+const SEVERITY_RANK = { advisory: 0, low: 1, medium: 2, high: 3, critical: 4 };
+const FAMILY_SPECIFIC_RISK_FAMILY = {
+  multiple_heavy_components: "strongHeavy",
+  competing_fruits: "fruity",
+  spice_conflict: "spicy",
+  powdery_overload: "powdery",
+};
+
+/**
+ * Pure grouping/penalty function — takes an array of `{ id, message, severity }` hits (already
+ * detected by whatever means) and an optional correlation-key function, and returns the penalty
+ * total plus a full transparency breakdown. Kept independent of RISK_RULES so it's directly
+ * testable with synthetic hits, including a "critical" severity that no real rule currently uses.
+ * @param {Array<{id: string, message: string, severity: string}>} hits
+ * @param {(hit: object) => string} [correlationKeyFor] - hits sharing the same key are the same
+ *   underlying real problem; only the highest-severity one counts toward riskPenalty.
+ * @returns {{ breakdown: Array, riskPenalty: number, hasCritical: boolean }}
+ */
+export function groupAndPenalizeRisks(hits, correlationKeyFor = (hit) => hit.id) {
+  const groups = new Map();
+  for (const hit of hits) {
+    const key = correlationKeyFor(hit);
+    const existing = groups.get(key);
+    if (!existing || SEVERITY_RANK[hit.severity] > SEVERITY_RANK[existing.severity]) {
+      groups.set(key, hit);
+    }
+  }
+  const countedIds = new Set([...groups.values()].map((h) => h.id));
+  const breakdown = hits.map((hit) => ({
+    id: hit.id,
+    message: hit.message,
+    severity: hit.severity,
+    counted: countedIds.has(hit.id),
+    penalty: countedIds.has(hit.id) ? RISK_SEVERITY_PENALTY[hit.severity] : 0,
+  }));
+  const hasCritical = hits.some((h) => h.severity === "critical");
+  const riskPenalty = breakdown.reduce((sum, r) => sum + r.penalty, 0);
+  return { breakdown, riskPenalty, hasCritical };
+}
+
+// Real-rule version of the pure function above — detects every RISK_RULES hit against a real
+// combination, then groups/penalizes them. `hasCritical: true` means the caller should hard-reject
+// the whole combination outright rather than use riskPenalty as a mere score deduction.
+export function assessCombinationRiskDetails(products, context = {}) {
+  const hits = RISK_RULES
+    .map((rule) => {
+      const message = rule.check(products, context);
+      return message ? { id: rule.id, message, severity: rule.severity } : null;
+    })
+    .filter(Boolean);
+
+  const duplicatedFamily = findDuplicatedDirection(products);
+  const correlationKeyFor = (hit) => {
+    if (hit.id === "duplicate_direction") return duplicatedFamily ? `family:${duplicatedFamily}` : hit.id;
+    if (FAMILY_SPECIFIC_RISK_FAMILY[hit.id]) return `family:${FAMILY_SPECIFIC_RISK_FAMILY[hit.id]}`;
+    return hit.id;
+  };
+
+  return groupAndPenalizeRisks(hits, correlationKeyFor);
 }
 
 // ============================================================

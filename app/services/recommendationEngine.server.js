@@ -23,6 +23,7 @@ import {
   detectFamilies,
   pairIsCompatible,
   assessCombinationRisks,
+  assessCombinationRiskDetails,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
   interpretLifestyleContext,
@@ -527,6 +528,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
     { season },
   );
+  // Fix (flat risk-count penalty replaced with severity) — severity-weighted, correlation-grouped
+  // version of the same risk detection above (`risks` itself is untouched, still consumed by
+  // seasonalScore/balanceRiskHit/confidence-capping below exactly as before). A "critical" severity
+  // (none of the current 8 rules use it, but the mechanism is real) hard-rejects the whole
+  // combination outright, the same way a high-severity dislike conflict already does.
+  const riskDetails = assessCombinationRiskDetails(
+    comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
+    { season },
+  );
+  if (riskDetails.hasCritical) return null;
 
   let preferenceScore = 0;
   let totalLiteralMatches = 0;
@@ -702,14 +713,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     : { HYBRID: 0, TRIBRID: 0, QUADBRID: 0 };
   const typeSimplicityScore = TYPE_SIMPLICITY_SCORE[type] ?? 0;
 
-  // Each identified risk (excessive heat, competing fruits, over-complexity, duplicate direction,
-  // etc.) is a real, named downside — weighted on the same scale as a dislike conflict (-10/-5) so
-  // a risk-laden combination can't out-rank a genuinely clean one just by accumulating small
-  // positive signals elsewhere.
+  // Fix (flat risk-count penalty replaced with severity) — every identified risk used to cost a
+  // flat -10 regardless of how minor ("four products" advisory) or serious ("zero contrast at all")
+  // it actually was, and a Tribrid/Quadbrid mechanically racks up more hits than a Hybrid just from
+  // having more components to flag, unrelated to real fit. riskDetails.riskPenalty is the
+  // severity-weighted, correlation-deduplicated total computed above (advisory -1 … high -10; a
+  // "critical" hit already hard-rejected the combination before this line is ever reached).
   const finalScore =
     preferenceScore + seasonalScore + historyScore + compatibilityScore + analogousScore + balanceScore + conflictPenalty +
     styleMatchScore + avoidedDirectionPenalty + complexityPenalty + typeSimplicityScore +
-    lifestyleMatchScore + lifestyleConflictPenalty + powderyContextPenalty - risks.length * 10;
+    lifestyleMatchScore + lifestyleConflictPenalty + powderyContextPenalty + riskDetails.riskPenalty;
 
   // Fix 10 — deterministic confidence with hard caps layered on top of the numeric threshold, so a
   // risk-laden or evidence-thin combination can never read as "very high"/"high" just by
@@ -900,6 +913,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     finalScore,
     recommendedRatio,
     risks,
+    // Fix (flat risk-count penalty replaced with severity) — persisted so a confirmed recommendation
+    // still shows exactly how its risk penalty was computed, not just the blended finalScore.
+    riskPenalty: riskDetails.riskPenalty,
+    riskBreakdown: riskDetails.breakdown,
 
     // Customer-facing — safe for SSE payloads, recommendation cards, and chat text.
     type,

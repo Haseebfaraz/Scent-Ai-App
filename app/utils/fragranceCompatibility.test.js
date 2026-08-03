@@ -5,6 +5,8 @@ import {
   detectFamilies,
   pairIsCompatible,
   assessCombinationRisks,
+  assessCombinationRiskDetails,
+  groupAndPenalizeRisks,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
   interpretLifestyleContext,
@@ -178,6 +180,92 @@ describe("assessCombinationRisks", () => {
       { title: "B", notes: ["Musk", "Cedar"] },
     ];
     expect(assessCombinationRisks(products, { season: "Winter" })).toEqual([]);
+  });
+});
+
+// Fix (flat risk-count penalty replaced with severity) — every risk used to cost a flat -10
+// regardless of how minor or serious it actually was, and a Tribrid/Quadbrid mechanically racks up
+// more hits than a Hybrid just from having more components, unrelated to real fit.
+describe("assessCombinationRiskDetails (severity-weighted, correlation-grouped)", () => {
+  it("weights a single advisory-severity risk far lighter than the old flat -10", () => {
+    const products = [
+      { title: "A", notes: ["Bergamot"] }, // fresh
+      { title: "B", notes: ["Vanilla"] }, // sweet
+      { title: "C", notes: ["Cedar"] }, // woody
+      { title: "D", notes: ["Musk"] }, // musk
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toHaveLength(1);
+    expect(result.breakdown[0]).toMatchObject({ id: "quadbrid_complexity", severity: "advisory", counted: true, penalty: -1 });
+    expect(result.riskPenalty).toBe(-1);
+    expect(result.hasCritical).toBe(false);
+  });
+
+  it("weights the high-severity duplicate_direction risk at -10", () => {
+    const products = [
+      { title: "A", notes: ["Mango"] },
+      { title: "B", notes: ["Pineapple"] },
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toEqual([
+      expect.objectContaining({ id: "duplicate_direction", severity: "high", counted: true, penalty: -10 }),
+    ]);
+    expect(result.riskPenalty).toBe(-10);
+  });
+
+  // Correlated-risk deduplication: three all-fruity products trip BOTH competing_fruits (low, -2)
+  // AND duplicate_direction (high, -10) for the exact same underlying problem (nothing but fruity
+  // anywhere) — only the higher-severity hit should count toward the total, once.
+  it("groups competing_fruits and duplicate_direction for the same family, counting only the higher severity once", () => {
+    const products = [
+      { title: "A", notes: ["Mango"] },
+      { title: "B", notes: ["Pineapple"] },
+      { title: "C", notes: ["Guava"] },
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toHaveLength(2);
+    const duplicate = result.breakdown.find((r) => r.id === "duplicate_direction");
+    const competing = result.breakdown.find((r) => r.id === "competing_fruits");
+    expect(duplicate).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+    expect(competing).toMatchObject({ severity: "low", counted: false, penalty: 0 });
+    // Not -10 + -2 = -12 — the same real problem, counted once.
+    expect(result.riskPenalty).toBe(-10);
+  });
+});
+
+describe("groupAndPenalizeRisks (pure grouping/penalty function)", () => {
+  it("counts every uncorrelated hit independently", () => {
+    const result = groupAndPenalizeRisks([
+      { id: "a", message: "a", severity: "advisory" },
+      { id: "b", message: "b", severity: "low" },
+    ]);
+    expect(result.riskPenalty).toBe(-1 + -2);
+    expect(result.breakdown.every((r) => r.counted)).toBe(true);
+  });
+
+  it("only counts the highest-severity hit within a correlated group", () => {
+    const result = groupAndPenalizeRisks(
+      [
+        { id: "a", message: "a", severity: "low" },
+        { id: "b", message: "b", severity: "high" },
+      ],
+      () => "same-group",
+    );
+    expect(result.riskPenalty).toBe(-10);
+    expect(result.breakdown.find((r) => r.id === "a")).toMatchObject({ counted: false, penalty: 0 });
+    expect(result.breakdown.find((r) => r.id === "b")).toMatchObject({ counted: true, penalty: -10 });
+  });
+
+  // No current real rule uses "critical" — this proves the hard-reject mechanism itself works,
+  // independent of whether any production rule has reached for it yet.
+  it("flags hasCritical when any hit is critical severity, regardless of grouping", () => {
+    const result = groupAndPenalizeRisks([{ id: "x", message: "x", severity: "critical" }]);
+    expect(result.hasCritical).toBe(true);
+  });
+
+  it("never flags hasCritical when nothing is critical", () => {
+    const result = groupAndPenalizeRisks([{ id: "x", message: "x", severity: "high" }]);
+    expect(result.hasCritical).toBe(false);
   });
 });
 
