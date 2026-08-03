@@ -486,6 +486,24 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
   return analogous.sort((a, b) => b.overlapCount - a.overlapCount).slice(0, 3);
 }
 
+// Fix (limit history dominance) — stacking every regional-evidence axis at once (city+country+
+// state+repeat+popularity) could reach +17, enough on its own to out-rank a combo with strong
+// literal-note coverage purely on regional popularity. Capped at +6 — just above the single biggest
+// individual axis (same-city, 5) — so real regional evidence still counts, but can never
+// single-handedly dominate the ranking the way it did in the real Karachi/Apple-Strawberry-Peach
+// case that motivated this fix. Never gates eligibility either way: the literal-note hard gate in
+// scoreProposedCombination already rejects a zero-match combo before this is ever computed, and a
+// zero-history combo is never excluded here either — this only ever caps how much history can ADD.
+export const MAX_HISTORY_SCORE = 6;
+export function computeHistoryScore(anchor) {
+  const rawHistoryScore =
+    (anchor.sameCityOrders > 0 ? SCORE_WEIGHTS.sameCity : 0) +
+    (anchor.sameCountryOrders > 0 ? SCORE_WEIGHTS.sameCountry : 0) +
+    (anchor.sameStateOrders > 0 ? SCORE_WEIGHTS.sameStateRegionOrClimate : 0) +
+    (anchor.repeatPurchaseCustomers > 0 ? SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer : 0) +
+    (anchor.distinctSimilarCustomers >= 5 ? SCORE_WEIGHTS.popularAmongSimilarCustomers : 0);
+  return Math.min(rawHistoryScore, MAX_HISTORY_SCORE);
+}
 
 function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent, lifestyleContext }) {
   // Reject if ANY two products in the combo are near-duplicates of each other (not just of the
@@ -580,12 +598,7 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
 
   // Real per-product order-history evidence exists only for the anchor — the one product in this
   // combination that actually came from analyze_customer_product_candidates.
-  const historyScore =
-    (anchor.sameCityOrders > 0 ? SCORE_WEIGHTS.sameCity : 0) +
-    (anchor.sameCountryOrders > 0 ? SCORE_WEIGHTS.sameCountry : 0) +
-    (anchor.sameStateOrders > 0 ? SCORE_WEIGHTS.sameStateRegionOrClimate : 0) +
-    (anchor.repeatPurchaseCustomers > 0 ? SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer : 0) +
-    (anchor.distinctSimilarCustomers >= 5 ? SCORE_WEIGHTS.popularAmongSimilarCustomers : 0);
+  const historyScore = computeHistoryScore(anchor);
 
   // One bonus per PRODUCT PAIR that has at least one compatible family relationship — not one
   // bonus per matching family combination. PREFERENCE_FAMILIES and COMPATIBILITY_TAGS deliberately

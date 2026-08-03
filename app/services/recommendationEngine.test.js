@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
-  validateCombinationShape, computeEvidenceScope,
+  validateCombinationShape, computeEvidenceScope, computeHistoryScore, MAX_HISTORY_SCORE,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength } from "../utils/fragranceScoring.js";
 import { literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore } from "../utils/fragranceCompatibility.js";
@@ -81,6 +81,36 @@ describe("likeMatchStrength", () => {
 
   it("returns 0 for no match at all", () => {
     expect(likeMatchStrength(["Oud", "Leather", "Smoke"], "sweet")).toBe(0);
+  });
+});
+
+// Fix (limit history dominance) — stacking every regional-evidence axis at once (city+country+
+// state+repeat+popularity) used to reach up to +17, enough on its own to out-rank a combo with
+// strong literal-note coverage purely on regional popularity.
+describe("computeHistoryScore", () => {
+  it("caps full regional-evidence stacking at MAX_HISTORY_SCORE, not the uncapped 17", () => {
+    const anchor = {
+      sameCityOrders: 50, sameCountryOrders: 500, sameStateOrders: 20,
+      repeatPurchaseCustomers: 3, distinctSimilarCustomers: 10,
+    };
+    expect(computeHistoryScore(anchor)).toBe(MAX_HISTORY_SCORE);
+    expect(MAX_HISTORY_SCORE).toBeLessThan(17);
+  });
+
+  it("leaves a single real evidence axis (below the cap) unchanged", () => {
+    const anchor = { sameCityOrders: 10, sameCountryOrders: 0, sameStateOrders: 0, repeatPurchaseCustomers: 0, distinctSimilarCustomers: 0 };
+    expect(computeHistoryScore(anchor)).toBe(5); // SCORE_WEIGHTS.sameCity, below the cap
+  });
+
+  it("returns 0 for a genuinely zero-history anchor — never excluded, only ever capped from above", () => {
+    const anchor = { sameCityOrders: 0, sameCountryOrders: 0, sameStateOrders: 0, repeatPurchaseCustomers: 0, distinctSimilarCustomers: 0 };
+    expect(computeHistoryScore(anchor)).toBe(0);
+  });
+
+  it("caps two stacked axes once their sum exceeds MAX_HISTORY_SCORE", () => {
+    // sameCity (5) + sameCountry (4) = 9, over the cap.
+    const anchor = { sameCityOrders: 1, sameCountryOrders: 1, sameStateOrders: 0, repeatPurchaseCustomers: 0, distinctSimilarCustomers: 0 };
+    expect(computeHistoryScore(anchor)).toBe(MAX_HISTORY_SCORE);
   });
 });
 
