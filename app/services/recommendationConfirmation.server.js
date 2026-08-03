@@ -41,6 +41,16 @@ export async function saveRecommendation({ conversationId, profile, combination 
         compatibilityScore: combination.compatibilityScore,
         balanceScore: combination.balanceScore,
         conflictPenalty: combination.conflictPenalty,
+        // Fix (flat risk-count penalty replaced with severity) — persisted so a confirmed/previewed
+        // recommendation still shows exactly how its risk penalty was computed, not just the total.
+        riskPenalty: combination.riskPenalty,
+        riskBreakdown: combination.riskBreakdown,
+        // Fix (final-batch preference coverage) — which of the customer's literally named notes
+        // THIS specific recommendation covers vs. doesn't, persisted so a confirmed/previewed
+        // recommendation can show it as debug/admin metadata without recomputing.
+        matchedExactNotes: combination.matchedExactNotes,
+        missingExactNotes: combination.missingExactNotes,
+        exactNoteCoverageScore: combination.exactNoteCoverageScore,
         finalScore: combination.finalScore,
         confidence: combination.confidence,
         // Fix (multidimensional confidence) — persisted so a confirmed/previewed recommendation

@@ -18,6 +18,8 @@
 // fallback itself. A duplicate that survives every repair step (measured in testing: rare, but
 // real — more likely the more combinations in one batch share the same dominant note role) is only
 // logged for monitoring; per the current design this is never retried further or blocked on.
+import { matchedLiteralTerms } from "../utils/fragranceCompatibility.js";
+
 const COPY_MODEL = "gpt-4.1-mini";
 const COPY_REQUEST_TIMEOUT_MS = 12000;
 const MAX_FIELD_LENGTH = 220;
@@ -26,6 +28,19 @@ const MAX_FIELD_LENGTH = 220;
 // has no dependency on a route file, and so it can check THIS specific text before it's ever
 // stored or returned, not just the eventual full model reply.
 const LEAKED_ID_PATTERN = /\bc[a-z0-9]{20,}\b/i;
+
+// Fix (protect customer-facing copy) — the copy model is told to reference the customer's stated
+// likes, but nothing stopped it claiming a SPECIFIC named note ("your love for apple shines
+// through") on a combination that doesn't actually contain it — confirmed live, exactly this
+// pattern, on a real "why this suits them" line. `missingExactNotes` (already computed and set on
+// each proposal by generateNewProductCombinations before this module ever runs) is the exact list
+// of notes THIS combo doesn't have; reusing matchedLiteralTerms' word-boundary matching (the same
+// fix that stops Pineapple counting as Apple) against the generated text catches a false claim
+// with zero risk of a false positive on an unrelated word.
+function mentionsUnearnedExactNote(text, missingExactNotes) {
+  if (!text || !missingExactNotes?.length) return false;
+  return matchedLiteralTerms([text], missingExactNotes).length > 0;
+}
 
 const OPENING_ANGLES = [
   "open by naming the blend's own standout quality as the subject of the sentence",
@@ -178,6 +193,11 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
       needsRetry.push(item);
       continue;
     }
+    if (mentionsUnearnedExactNote(item.result.description, item.proposal.missingExactNotes) || mentionsUnearnedExactNote(item.result.whySuits, item.proposal.missingExactNotes)) {
+      item.reason = "exact-note-mismatch-no-retry";
+      needsRetry.push(item);
+      continue;
+    }
     const fwDesc = firstWordOf(item.result.description);
     const fwWhy = firstWordOf(item.result.whySuits);
     const opDesc = openingOf(item.result.description);
@@ -200,9 +220,12 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
   const avoidFirstWords = [...new Set(accepted.flatMap((a) => [a.fwDesc, a.fwWhy]).concat("this"))];
 
   await Promise.all(needsRetry.map(async (item, retryAngleIndex) => {
-    // A hard network/parse failure or a leaked real product title never gets retried — the
-    // proposal simply keeps its existing deterministic fallback.
-    if (item.reason === "hard-failure-no-retry" || item.reason === "leak-check-failed-no-retry") return;
+    // A hard network/parse failure, a leaked real product title, or a false claim about a note the
+    // customer named but this specific combo doesn't have never gets retried — the retry prompt
+    // doesn't know which notes are off-limits, so retrying risks the exact same false claim again;
+    // the proposal simply keeps its existing deterministic fallback (which only ever references
+    // matched FAMILY names, never a specific note, so it's safe by construction).
+    if (item.reason === "hard-failure-no-retry" || item.reason === "leak-check-failed-no-retry" || item.reason === "exact-note-mismatch-no-retry") return;
 
     const retryResult = await callCopyModel(buildPromptRetry({
       notesByRole: item.notesByRole, ...profileFields,
@@ -211,6 +234,7 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
     }));
     if (!retryResult) return;
     if (textLeaks(retryResult.description, catalogTitlesLowercase) || textLeaks(retryResult.whySuits, catalogTitlesLowercase)) return;
+    if (mentionsUnearnedExactNote(retryResult.description, item.proposal.missingExactNotes) || mentionsUnearnedExactNote(retryResult.whySuits, item.proposal.missingExactNotes)) return;
 
     const fwDesc = firstWordOf(retryResult.description);
     const fwWhy = firstWordOf(retryResult.whySuits);

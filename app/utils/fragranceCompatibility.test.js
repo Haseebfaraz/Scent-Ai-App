@@ -5,6 +5,8 @@ import {
   detectFamilies,
   pairIsCompatible,
   assessCombinationRisks,
+  assessCombinationRiskDetails,
+  groupAndPenalizeRisks,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
   interpretLifestyleContext,
@@ -15,6 +17,9 @@ import {
   classifyAlmondCharacter,
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
+  exactNoteCoverageScore,
+  matchedLiteralTerms,
+  missingLiteralTerms,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -67,6 +72,101 @@ describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
     const terms = literalNoteTermsFromLikes(["Apple", "Strawberry", "Peach"]);
     expect(literalNoteMatchCount(["Peach", "Musk", "Vanilla"], terms)).toBe(1);
     expect(literalNoteMatchCount(["Apple", "Peach", "Vanilla"], terms)).toBe(2);
+  });
+
+  // Fix (Pineapple counted as Apple) — real bug found in a targeted audit: plain substring matching
+  // treated "apple" as present inside "pineapple". Word-boundary matching fixes both directions.
+  it("never lets Pineapple count as a match for a customer who named Apple", () => {
+    const terms = literalNoteTermsFromLikes(["Apple"]);
+    expect(literalNoteMatchCount(["Pineapple Slice"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Pink Lady Apple"], terms)).toBe(1);
+  });
+
+  it("never lets a customer who named Pineapple also register the shorter 'apple' fragment inside it", () => {
+    const terms = literalNoteTermsFromLikes(["Pineapple"]);
+    expect(terms).toContain("pineapple");
+    expect(terms).not.toContain("apple");
+    expect(literalNoteMatchCount(["Pink Lady Apple"], terms)).toBe(0);
+  });
+
+  // Explicitly requested regression: Pear must never count as a match for Peach, and vice versa —
+  // confirmed still correct after the word-boundary fix (no substring relationship between them).
+  it("never lets Pear count as a match for Peach, or Peach count as a match for Pear", () => {
+    const peachTerms = literalNoteTermsFromLikes(["Peach"]);
+    expect(literalNoteMatchCount(["Pear"], peachTerms)).toBe(0);
+    const pearTerms = literalNoteTermsFromLikes(["Pear"]);
+    expect(literalNoteMatchCount(["Peach"], pearTerms)).toBe(0);
+  });
+
+  // Fix ("berr" catch-all counted as Strawberry) — the fruity family's own generic fragment for
+  // catching Raspberry/Blackberry/etc under the spec's "berries" example is real and useful for
+  // FAMILY detection, but was also leaking into literal-term extraction, letting any berry note
+  // count as a match for a customer who specifically named Strawberry.
+  it("never lets a generic berry note count as a match for a customer who named Strawberry specifically", () => {
+    const terms = literalNoteTermsFromLikes(["Strawberry"]);
+    expect(terms).not.toContain("berr");
+    expect(literalNoteMatchCount(["Raspberry", "Blackberry", "Blueberry"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Strawberry Purée"], terms)).toBe(1);
+  });
+
+  // Same word-boundary fix, different family — "wood" is a real fruity/woody keyword, but it's also
+  // a suffix hiding inside "Sandalwood"; a customer who names plain "Wood" must not match it.
+  it("never lets Sandalwood count as a match for a customer who named plain Wood", () => {
+    const terms = literalNoteTermsFromLikes(["Wood"]);
+    expect(literalNoteMatchCount(["Sandalwood"], terms)).toBe(0);
+    expect(literalNoteMatchCount(["Aged Wood Accord"], terms)).toBe(1);
+  });
+});
+
+// Fix (tiered exact-note coverage scoring) — a flat per-match boost treated a customer's 1st and
+// 4th named note as equally significant; a diminishing tier rewards breadth of coverage without
+// letting it run away unbounded.
+describe("exactNoteCoverageScore", () => {
+  it("scores zero matches as zero", () => {
+    expect(exactNoteCoverageScore(0)).toBe(0);
+  });
+
+  it("scores the first three distinct matches at 10, then 7, then 5", () => {
+    expect(exactNoteCoverageScore(1)).toBe(10);
+    expect(exactNoteCoverageScore(2)).toBe(10 + 7);
+    expect(exactNoteCoverageScore(3)).toBe(10 + 7 + 5);
+  });
+
+  it("floors every match beyond the third at the same +5 tier value, never zero or negative", () => {
+    expect(exactNoteCoverageScore(4)).toBe(10 + 7 + 5 + 5);
+    expect(exactNoteCoverageScore(5)).toBe(10 + 7 + 5 + 5 + 5);
+  });
+
+  // Always bigger than the flat family-level bonus (SCORE_WEIGHTS.matchesLike = 5 per matched
+  // family) even at a single match — the explicit requirement that broad family matching stay the
+  // smaller score.
+  it("even a single exact match outweighs the flat family-match bonus of 5", () => {
+    expect(exactNoteCoverageScore(1)).toBeGreaterThan(5);
+  });
+});
+
+// Fix (final-batch preference coverage) — literalNoteMatchCount only returns a COUNT; these return
+// WHICH specific terms matched or didn't, needed to check batch-wide coverage of every named note.
+describe("matchedLiteralTerms / missingLiteralTerms", () => {
+  it("splits a customer's named notes into matched vs. missing against a product's real notes", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry", "Peach"]);
+    const notes = ["Peach Purée", "Musk", "Vanilla"];
+    expect(matchedLiteralTerms(notes, terms)).toEqual(["peach"]);
+    expect(missingLiteralTerms(notes, terms)).toEqual(expect.arrayContaining(["apple", "strawberry"]));
+    expect(missingLiteralTerms(notes, terms)).not.toContain("peach");
+  });
+
+  it("reports everything missing when nothing matches at all", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry"]);
+    expect(matchedLiteralTerms(["Musk", "Cedar"], terms)).toEqual([]);
+    expect(missingLiteralTerms(["Musk", "Cedar"], terms)).toEqual(expect.arrayContaining(["apple", "strawberry"]));
+  });
+
+  it("reports nothing missing when every named term is covered", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Peach"]);
+    const notes = ["Apple Sauce", "Peach Purée"];
+    expect(missingLiteralTerms(notes, terms)).toEqual([]);
+    expect(matchedLiteralTerms(notes, terms)).toHaveLength(2);
   });
 });
 
@@ -135,6 +235,92 @@ describe("assessCombinationRisks", () => {
       { title: "B", notes: ["Musk", "Cedar"] },
     ];
     expect(assessCombinationRisks(products, { season: "Winter" })).toEqual([]);
+  });
+});
+
+// Fix (flat risk-count penalty replaced with severity) — every risk used to cost a flat -10
+// regardless of how minor or serious it actually was, and a Tribrid/Quadbrid mechanically racks up
+// more hits than a Hybrid just from having more components, unrelated to real fit.
+describe("assessCombinationRiskDetails (severity-weighted, correlation-grouped)", () => {
+  it("weights a single advisory-severity risk far lighter than the old flat -10", () => {
+    const products = [
+      { title: "A", notes: ["Bergamot"] }, // fresh
+      { title: "B", notes: ["Vanilla"] }, // sweet
+      { title: "C", notes: ["Cedar"] }, // woody
+      { title: "D", notes: ["Musk"] }, // musk
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toHaveLength(1);
+    expect(result.breakdown[0]).toMatchObject({ id: "quadbrid_complexity", severity: "advisory", counted: true, penalty: -1 });
+    expect(result.riskPenalty).toBe(-1);
+    expect(result.hasCritical).toBe(false);
+  });
+
+  it("weights the high-severity duplicate_direction risk at -10", () => {
+    const products = [
+      { title: "A", notes: ["Mango"] },
+      { title: "B", notes: ["Pineapple"] },
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toEqual([
+      expect.objectContaining({ id: "duplicate_direction", severity: "high", counted: true, penalty: -10 }),
+    ]);
+    expect(result.riskPenalty).toBe(-10);
+  });
+
+  // Correlated-risk deduplication: three all-fruity products trip BOTH competing_fruits (low, -2)
+  // AND duplicate_direction (high, -10) for the exact same underlying problem (nothing but fruity
+  // anywhere) — only the higher-severity hit should count toward the total, once.
+  it("groups competing_fruits and duplicate_direction for the same family, counting only the higher severity once", () => {
+    const products = [
+      { title: "A", notes: ["Mango"] },
+      { title: "B", notes: ["Pineapple"] },
+      { title: "C", notes: ["Guava"] },
+    ];
+    const result = assessCombinationRiskDetails(products);
+    expect(result.breakdown).toHaveLength(2);
+    const duplicate = result.breakdown.find((r) => r.id === "duplicate_direction");
+    const competing = result.breakdown.find((r) => r.id === "competing_fruits");
+    expect(duplicate).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+    expect(competing).toMatchObject({ severity: "low", counted: false, penalty: 0 });
+    // Not -10 + -2 = -12 — the same real problem, counted once.
+    expect(result.riskPenalty).toBe(-10);
+  });
+});
+
+describe("groupAndPenalizeRisks (pure grouping/penalty function)", () => {
+  it("counts every uncorrelated hit independently", () => {
+    const result = groupAndPenalizeRisks([
+      { id: "a", message: "a", severity: "advisory" },
+      { id: "b", message: "b", severity: "low" },
+    ]);
+    expect(result.riskPenalty).toBe(-1 + -2);
+    expect(result.breakdown.every((r) => r.counted)).toBe(true);
+  });
+
+  it("only counts the highest-severity hit within a correlated group", () => {
+    const result = groupAndPenalizeRisks(
+      [
+        { id: "a", message: "a", severity: "low" },
+        { id: "b", message: "b", severity: "high" },
+      ],
+      () => "same-group",
+    );
+    expect(result.riskPenalty).toBe(-10);
+    expect(result.breakdown.find((r) => r.id === "a")).toMatchObject({ counted: false, penalty: 0 });
+    expect(result.breakdown.find((r) => r.id === "b")).toMatchObject({ counted: true, penalty: -10 });
+  });
+
+  // No current real rule uses "critical" — this proves the hard-reject mechanism itself works,
+  // independent of whether any production rule has reached for it yet.
+  it("flags hasCritical when any hit is critical severity, regardless of grouping", () => {
+    const result = groupAndPenalizeRisks([{ id: "x", message: "x", severity: "critical" }]);
+    expect(result.hasCritical).toBe(true);
+  });
+
+  it("never flags hasCritical when nothing is critical", () => {
+    const result = groupAndPenalizeRisks([{ id: "x", message: "x", severity: "high" }]);
+    expect(result.hasCritical).toBe(false);
   });
 });
 

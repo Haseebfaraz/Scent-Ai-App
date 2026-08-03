@@ -23,6 +23,7 @@ import {
   detectFamilies,
   pairIsCompatible,
   assessCombinationRisks,
+  assessCombinationRiskDetails,
   textToPreferenceFamilies,
   interpretCustomerPreferences,
   interpretLifestyleContext,
@@ -34,6 +35,9 @@ import {
   countAvoidedDirectionMatches,
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
+  exactNoteCoverageScore,
+  matchedLiteralTerms,
+  missingLiteralTerms,
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, likeMatchStrength } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
@@ -98,11 +102,6 @@ function noteOverlapRatio(notesA, notesB) {
   return overlap / Math.min(setA.size, setB.size);
 }
 const NEAR_DUPLICATE_OVERLAP_RATIO = 0.5;
-// Fix (literal note terms lost to family-level matching) — same tie-breaker weight used in
-// orderHistoryAnalysis.server.js's candidate ranking, kept in sync so a product that wins the
-// candidate pool for containing a customer's literal named note doesn't lose that edge once it's
-// scored again here as part of a full combination.
-const LITERAL_MATCH_BOOST = 0.5;
 
 // Fix 7 (Aniq spec) — a plain top-N slice let the same 1-2 anchor products dominate an entire
 // batch (confirmed against real production data: 8 "different" recommendations sharing one
@@ -489,6 +488,24 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
   return analogous.sort((a, b) => b.overlapCount - a.overlapCount).slice(0, 3);
 }
 
+// Fix (limit history dominance) — stacking every regional-evidence axis at once (city+country+
+// state+repeat+popularity) could reach +17, enough on its own to out-rank a combo with strong
+// literal-note coverage purely on regional popularity. Capped at +6 — just above the single biggest
+// individual axis (same-city, 5) — so real regional evidence still counts, but can never
+// single-handedly dominate the ranking the way it did in the real Karachi/Apple-Strawberry-Peach
+// case that motivated this fix. Never gates eligibility either way: the literal-note hard gate in
+// scoreProposedCombination already rejects a zero-match combo before this is ever computed, and a
+// zero-history combo is never excluded here either — this only ever caps how much history can ADD.
+export const MAX_HISTORY_SCORE = 6;
+export function computeHistoryScore(anchor) {
+  const rawHistoryScore =
+    (anchor.sameCityOrders > 0 ? SCORE_WEIGHTS.sameCity : 0) +
+    (anchor.sameCountryOrders > 0 ? SCORE_WEIGHTS.sameCountry : 0) +
+    (anchor.sameStateOrders > 0 ? SCORE_WEIGHTS.sameStateRegionOrClimate : 0) +
+    (anchor.repeatPurchaseCustomers > 0 ? SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer : 0) +
+    (anchor.distinctSimilarCustomers >= 5 ? SCORE_WEIGHTS.popularAmongSimilarCustomers : 0);
+  return Math.min(rawHistoryScore, MAX_HISTORY_SCORE);
+}
 
 function scoreProposedCombination({ comboProducts, type, componentKey, profile, anchor, allCombinations, notesByNormalizedTitle, vocabUsedWords, preferenceIntent, lifestyleContext }) {
   // Reject if ANY two products in the combo are near-duplicates of each other (not just of the
@@ -527,6 +544,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
     { season },
   );
+  // Fix (flat risk-count penalty replaced with severity) — severity-weighted, correlation-grouped
+  // version of the same risk detection above (`risks` itself is untouched, still consumed by
+  // seasonalScore/balanceRiskHit/confidence-capping below exactly as before). A "critical" severity
+  // (none of the current 8 rules use it, but the mechanism is real) hard-rejects the whole
+  // combination outright, the same way a high-severity dislike conflict already does.
+  const riskDetails = assessCombinationRiskDetails(
+    comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
+    { season },
+  );
+  if (riskDetails.hasCritical) return null;
 
   let preferenceScore = 0;
   const matchedPreferenceFamilies = new Set();
@@ -536,13 +563,22 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
       matchedPreferenceFamilies.add(family);
       preferenceScore += SCORE_WEIGHTS.matchesLike * Math.max(0.2, likeMatchStrength(p.notes, family));
     });
-    // Fix (literal note terms lost to family-level matching) — a stated like of "Apple, Strawberry,
-    // Peach" collapses to one `fruity` family above, so a combo built from unrelated fruity notes
-    // (Pear, Blackcurrant) scored identically to one containing what the customer actually named.
-    // This tie-breaker nudges combos toward the customer's literal words without ever requiring them
-    // — a combo with zero literal matches can still win on every other axis, exactly as before.
-    preferenceScore += LITERAL_MATCH_BOOST * SCORE_WEIGHTS.matchesLike * literalNoteMatchCount(p.notes, literalLikeTerms);
   }
+  // Fix (tiered exact-note coverage scoring) — a stated like of "Apple, Strawberry, Peach" collapses
+  // to one `fruity` family above, so a combo built from unrelated fruity notes (Pear, Blackcurrant)
+  // scored identically to one containing what the customer actually named. Distinct literal notes
+  // are counted ONCE across the WHOLE combo's combined notes (never summed per-component — a note
+  // appearing in two components must not double-count) and scored on a diminishing tier: 1st +10,
+  // 2nd +7, 3rd+ +5 each — always bigger than the flat family bonus above, never a requirement on
+  // its own (a combo with zero literal matches can still win on every other axis, exactly as before;
+  // see the hard gate below for when it can't).
+  const comboAllNotes = comboProducts.flatMap((p) => p.notes || []);
+  const totalLiteralMatches = literalNoteMatchCount(comboAllNotes, literalLikeTerms);
+  // Fix (final-batch preference coverage, requirement 6) — kept as its own named value (not just
+  // folded anonymously into preferenceScore) so it can be persisted and inspected per recommendation
+  // alongside matchedExactNotes/missingExactNotes/riskPenalty/riskBreakdown.
+  const exactNoteScore = exactNoteCoverageScore(totalLiteralMatches);
+  preferenceScore += exactNoteScore;
 
   // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a
   // requirement: a customer who said "I like spicy" could still get combinations with zero spicy
@@ -553,17 +589,22 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // component must actually carry one of those families, or this combination is rejected outright —
   // never silently substituted and described as matching something it doesn't.
   if (likeFamilies.length > 0 && matchedPreferenceFamilies.size === 0) return null;
+  // Fix (literal note terms lost to family-level matching, round 2) — matching the broader family
+  // was enough to pass the gate above even when a customer named specific real notes and the
+  // combination contains literally none of them, just a same-family stand-in. Confirmed live: a
+  // customer who named Apple/Strawberry/Peach got a confirmed combination containing NONE of them —
+  // it won purely on stronger regional evidence, despite every genuinely fruity alternative scoring
+  // far higher on preferenceScore. When the customer named actual notes (not just style words like
+  // "fruity"), a combination must contain AT LEAST ONE of them — same kind of hard requirement as
+  // the family-level gate above, just tightened one notch further for a customer specific enough to
+  // name real notes. Never triggers for a customer who only gave style words (literalLikeTerms empty).
+  if (literalLikeTerms.length > 0 && totalLiteralMatches === 0) return null;
 
   const seasonalScore = risks.some((r) => r.includes("summer heat")) ? 0 : SCORE_WEIGHTS.sameSeason;
 
   // Real per-product order-history evidence exists only for the anchor — the one product in this
   // combination that actually came from analyze_customer_product_candidates.
-  const historyScore =
-    (anchor.sameCityOrders > 0 ? SCORE_WEIGHTS.sameCity : 0) +
-    (anchor.sameCountryOrders > 0 ? SCORE_WEIGHTS.sameCountry : 0) +
-    (anchor.sameStateOrders > 0 ? SCORE_WEIGHTS.sameStateRegionOrClimate : 0) +
-    (anchor.repeatPurchaseCustomers > 0 ? SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer : 0) +
-    (anchor.distinctSimilarCustomers >= 5 ? SCORE_WEIGHTS.popularAmongSimilarCustomers : 0);
+  const historyScore = computeHistoryScore(anchor);
 
   // One bonus per PRODUCT PAIR that has at least one compatible family relationship — not one
   // bonus per matching family combination. PREFERENCE_FAMILIES and COMPATIBILITY_TAGS deliberately
@@ -617,7 +658,6 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // perverse "more products = better style score" incentive.
   const preferredDirections = preferenceIntent?.preferredDirections || [];
   const avoidedDirections = preferenceIntent?.avoidedDirections || [];
-  const comboAllNotes = comboProducts.flatMap((p) => p.notes || []);
   let styleMatchScore = 0;
   for (const direction of preferredDirections) {
     if (countPreferredDirectionMatches(comboAllNotes, [direction]) > 0) styleMatchScore += 3;
@@ -689,14 +729,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     : { HYBRID: 0, TRIBRID: 0, QUADBRID: 0 };
   const typeSimplicityScore = TYPE_SIMPLICITY_SCORE[type] ?? 0;
 
-  // Each identified risk (excessive heat, competing fruits, over-complexity, duplicate direction,
-  // etc.) is a real, named downside — weighted on the same scale as a dislike conflict (-10/-5) so
-  // a risk-laden combination can't out-rank a genuinely clean one just by accumulating small
-  // positive signals elsewhere.
+  // Fix (flat risk-count penalty replaced with severity) — every identified risk used to cost a
+  // flat -10 regardless of how minor ("four products" advisory) or serious ("zero contrast at all")
+  // it actually was, and a Tribrid/Quadbrid mechanically racks up more hits than a Hybrid just from
+  // having more components to flag, unrelated to real fit. riskDetails.riskPenalty is the
+  // severity-weighted, correlation-deduplicated total computed above (advisory -1 … high -10; a
+  // "critical" hit already hard-rejected the combination before this line is ever reached).
   const finalScore =
     preferenceScore + seasonalScore + historyScore + compatibilityScore + analogousScore + balanceScore + conflictPenalty +
     styleMatchScore + avoidedDirectionPenalty + complexityPenalty + typeSimplicityScore +
-    lifestyleMatchScore + lifestyleConflictPenalty + powderyContextPenalty - risks.length * 10;
+    lifestyleMatchScore + lifestyleConflictPenalty + powderyContextPenalty + riskDetails.riskPenalty;
 
   // Fix 10 — deterministic confidence with hard caps layered on top of the numeric threshold, so a
   // risk-laden or evidence-thin combination can never read as "very high"/"high" just by
@@ -887,6 +929,13 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     finalScore,
     recommendedRatio,
     risks,
+    // Fix (flat risk-count penalty replaced with severity) — persisted so a confirmed recommendation
+    // still shows exactly how its risk penalty was computed, not just the blended finalScore.
+    riskPenalty: riskDetails.riskPenalty,
+    riskBreakdown: riskDetails.breakdown,
+    // Fix (final-batch preference coverage, requirement 6) — the raw tiered-coverage contribution,
+    // separate from the blended preferenceScore it was added into.
+    exactNoteCoverageScore: exactNoteScore,
 
     // Customer-facing — safe for SSE payloads, recommendation cards, and chat text.
     type,
@@ -906,6 +955,92 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     customerFacingRisk,
     customerFacingNotesByProduct,
   };
+}
+
+// Every valid, newly-scored proposal buildable from ONE anchor — extracted out of
+// generateNewProductCombinations' main loop so the exact same logic can also run for the
+// fallback anchors the final-batch coverage check below seeds when a customer's named note is
+// completely absent from the normal pass, instead of duplicating the anchor/type/support-combo
+// triple loop a second time.
+function generateCombosForAnchor(anchor, ctx) {
+  const { allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile, allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords, existingComponentKeys, seenComponentKeys } = ctx;
+  const proposals = [];
+  const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
+  if (!shortlist.length) return proposals;
+
+  for (const type of allowedTypes) {
+    const supportCount = (COMPONENT_COUNT_BY_TYPE[type] ?? 0) - 1;
+    if (supportCount < 1 || supportCount > shortlist.length) continue;
+
+    for (const supportCombo of combinationsOf(shortlist, supportCount)) {
+      const comboProducts = [
+        { title: anchor.productName, notes: anchor.orderHistoryNotes },
+        ...supportCombo.map((s) => ({ title: s.product.title, notes: s.product.notesJson || [] })),
+      ];
+      const componentKey = createCombinationKey(comboProducts.map((p) => p.title));
+      if (seenComponentKeys.has(componentKey)) continue;
+      seenComponentKeys.add(componentKey);
+
+      // Spec: only recommend combinations that do NOT already exist as an exact Hybrid/Tribrid/
+      // Quadbrid in the imported combination database.
+      if (existingComponentKeys.has(componentKey)) continue;
+
+      const proposal = scoreProposedCombination({
+        comboProducts,
+        type,
+        componentKey,
+        profile,
+        anchor,
+        allCombinations,
+        notesByNormalizedTitle,
+        lifestyleContext,
+        vocabUsedWords,
+        preferenceIntent,
+      });
+      if (proposal) proposals.push(proposal);
+    }
+  }
+  return proposals;
+}
+
+// Fix (final-batch preference coverage) — the per-combination literal-note gate only ever required
+// ONE named note per combo, so a whole batch could still leave a note like "Strawberry" completely
+// uncovered even though every individual combo satisfies its own requirement. For each such missing
+// term, finds real catalog products that literally contain it (reusing real regional evidence from
+// candidateProducts when the same product is already there, otherwise a zero-evidence pseudo-anchor
+// — "preserve zero-history catalog products when they strongly match explicit customer notes").
+// Bounded to a small number of real products per missing term; this is a targeted top-up, not a
+// full catalog re-scan.
+const FALLBACK_ANCHORS_PER_MISSING_TERM = 3;
+export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts }) {
+  const byNormalizedTitle = new Map((candidateProducts || []).map((c) => [c.normalizedProductName, c]));
+  const seen = new Set();
+  const anchors = [];
+  for (const term of missingTerms) {
+    let added = 0;
+    for (const product of allProducts) {
+      if (added >= FALLBACK_ANCHORS_PER_MISSING_TERM) break;
+      if (seen.has(product.normalizedTitle)) continue;
+      if (!isEligibleCombinationComponent(product, finishedCombinationTitles)) continue;
+      if (!passesIntensityFilter(product.notesJson, preferenceIntent)) continue;
+      if (matchedLiteralTerms(product.notesJson, [term]).length === 0) continue;
+
+      seen.add(product.normalizedTitle);
+      added++;
+      const existing = byNormalizedTitle.get(product.normalizedTitle);
+      anchors.push(
+        existing || {
+          productName: product.title,
+          normalizedProductName: product.normalizedTitle,
+          collection: product.collection,
+          orderHistoryNotes: product.notesJson || [],
+          sameCityOrders: 0, sameStateOrders: 0, sameCountryOrders: 0, sameSeasonOrders: 0,
+          distinctSimilarCustomers: 0, repeatPurchaseCustomers: 0,
+        },
+      );
+    }
+  }
+  return anchors;
 }
 
 /**
@@ -946,47 +1081,51 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // Threaded across the WHOLE batch (Fix 2) so no two cards in the same result set repeat the
   // same adjective — reset per generateNewProductCombinations call, not global.
   const vocabUsedWords = new Set();
+  const genCtx = {
+    allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile,
+    allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords,
+    existingComponentKeys, seenComponentKeys,
+  };
 
   for (const anchor of anchors) {
-    const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
-    if (!shortlist.length) continue;
-
-    for (const type of allowedTypes) {
-      const supportCount = (COMPONENT_COUNT_BY_TYPE[type] ?? 0) - 1;
-      if (supportCount < 1 || supportCount > shortlist.length) continue;
-
-      for (const supportCombo of combinationsOf(shortlist, supportCount)) {
-        const comboProducts = [
-          { title: anchor.productName, notes: anchor.orderHistoryNotes },
-          ...supportCombo.map((s) => ({ title: s.product.title, notes: s.product.notesJson || [] })),
-        ];
-        const componentKey = createCombinationKey(comboProducts.map((p) => p.title));
-        if (seenComponentKeys.has(componentKey)) continue;
-        seenComponentKeys.add(componentKey);
-
-        // Spec: only recommend combinations that do NOT already exist as an exact Hybrid/Tribrid/
-        // Quadbrid in the imported combination database.
-        if (existingComponentKeys.has(componentKey)) continue;
-
-        const proposal = scoreProposedCombination({
-          comboProducts,
-          type,
-          componentKey,
-          profile,
-          anchor,
-          allCombinations,
-          notesByNormalizedTitle,
-          lifestyleContext,
-          vocabUsedWords,
-          preferenceIntent,
-        });
-        if (proposal) results.push(proposal);
-      }
-    }
+    results.push(...generateCombosForAnchor(anchor, genCtx));
   }
 
   results.sort((a, b) => b.finalScore - a.finalScore);
-  const finalResults = selectDiverseResults(results, maximumResults);
+  let finalResults = selectDiverseResults(results, maximumResults);
+
+  // Fix (final-batch preference coverage) — an individual combo only ever had to contain ONE of the
+  // customer's literally named notes (see scoreProposedCombination's hard gate), so the batch as a
+  // whole could still leave a note like "Strawberry" completely uncovered even though every combo
+  // individually satisfies its own requirement. Confirmed live: exactly this pattern, just one level
+  // up from the per-combo bug already fixed. When that happens, seed a small, targeted set of real
+  // catalog products that literally contain the missing note as EXTRA anchors and regenerate — never
+  // a full re-scan, and never required to succeed (a note nothing eligible actually contains stays
+  // honestly reported as missing, not silently dropped).
+  const literalLikeTerms = literalNoteTermsFromLikes(profile?.likes || []);
+  if (literalLikeTerms.length > 0) {
+    const batchNotes = finalResults.flatMap((r) => r.internalProducts.flatMap((p) => p.notes || []));
+    const missing = missingLiteralTerms(batchNotes, literalLikeTerms);
+    if (missing.length) {
+      const fallbackAnchors = buildFallbackAnchorsForMissingTerms(missing, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts });
+      for (const anchor of fallbackAnchors) {
+        results.push(...generateCombosForAnchor(anchor, genCtx));
+      }
+      results.sort((a, b) => b.finalScore - a.finalScore);
+      finalResults = selectDiverseResults(results, maximumResults);
+    }
+  }
+
+  // Fix (final-batch preference coverage) — every returned recommendation now carries exactly which
+  // of the customer's literally named notes IT covers and which it doesn't, regardless of whether
+  // the regeneration pass above found anything — internal/debug metadata only (see
+  // recommendationConfirmation.server.js's scoreJson persistence and toCustomerSafeRecommendation's
+  // explicit allow-list, which never exposes this).
+  for (const r of finalResults) {
+    const notes = r.internalProducts.flatMap((p) => p.notes || []);
+    r.matchedExactNotes = matchedLiteralTerms(notes, literalLikeTerms);
+    r.missingExactNotes = missingLiteralTerms(notes, literalLikeTerms);
+  }
 
   // Fix (vagueness diagnosis) — only the proposals actually being returned pay for a real,
   // note-aware copy-generation call; every other scored-but-discarded candidate (up to ~450 per
