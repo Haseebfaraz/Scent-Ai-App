@@ -4,7 +4,7 @@ import {
   validateCombinationShape, computeEvidenceScope,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength } from "../utils/fragranceScoring.js";
-import { literalNoteTermsFromLikes, literalNoteMatchCount } from "../utils/fragranceCompatibility.js";
+import { literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore } from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
@@ -221,6 +221,28 @@ describe("generateNewProductCombinations (real data)", () => {
     for (const combo of combinations) {
       const allNotes = combo.internalProducts.flatMap((p) => p.notes || []);
       expect(literalNoteMatchCount(allNotes, literalTerms)).toBeGreaterThan(0);
+    }
+  });
+
+  // Fix (tiered exact-note coverage scoring) — proves the tiered formula is actually wired into the
+  // real preferenceScore, not just a pure function nobody calls. preferenceScore is family score
+  // (always >= 0) PLUS the tiered literal-coverage score, so the literal contribution alone can
+  // never exceed the combo's real preferenceScore.
+  it("preferenceScore reflects at least the tiered exact-note coverage score for how many literal notes each combo covers", async () => {
+    const profile = {
+      city: "Karachi", country: "Pakistan", season: "Summer",
+      likes: ["Fruity", "Fresh", "Apple", "Strawberry", "Peach"], dislikes: ["Amber", "Sandalwood"],
+      occasion: "office", locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    const literalTerms = literalNoteTermsFromLikes(profile.likes);
+    expect(combinations.length).toBeGreaterThan(0);
+    for (const combo of combinations) {
+      const allNotes = combo.internalProducts.flatMap((p) => p.notes || []);
+      const distinctMatches = literalNoteMatchCount(allNotes, literalTerms);
+      expect(distinctMatches).toBeGreaterThan(0); // guaranteed by the hard gate above
+      expect(combo.preferenceScore).toBeGreaterThanOrEqual(exactNoteCoverageScore(distinctMatches));
     }
   });
 

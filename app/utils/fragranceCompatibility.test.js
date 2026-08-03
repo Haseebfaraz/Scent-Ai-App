@@ -17,6 +17,7 @@ import {
   classifyAlmondCharacter,
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
+  exactNoteCoverageScore,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -112,6 +113,33 @@ describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
     const terms = literalNoteTermsFromLikes(["Wood"]);
     expect(literalNoteMatchCount(["Sandalwood"], terms)).toBe(0);
     expect(literalNoteMatchCount(["Aged Wood Accord"], terms)).toBe(1);
+  });
+});
+
+// Fix (tiered exact-note coverage scoring) — a flat per-match boost treated a customer's 1st and
+// 4th named note as equally significant; a diminishing tier rewards breadth of coverage without
+// letting it run away unbounded.
+describe("exactNoteCoverageScore", () => {
+  it("scores zero matches as zero", () => {
+    expect(exactNoteCoverageScore(0)).toBe(0);
+  });
+
+  it("scores the first three distinct matches at 10, then 7, then 5", () => {
+    expect(exactNoteCoverageScore(1)).toBe(10);
+    expect(exactNoteCoverageScore(2)).toBe(10 + 7);
+    expect(exactNoteCoverageScore(3)).toBe(10 + 7 + 5);
+  });
+
+  it("floors every match beyond the third at the same +5 tier value, never zero or negative", () => {
+    expect(exactNoteCoverageScore(4)).toBe(10 + 7 + 5 + 5);
+    expect(exactNoteCoverageScore(5)).toBe(10 + 7 + 5 + 5 + 5);
+  });
+
+  // Always bigger than the flat family-level bonus (SCORE_WEIGHTS.matchesLike = 5 per matched
+  // family) even at a single match — the explicit requirement that broad family matching stay the
+  // smaller score.
+  it("even a single exact match outweighs the flat family-match bonus of 5", () => {
+    expect(exactNoteCoverageScore(1)).toBeGreaterThan(5);
   });
 });
 

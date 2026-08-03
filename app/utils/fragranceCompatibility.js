@@ -172,6 +172,23 @@ export function literalNoteMatchCount(notes, literalTerms) {
   return literalTerms.filter((term) => containsWholeWord(noteText, term)).length;
 }
 
+// Fix (tiered exact-note coverage scoring) — a flat per-match boost treated a customer's 1st and
+// 4th named note as equally significant. Distinct literal-note coverage now scores on a diminishing
+// tier instead: 1st distinct note covered +10, 2nd +7, 3rd (and every one beyond) +5 — always a
+// bigger, more decisive signal than the flat family-level bonus (SCORE_WEIGHTS.matchesLike = 5 per
+// matched family), per the explicit requirement that broad family/style matching stay the smaller
+// score. `distinctMatchCount` must already be a count of DISTINCT terms matched (e.g. from
+// literalNoteMatchCount called once against a combo's FULL combined note list) — summing this
+// per-component instead would double-count a note that happens to appear in two components.
+const EXACT_NOTE_COVERAGE_TIERS = [10, 7, 5];
+export function exactNoteCoverageScore(distinctMatchCount) {
+  let score = 0;
+  for (let i = 0; i < distinctMatchCount; i++) {
+    score += EXACT_NOTE_COVERAGE_TIERS[Math.min(i, EXACT_NOTE_COVERAGE_TIERS.length - 1)];
+  }
+  return score;
+}
+
 // Phase 6 "note compatibility guidance" — each pair is a PREFERENCE_FAMILIES or
 // COMPATIBILITY_TAGS key. The spec's "Gourmand + vanilla" rule has no separate "gourmand" family
 // defined anywhere in Phase 3 — DUA's gourmand direction is exactly the `sweet` family's own note
