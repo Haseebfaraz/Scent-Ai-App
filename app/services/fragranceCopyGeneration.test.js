@@ -61,6 +61,43 @@ describe("applyCustomerFacingCopy — leak-guard rejection", () => {
   });
 });
 
+// Fix (protect customer-facing copy) — the copy model is told to reference the customer's stated
+// likes, but nothing stopped it claiming a SPECIFIC named note on a combination that doesn't
+// actually contain it — confirmed live, a real "why this suits them" line claimed "your love for
+// apple" on a combo with no Apple anywhere in its real notes.
+describe("applyCustomerFacingCopy — exact-note-mismatch rejection", () => {
+  it("rejects a response claiming a note the customer named but this combo doesn't have, and leaves the fallback untouched (no retry)", async () => {
+    let fetchCalls = 0;
+    global.fetch = vi.fn(async () => {
+      fetchCalls++;
+      return mockOkResponse({ description: "A blend built for apple lovers", whySuits: "Your love for apple shines through here." });
+    });
+    const item = makeItem({ missingExactNotes: ["apple"] });
+    await applyCustomerFacingCopy([item], PROFILE_FIELDS, []);
+
+    expect(item.proposal.customerFacingDescription).toBe("FALLBACK_DESC");
+    expect(item.proposal.customerFacingWhySuits).toBe("FALLBACK_WHY");
+    expect(fetchCalls).toBe(1); // hard reject, not retried — same as the leak-guard
+  });
+
+  it("never flags legitimate copy that never mentions the missing note at all", async () => {
+    global.fetch = vi.fn(async () => mockOkResponse({ description: "Bright citrus lift", whySuits: "Matches your love of fresh scents." }));
+    const item = makeItem({ missingExactNotes: ["apple"] });
+    await applyCustomerFacingCopy([item], PROFILE_FIELDS, []);
+    expect(item.proposal.customerFacingDescription).toBe("Bright citrus lift");
+  });
+
+  // Word-boundary matching (the same fix that stops Pineapple counting as Apple in scoring) applies
+  // here too — legitimate copy about a genuinely-present Pineapple must never get caught by an
+  // Apple-shaped guard just because "apple" is a substring of "pineapple".
+  it("never false-positives on Pineapple when Apple is the missing term", async () => {
+    global.fetch = vi.fn(async () => mockOkResponse({ description: "A pineapple-forward tropical blend", whySuits: "Bright and juicy." }));
+    const item = makeItem({ missingExactNotes: ["apple"] });
+    await applyCustomerFacingCopy([item], PROFILE_FIELDS, []);
+    expect(item.proposal.customerFacingDescription).toBe("A pineapple-forward tropical blend");
+  });
+});
+
 describe("applyCustomerFacingCopy — 'never start with This' deterministic check", () => {
   it("detects a 'This ...' opener (checked in code, not left to the prompt), retries once, and accepts a clean retry", async () => {
     let callCount = 0;

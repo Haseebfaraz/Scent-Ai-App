@@ -574,7 +574,11 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // see the hard gate below for when it can't).
   const comboAllNotes = comboProducts.flatMap((p) => p.notes || []);
   const totalLiteralMatches = literalNoteMatchCount(comboAllNotes, literalLikeTerms);
-  preferenceScore += exactNoteCoverageScore(totalLiteralMatches);
+  // Fix (final-batch preference coverage, requirement 6) — kept as its own named value (not just
+  // folded anonymously into preferenceScore) so it can be persisted and inspected per recommendation
+  // alongside matchedExactNotes/missingExactNotes/riskPenalty/riskBreakdown.
+  const exactNoteScore = exactNoteCoverageScore(totalLiteralMatches);
+  preferenceScore += exactNoteScore;
 
   // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a
   // requirement: a customer who said "I like spicy" could still get combinations with zero spicy
@@ -929,6 +933,9 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     // still shows exactly how its risk penalty was computed, not just the blended finalScore.
     riskPenalty: riskDetails.riskPenalty,
     riskBreakdown: riskDetails.breakdown,
+    // Fix (final-batch preference coverage, requirement 6) — the raw tiered-coverage contribution,
+    // separate from the blended preferenceScore it was added into.
+    exactNoteCoverageScore: exactNoteScore,
 
     // Customer-facing — safe for SSE payloads, recommendation cards, and chat text.
     type,

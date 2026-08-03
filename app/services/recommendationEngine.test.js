@@ -4,8 +4,11 @@ import {
   validateCombinationShape, computeEvidenceScope, computeHistoryScore, MAX_HISTORY_SCORE,
   buildFallbackAnchorsForMissingTerms,
 } from "./recommendationEngine.server.js";
-import { likeMatchStrength } from "../utils/fragranceScoring.js";
-import { literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore, matchedLiteralTerms } from "../utils/fragranceCompatibility.js";
+import { likeMatchStrength, classifyDislikeConflict } from "../utils/fragranceScoring.js";
+import {
+  literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore, matchedLiteralTerms,
+  missingLiteralTerms, textToPreferenceFamilies,
+} from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
@@ -297,6 +300,105 @@ describe("generateNewProductCombinations (real data)", () => {
     expect(anchors.length).toBeGreaterThan(0);
     for (const anchor of anchors) {
       expect(matchedLiteralTerms(anchor.orderHistoryNotes, ["strawberry"]).length).toBeGreaterThan(0);
+    }
+  });
+
+  // A single real Apple-only anchor (confirmed to contain neither Strawberry nor Peach, and not
+  // itself a finished combination) as the ENTIRE initial candidate pool — with only one anchor and
+  // no other real evidence, Strawberry/Peach coverage can only come from the targeted fallback pass
+  // finding real catalog products for those specific missing terms, not from having several anchors
+  // to begin with.
+  it("an Apple-only initial candidate pool still ends up covering Strawberry and Peach via the targeted fallback pass", async () => {
+    const allProducts = await prisma.fragranceProduct.findMany({
+      select: { title: true, normalizedTitle: true, notesJson: true, collection: true },
+    });
+    const appleOnly = allProducts.find(
+      (p) =>
+        matchedLiteralTerms(p.notesJson, ["apple"]).length > 0 &&
+        matchedLiteralTerms(p.notesJson, ["strawberry"]).length === 0 &&
+        matchedLiteralTerms(p.notesJson, ["peach"]).length === 0 &&
+        !["hybrid", "tribrid", "quadbrid"].includes(String(p.collection).toLowerCase()),
+    );
+    expect(appleOnly).toBeTruthy(); // sanity check: such a real product exists in the catalog
+
+    const candidateProducts = [{
+      productName: appleOnly.title, normalizedProductName: appleOnly.normalizedTitle, collection: appleOnly.collection,
+      relevanceScore: 100, orderHistoryNotes: appleOnly.notesJson,
+      sameCityOrders: 0, sameStateOrders: 0, sameCountryOrders: 0, sameSeasonOrders: 0,
+      distinctSimilarCustomers: 0, repeatPurchaseCustomers: 0,
+    }];
+    const profile = { likes: ["Apple", "Strawberry", "Peach"], dislikes: [], locationVerified: true };
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts, maximumResults: 8 });
+    expect(combinations.length).toBeGreaterThan(0);
+
+    const coveredAcrossBatch = new Set(combinations.flatMap((c) => c.matchedExactNotes));
+    expect(coveredAcrossBatch.has("apple")).toBe(true);
+    expect(coveredAcrossBatch.has("strawberry")).toBe(true);
+    expect(coveredAcrossBatch.has("peach")).toBe(true);
+  });
+
+  // Fix (final-batch preference coverage) — every literal note-family keyword
+  // literalNoteTermsFromLikes can ever extract has at least one real match somewhere in this
+  // 3450-product catalog (verified directly), so a genuinely uncoverable customer-named note can't
+  // be reproduced end-to-end through the real "likes" vocabulary. Proves the underlying guarantee
+  // directly instead: a term that truly doesn't exist anywhere gets zero fallback anchors — never a
+  // fabricated one — and stays correctly reported as missing.
+  it("never invents an anchor or a match for a note that truly doesn't exist anywhere in the catalog", async () => {
+    const allProducts = await prisma.fragranceProduct.findMany({
+      select: { title: true, normalizedTitle: true, notesJson: true, collection: true },
+    });
+    const anchors = buildFallbackAnchorsForMissingTerms(["zzznonexistentnote"], {
+      allProducts, finishedCombinationTitles: new Set(), preferenceIntent: {}, candidateProducts: [],
+    });
+    expect(anchors).toEqual([]);
+    expect(missingLiteralTerms(["Apple", "Musk", "Vanilla"], ["zzznonexistentnote"])).toEqual(["zzznonexistentnote"]);
+  });
+
+  // The targeted fallback pass reuses generateCombosForAnchor — the EXACT same function the normal
+  // pass uses, including scoreProposedCombination's hard dislike-conflict rejection and the
+  // existing-combination exclusion — so nothing about seeding extra anchors can bypass either rule.
+  it("the full final batch (including any fallback-generated combos) still respects hard dislikes and never duplicates an existing combination", async () => {
+    const profile = {
+      city: "Karachi", country: "Pakistan", season: "Summer",
+      likes: ["Fruity", "Fresh", "Apple", "Strawberry", "Peach"], dislikes: ["Amber", "Sandalwood"],
+      occasion: "office", locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(combinations.length).toBeGreaterThan(0);
+
+    const dislikeFamilies = textToPreferenceFamilies(profile.dislikes);
+    const existing = await prisma.existingCombination.findMany({ select: { componentKey: true } });
+    const existingKeys = new Set(existing.map((e) => e.componentKey));
+
+    // scoreProposedCombination's hard reject checks severity PER COMPONENT (never rejecting a whole
+    // combo for one merely-supporting note elsewhere) — so this checks the same granularity, not
+    // the combo's combined note list, which can legitimately read as a stronger conflict once
+    // several individually-mild components are summed together (that's a real, intentional design
+    // choice, not a bug — see classifyDislikeConflict's own spec comment).
+    for (const combo of combinations) {
+      for (const product of combo.internalProducts) {
+        const conflict = classifyDislikeConflict(product.notes, dislikeFamilies);
+        expect(conflict.severity).not.toBe("high");
+      }
+      expect(existingKeys.has(combo.canonicalKey)).toBe(false);
+    }
+  });
+
+  // Fix (final-batch preference coverage, requirement 6) — exactNoteCoverageScore is kept as its
+  // own named value (not just folded anonymously into preferenceScore) so it can be persisted and
+  // inspected per recommendation.
+  it("persists exactNoteCoverageScore on every recommendation, matching its real matched-note count", async () => {
+    const profile = {
+      city: "Karachi", country: "Pakistan", season: "Summer",
+      likes: ["Fruity", "Fresh", "Apple", "Strawberry", "Peach"], dislikes: ["Amber", "Sandalwood"],
+      occasion: "office", locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(combinations.length).toBeGreaterThan(0);
+    for (const combo of combinations) {
+      expect(combo.exactNoteCoverageScore).toBe(exactNoteCoverageScore(combo.matchedExactNotes.length));
     }
   });
 
