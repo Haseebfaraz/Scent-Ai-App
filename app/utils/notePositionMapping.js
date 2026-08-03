@@ -1,5 +1,8 @@
 import { PREFERENCE_FAMILIES } from "./fragranceCompatibility.js";
 
+const LITERAL_MATCH_RANK = 2;
+const FAMILY_MATCH_RANK = 1;
+
 // Deterministic Top/Middle/Base note-position bucketing — the single reusable utility the slider
 // preview page (and any other consumer) must use, per the explicit requirement: "This mapping must
 // be maintained in one reusable utility rather than duplicated in frontend code." Never invents a
@@ -65,18 +68,24 @@ const MAX_NOTES_PER_POSITION = 5;
 // liked-family matches to the front before slicing means the customer's own stated likes are never
 // the ones arbitrarily cut for display, without changing WHICH position a note belongs to or
 // inventing/reordering anything beyond this cap.
-function prioritizeLikedNotes(notes, likeFamilies) {
-  if (!likeFamilies?.length) return notes;
-  const matchesLikedFamily = (note) => {
-    const lower = String(note).toLowerCase();
-    return likeFamilies.some((family) => {
-      const keywords = PREFERENCE_FAMILIES[family];
-      return keywords && keywords.some((kw) => lower.includes(kw));
-    });
-  };
-  // Array.prototype.sort is a stable sort as of ES2019/Node 11+ — ties (both matching or both not)
-  // keep their original relative order, only liked-vs-unliked gets reordered.
-  return [...notes].sort((a, b) => Number(matchesLikedFamily(b)) - Number(matchesLikedFamily(a)));
+// Fix (literal note terms lost to family-level matching) — a note literally matching one of the
+// customer's own named terms (e.g. "Peach") now outranks one that only matches the broader family
+// (e.g. "Pear", also `fruity`) — previously both ranked identically as long as either was "liked".
+function noteLikeRank(note, likeFamilies, literalTerms) {
+  const lower = String(note).toLowerCase();
+  if (literalTerms?.length && literalTerms.some((term) => lower.includes(term))) return LITERAL_MATCH_RANK;
+  if (likeFamilies?.length && likeFamilies.some((family) => {
+    const keywords = PREFERENCE_FAMILIES[family];
+    return keywords && keywords.some((kw) => lower.includes(kw));
+  })) return FAMILY_MATCH_RANK;
+  return 0;
+}
+
+function prioritizeLikedNotes(notes, likeFamilies, literalTerms) {
+  if (!likeFamilies?.length && !literalTerms?.length) return notes;
+  // Array.prototype.sort is a stable sort as of ES2019/Node 11+ — ties (matching the same rank)
+  // keep their original relative order, only rank differences get reordered.
+  return [...notes].sort((a, b) => noteLikeRank(b, likeFamilies, literalTerms) - noteLikeRank(a, likeFamilies, literalTerms));
 }
 
 /**
@@ -86,11 +95,14 @@ function prioritizeLikedNotes(notes, likeFamilies) {
  * @param {string[]} [likeFamilies] - PREFERENCE_FAMILIES keys (e.g. from textToPreferenceFamilies)
  *   the customer actually stated liking — when a bucket exceeds the 5-note cap, notes matching one
  *   of these are kept over notes that don't, instead of whichever came first in arrival order.
+ * @param {string[]} [literalTerms] - specific note keywords the customer actually named (e.g. from
+ *   literalNoteTermsFromLikes) — ranked above a plain family match when both are present, so a real
+ *   named note (e.g. "Peach") is never bumped by a merely same-family one (e.g. "Pear").
  * @returns {{ top: string[], middle: string[], base: string[] }} exact original spelling preserved;
  *   each array capped at 5, and topped up to a minimum of 3 (when enough real notes exist overall)
  *   by borrowing from whichever other bucket has the most surplus — never invented, only moved.
  */
-export function assignNotePositions(allNotes, likeFamilies = []) {
+export function assignNotePositions(allNotes, likeFamilies = [], literalTerms = []) {
   const seen = new Set();
   const deduped = (allNotes || []).filter((n) => {
     const key = String(n).trim().toLowerCase();
@@ -110,7 +122,7 @@ export function assignNotePositions(allNotes, likeFamilies = []) {
   const overflow = [];
   for (const position of ["top", "middle", "base"]) {
     if (buckets[position].length > MAX_NOTES_PER_POSITION) {
-      const ordered = prioritizeLikedNotes(buckets[position], likeFamilies);
+      const ordered = prioritizeLikedNotes(buckets[position], likeFamilies, literalTerms);
       overflow.push(...ordered.slice(MAX_NOTES_PER_POSITION));
       buckets[position] = ordered.slice(0, MAX_NOTES_PER_POSITION);
     }

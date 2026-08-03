@@ -13,6 +13,8 @@ import {
   countPreferredDirectionMatches,
   countAvoidedDirectionMatches,
   classifyAlmondCharacter,
+  literalNoteTermsFromLikes,
+  literalNoteMatchCount,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -42,6 +44,29 @@ describe("textToPreferenceFamilies (customer free-text likes/dislikes)", () => {
     expect(textToPreferenceFamilies(["Sweet"])).toEqual(["sweet"]);
     expect(textToPreferenceFamilies(["Spicy"])).toEqual(["spicy"]);
     expect(textToPreferenceFamilies(["Strong"])).toEqual(["strongHeavy"]);
+  });
+});
+
+// Fix (literal note terms lost to family-level matching) — "Apple", "Strawberry", "Peach" used to
+// all collapse into one `fruity` family tag, so a product matching via unrelated fruity notes
+// scored identically to one containing the customer's actual named notes.
+describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
+  it("extracts the specific note keywords a customer named, not the family descriptor itself", () => {
+    const terms = literalNoteTermsFromLikes(["Fruity", "Fresh", "Apple", "Strawberry", "Peach"]);
+    expect(terms).toEqual(expect.arrayContaining(["apple", "strawberry", "peach"]));
+    expect(terms).not.toContain("fruity");
+    expect(terms).not.toContain("fresh");
+  });
+
+  it("returns zero literal matches for a product that only shares the family, not the named note", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry", "Peach"]);
+    expect(literalNoteMatchCount(["Pear", "Blackcurrant", "Musk"], terms)).toBe(0);
+  });
+
+  it("counts a real literal match against a product genuinely containing the named note", () => {
+    const terms = literalNoteTermsFromLikes(["Apple", "Strawberry", "Peach"]);
+    expect(literalNoteMatchCount(["Peach", "Musk", "Vanilla"], terms)).toBe(1);
+    expect(literalNoteMatchCount(["Apple", "Peach", "Vanilla"], terms)).toBe(2);
   });
 });
 
