@@ -122,19 +122,28 @@ async function buildSystemPrompt(history, conversationId, knownCustomerEmail, kn
   const profileStatusLine = `\nProfile fields already saved (from save_customer_profile_field — do not ask again for these): ${JSON.stringify(profile)}\nStill missing before analysis can run: ${missingFields.length ? missingFields.join(", ") : "nothing — ready to analyze."}\n`;
 
   // Fix (bare-greeting still triggers an early fragrance bridge) — see CONCRETE_CONTEXT_PATTERN's
-  // own comment above. For the first couple of exchanges, if nothing the customer has said yet
+  // own comment above. For the first several exchanges, if nothing the customer has said yet
   // contains real concrete context, hand back a deliberately SHORT prompt that never mentions
   // bridging into scent at all, instead of the full prompt with a "don't do this yet" instruction
   // buried inside it. Lifts immediately the moment the customer says anything with real signal
   // (an activity, occasion, gift, or fragrance/shopping intent itself) — never blocks a customer
   // who's already leading with what they need.
-  // Confirmed live the threshold matters: when name is still unknown, that reply "spends" one
-  // exchange just getting the name, so 3 non-fragrance exchanges are needed (name, day, routine)
-  // before a bridge is appropriate — 2 was one turn too few and released the lock exactly on the
-  // customer's SECOND reply, the precise turn the reported bug happened on.
+  // Fix (round 3 — prompt-only guidance for "generic hobby, not a bridge" doesn't generalize) —
+  // once this code gate unlocks, whether to bridge becomes the model's own judgment under the full
+  // prompt's arc guidance. That guidance explicitly calls out work/school/gym as "generic routine,
+  // ask a follow-up instead" — confirmed live it does NOT generalize to every other hobby/activity
+  // word never explicitly listed: a customer who said "nothing, just working and playing golf" got
+  // bridged into fragrance talk anyway, at exactly the count-based unlock point (2 real exchanges,
+  // reached by message 2 once the name is already known). Two rounds of prompt-wording fixes for
+  // this exact failure class (bare mood, then work/office) each only generalized to the specific
+  // words called out, not the underlying unbounded category — so instead of adding "golf" to a list
+  // that will always be missing the NEXT hobby word too, the deterministic threshold itself is
+  // raised: several more real exchanges are now hard-blocked from bridging at all, regardless of
+  // what the model would otherwise judge, buying genuine rapport-building time the same reliable
+  // way the bare-mood fix already does.
   const userMessages = history.filter((m) => m.role === "user");
   const latestUserText = userMessages.length ? userMessages[userMessages.length - 1].content : "";
-  const minExchangesBeforeBridge = confirmedCustomerName ? 2 : 3;
+  const minExchangesBeforeBridge = confirmedCustomerName ? 4 : 5;
   const earlyPhaseLocked = userMessages.length < minExchangesBeforeBridge && !hasConcreteContext(latestUserText);
 
   if (earlyPhaseLocked) {
