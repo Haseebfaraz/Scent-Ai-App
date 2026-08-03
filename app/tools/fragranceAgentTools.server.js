@@ -217,6 +217,10 @@ const PROFILE_FIELD_SCHEMAS = {
   preferredStyle: z.string().min(1).max(200),
   occasion: z.string().min(1).max(200),
   giftRecipient: z.string().min(1).max(200),
+  // Fix (ask about dislikes/occasion before analysis) — booleans, not text, so this is the only
+  // pair of fields that needs the value union below extended to accept z.boolean() too.
+  dislikesAsked: z.boolean(),
+  occasionAsked: z.boolean(),
   strengthPreference: z.enum(VALID_STRENGTH_PREFERENCES),
   additionalPreferences: z.array(z.string().min(1)).max(20),
 };
@@ -224,7 +228,7 @@ const PROFILE_FIELD_NAMES = Object.keys(PROFILE_FIELD_SCHEMAS);
 
 const SaveProfileFieldArgs = z.object({
   field: z.enum(PROFILE_FIELD_NAMES),
-  value: z.union([z.string(), z.array(z.string())]),
+  value: z.union([z.string(), z.array(z.string()), z.boolean()]),
 });
 const ProductTitleArgs = z.object({ productTitle: z.string().min(1) });
 const CombinationExistsArgs = z.object({ productTitles: z.array(z.string().min(1)).min(2).max(4) });
@@ -247,13 +251,13 @@ export const FRAGRANCE_AGENT_TOOLS = [
     type: "function",
     function: {
       name: "save_customer_profile_field",
-      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, requestedSeasonStyle, likes, dislikes, preferredStyle, occasion, giftRecipient, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory. requestedSeasonStyle is ONLY for when the customer volunteers a specific seasonal style unprompted (e.g. 'I want something wintery') — never ask them what season it is or what season they associate with an occasion; live weather is handled automatically once their city is verified. giftRecipient is ONLY set when the customer indicates this is a gift for someone else (e.g. 'husband', 'wife', 'friend') — once set, likes/dislikes/preferredStyle/occasion describe that recipient, not necessarily the person chatting.",
+      description: "Save one field of the customer's structured fragrance profile (name, email, city, stateRegion, country, requestedSeasonStyle, likes, dislikes, preferredStyle, occasion, giftRecipient, dislikesAsked, occasionAsked, strengthPreference, additionalPreferences). Call this every time the customer gives you a real answer for one of these — never track profile progress in your own memory. requestedSeasonStyle is ONLY for when the customer volunteers a specific seasonal style unprompted (e.g. 'I want something wintery') — never ask them what season it is or what season they associate with an occasion; live weather is handled automatically once their city is verified. giftRecipient is ONLY set when the customer indicates this is a gift for someone else (e.g. 'husband', 'wife', 'friend') — once set, likes/dislikes/preferredStyle/occasion describe that recipient, not necessarily the person chatting. dislikesAsked/occasionAsked are booleans (true/false) — set to true the moment you've asked about dislikes/occasion (or already knew the answer from earlier context), regardless of whether the real answer was 'none'/'nothing specific' — an empty dislikes list or a null occasion is ambiguous between 'never asked' and 'asked, real answer was none', these flags disambiguate it.",
       parameters: {
         type: "object",
         properties: {
           field: { type: "string", enum: PROFILE_FIELD_NAMES, description: "Which profile field to set." },
           value: {
-            description: "The value for this field. A plain string for most fields; an array of strings for likes/dislikes/additionalPreferences.",
+            description: "The value for this field. A plain string for most fields; an array of strings for likes/dislikes/additionalPreferences; a boolean (true/false) for dislikesAsked/occasionAsked.",
           },
         },
         required: ["field", "value"],
