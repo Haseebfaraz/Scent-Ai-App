@@ -73,6 +73,24 @@ export function matchedLikes(productNotes, likeFamilies) {
   });
 }
 
+// Fix (preference score ignored HOW MUCH of a product is the liked family) — matchedLikes above
+// only ever checks whether a family matches AT LEAST ONE note, so a product with a single
+// incidental "Vanilla" note among 18 completely different notes earned the exact same bonus as one
+// genuinely built around sweetness — confirmed live. Returns what FRACTION of a product's real
+// notes actually fall in the given family, so a caller can scale a bonus by real relevance instead
+// of a flat presence check. Shared by recommendationEngine.server.js's preferenceScore weighting
+// and orderHistoryAnalysis.server.js's like-matched candidate gathering — both need the same
+// "how much, not just whether" measure.
+export function likeMatchStrength(notes, family) {
+  const keywords = PREFERENCE_FAMILIES[family];
+  if (!keywords || !notes?.length) return 0;
+  const matchingCount = notes.filter((note) => {
+    const lower = String(note).toLowerCase();
+    return keywords.some((kw) => lower.includes(kw));
+  }).length;
+  return matchingCount / notes.length;
+}
+
 // Spec's ProductCandidate shape requires an overall "evidenceLevel": "high" | "medium" | "low".
 // No exact thresholds are given, so this uses the same evidence counts the candidate already
 // carries (distinct similar customers, same-season orders) rather than inventing new signals.

@@ -10,7 +10,7 @@
 // hundreds of thousands), so it's fast without precomputing.
 import prisma from "../db.server.js";
 import { SEASON_ALIASES } from "../utils/fragranceNormalization.js";
-import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLevel } from "../utils/fragranceScoring.js";
+import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLevel, likeMatchStrength } from "../utils/fragranceScoring.js";
 import {
   textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter,
   interpretLifestyleContext, countPreferredDirectionMatches,
@@ -22,8 +22,15 @@ const MIN_SAMPLE_SIZE = 20;
 // Bounded shortlist per region tier — the candidate pool is a union of each tier's top products,
 // never every distinct product in the table, so downstream per-candidate queries stay small.
 const CANDIDATE_SHORTLIST_PER_TIER = 20;
-// Spec: "return no more than 10 product candidates."
-const MAX_CANDIDATES_RETURNED = 10;
+// Fix (candidate pool ignored likes) — raised from the spec's original 10 now that a genuine third
+// source (like-matched, not just regionally-popular) feeds into the same pool below; a slightly
+// larger final list gives real preference-driven candidates room to actually compete for one of the
+// MAX_ANCHORS slots instead of getting crowded out by the regional-popularity tiers alone.
+const MAX_CANDIDATES_RETURNED = 15;
+// Bounded shortlist for the like-matched tier (see topProductsByLikeMatch below) — same purpose as
+// CANDIDATE_SHORTLIST_PER_TIER, just for a tier ranked by preference-match strength instead of
+// order counts.
+const LIKE_MATCH_SHORTLIST = 20;
 // "Popular among similar customers" (breadth signal) is distinguished from "repeat purchase by a
 // similar customer" (loyalty signal, one customer buying it more than once) by requiring several
 // distinct customers in the region, not just one.
@@ -51,6 +58,36 @@ async function cityCountsByProduct(cityWhere, candidateNames) {
     _count: { _all: true },
   });
   return new Map(rows.map((r) => [r.normalizedProductName, r._count._all]));
+}
+
+// ---- Preference-match tier (real catalog, ranked by how much it reflects stated likes) ----
+
+// Fix (candidate pool ignored likes) — every tier above comes purely from regional popularity;
+// a genuinely well-matching product that isn't already a regional bestseller could never even be
+// CONSIDERED, only ever re-ranked within an already-fixed, popularity-only pool — confirmed live:
+// the same handful of "regionally popular" anchors kept winning regardless of what a customer
+// actually said they liked (e.g. "Fruity, Fresh, Apple, Strawberry, Peach" produced the identical
+// oud/musk-heavy anchors as a customer who only said "Sweet"). This queries the real catalog
+// directly and ranks by likeMatchStrength (how much of each product's real notes reflect the
+// customer's BEST-matching liked family, not just whether any family matches at all — same measure
+// already used to weight preferenceScore in recommendationEngine.server.js) — merged into the same
+// candidateNames pool below, so a fruity/fresh product gets a real shot at becoming an anchor even
+// with zero regional order history, instead of being excluded before relevanceScore ever runs.
+async function topProductsByLikeMatch(likeFamilies) {
+  if (!likeFamilies.length) return [];
+  const allProducts = await prisma.fragranceProduct.findMany({
+    select: { normalizedTitle: true, notesJson: true },
+  });
+  return allProducts
+    .map((p) => {
+      const notes = Array.isArray(p.notesJson) ? p.notesJson : [];
+      const strength = Math.max(0, ...likeFamilies.map((family) => likeMatchStrength(notes, family)));
+      return { normalizedTitle: p.normalizedTitle, strength };
+    })
+    .filter((p) => p.strength > 0)
+    .sort((a, b) => b.strength - a.strength)
+    .slice(0, LIKE_MATCH_SHORTLIST)
+    .map((p) => p.normalizedTitle);
 }
 
 // ---- Country/state/season tiers (precomputed — indexed point-reads, not live aggregation) ----
@@ -144,14 +181,18 @@ export async function analyzeCustomerProductCandidates(profile) {
 
   const cityWhere = city ? { city } : null;
   const seasonValues = season && SEASON_ALIASES[season] ? SEASON_ALIASES[season] : null;
+  // Computed here (not further down with dislikeFamilies below) specifically so the like-matched
+  // tier can use it — see topProductsByLikeMatch's own comment for why this tier exists.
+  const likeFamiliesForCandidates = textToPreferenceFamilies(likes);
 
-  const [cityTop, stateTop, countryTop, seasonTop] = await Promise.all([
+  const [cityTop, stateTop, countryTop, seasonTop, likeMatchTop] = await Promise.all([
     topProductsByCityLive(cityWhere, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("state", stateRegion, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("country", country, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("season", seasonValues, CANDIDATE_SHORTLIST_PER_TIER),
+    topProductsByLikeMatch(likeFamiliesForCandidates),
   ]);
-  const candidateNames = [...new Set([...cityTop, ...stateTop, ...countryTop, ...seasonTop])];
+  const candidateNames = [...new Set([...cityTop, ...stateTop, ...countryTop, ...seasonTop, ...likeMatchTop])];
   if (!candidateNames.length) return [];
 
   const [cityCounts, stateSummary, countrySummary, seasonSummary, classificationRows, cohort, products] = await Promise.all([
@@ -179,7 +220,7 @@ export async function analyzeCustomerProductCandidates(profile) {
   }
   const productByNormalizedTitle = new Map(products.map((p) => [p.normalizedTitle, p]));
 
-  const likeFamilies = textToPreferenceFamilies(likes);
+  const likeFamilies = likeFamiliesForCandidates;
   const dislikeFamilies = textToPreferenceFamilies(dislikes);
   // Fix (Aniq spec, sections 2/4) — a customer's free-text sensitivity/style signals now become a
   // real, deterministic pre-generation filter at the candidate-scoring stage itself, not just at

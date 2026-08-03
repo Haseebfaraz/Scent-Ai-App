@@ -1,8 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
-  validateCombinationShape, computeEvidenceScope, likeMatchStrength,
+  validateCombinationShape, computeEvidenceScope,
 } from "./recommendationEngine.server.js";
+import { likeMatchStrength } from "../utils/fragranceScoring.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
