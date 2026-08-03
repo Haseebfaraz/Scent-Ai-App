@@ -64,6 +64,15 @@ export function emptyProfile() {
     // describe the RECIPIENT, not necessarily the person chatting — the buyer's own name/email/city
     // are unaffected. Never asked for directly; only ever set when the customer volunteers it.
     giftRecipient: null,
+    // Fix (ask about dislikes/occasion before analysis) — an empty `dislikes` array or a null
+    // `occasion` is genuinely ambiguous: never asked yet, or asked and the real answer was "none"/
+    // "nothing specific". These two flags disambiguate that deterministically (same reason every
+    // other piece of conversation progress is tracked in the backend, not left to the model's own
+    // memory of what it's already asked) — set to true the moment each has been asked (or the
+    // answer was already known from earlier context), regardless of whether a real value came
+    // back.
+    dislikesAsked: false,
+    occasionAsked: false,
     strengthPreference: null,
     additionalPreferences: [],
     // Location verification is intentionally separate from the plain `city`/`country` fields —
@@ -149,11 +158,16 @@ export async function saveCustomerProfileFields(conversationId, fields) {
 // it were real. Season is intentionally NOT a required field here: weatherDirection is populated
 // automatically the moment the city is verified (see verify_customer_location), so there is never
 // a real gap to block on — requestedSeasonStyle, when present, only refines the direction further.
+// Fix (ask about dislikes/occasion before analysis) — dislikes/occasion having an EMPTY value never
+// blocks readiness (that's still true, per the spec quote above) — but not having ASKED about them
+// yet now does. These two are deliberately separate from the VALUE checks above.
 export function getMissingRequiredFields(profile) {
   const missing = [];
   if (!profile.city || !profile.locationVerified) missing.push("city");
   if (!profile.country) missing.push("country");
   if (!(profile.likes?.length > 0) && !profile.preferredStyle && !profile.inferredStyle) missing.push("likes or preferredStyle");
+  if (!profile.dislikesAsked) missing.push("dislikesAsked (ask about dislikes, even if the real answer is none)");
+  if (!profile.occasionAsked) missing.push("occasionAsked (ask about occasion, even if the real answer is just everyday)");
   return missing;
 }
 

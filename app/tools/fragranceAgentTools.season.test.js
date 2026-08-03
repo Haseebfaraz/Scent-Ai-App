@@ -129,6 +129,11 @@ describe("getMissingRequiredFields never blocks on season", () => {
     mockLosAngelesWeather(global.fetch);
     await executeFragranceTool("verify_customer_location", JSON.stringify({ cityText: "Los Angeles" }), ctx(conversationId));
     await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx(conversationId));
+    // dislikesAsked/occasionAsked are a separate, unrelated required check (Fix: ask about
+    // dislikes/occasion before analysis) — satisfied here so this test stays focused on what it's
+    // actually validating: that season is never one of the required fields.
+    await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "dislikesAsked", value: true }), ctx(conversationId));
+    await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "occasionAsked", value: true }), ctx(conversationId));
     const result = await executeFragranceTool("analyze_customer_product_candidates", "{}", ctx(conversationId));
     expect(result.modelContent).not.toMatch(/missing required fields/i);
   });

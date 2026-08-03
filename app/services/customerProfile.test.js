@@ -24,31 +24,61 @@ afterEach(async () => {
 });
 
 describe("getMissingRequiredFields / isProfileReadyForAnalysis", () => {
-  it("requires city, country, and likes-or-preferredStyle (season is never required — it's automatic)", () => {
-    expect(getMissingRequiredFields(emptyProfile())).toEqual(["city", "country", "likes or preferredStyle"]);
+  it("requires city, country, likes-or-preferredStyle, dislikesAsked, and occasionAsked (season is never required — it's automatic)", () => {
+    expect(getMissingRequiredFields(emptyProfile())).toEqual([
+      "city", "country", "likes or preferredStyle",
+      "dislikesAsked (ask about dislikes, even if the real answer is none)",
+      "occasionAsked (ask about occasion, even if the real answer is just everyday)",
+    ]);
     expect(isProfileReadyForAnalysis(emptyProfile())).toBe(false);
   });
 
   it("is satisfied once all required fields are present, with no requestedSeasonStyle at all", () => {
-    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", likes: ["Fruity"], locationVerified: true };
+    const profile = {
+      ...emptyProfile(), city: "Los Angeles", country: "United States", likes: ["Fruity"],
+      locationVerified: true, dislikesAsked: true, occasionAsked: true,
+    };
     expect(getMissingRequiredFields(profile)).toEqual([]);
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
   it("accepts preferredStyle in place of likes", () => {
-    const profile = { ...emptyProfile(), city: "Los Angeles", country: "United States", preferredStyle: "warm and woody", locationVerified: true };
+    const profile = {
+      ...emptyProfile(), city: "Los Angeles", country: "United States", preferredStyle: "warm and woody",
+      locationVerified: true, dislikesAsked: true, occasionAsked: true,
+    };
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
-  it("dislikes being empty never blocks readiness", () => {
-    const profile = { ...emptyProfile(), city: "A", country: "B", likes: ["Fruity"], dislikes: [], locationVerified: true };
+  it("dislikes being empty never blocks readiness, as long as dislikesAsked is true", () => {
+    const profile = {
+      ...emptyProfile(), city: "A", country: "B", likes: ["Fruity"], dislikes: [],
+      locationVerified: true, dislikesAsked: true, occasionAsked: true,
+    };
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
+  });
+
+  // Fix (ask about dislikes/occasion before analysis) — an empty dislikes/occasion value never
+  // blocked readiness before, and still doesn't — but not having ASKED yet now does, since an
+  // empty value is ambiguous between "never asked" and "asked, real answer was none".
+  it("blocks readiness until dislikesAsked and occasionAsked are both true, even with everything else present", () => {
+    const profile = {
+      ...emptyProfile(), city: "Los Angeles", country: "United States", likes: ["Fruity"], locationVerified: true,
+    };
+    expect(getMissingRequiredFields(profile)).toEqual([
+      "dislikesAsked (ask about dislikes, even if the real answer is none)",
+      "occasionAsked (ask about occasion, even if the real answer is just everyday)",
+    ]);
+    expect(isProfileReadyForAnalysis(profile)).toBe(false);
   });
 
   // Fix 8 — a city string alone (however plausible, e.g. a fictional "Vice City") must never
   // satisfy readiness; only a deterministically VERIFIED city can.
   it("a city that hasn't been verified still blocks readiness, even with everything else present", () => {
-    const profile = { ...emptyProfile(), city: "Vice City", country: "United States", likes: ["Fruity"], locationVerified: false };
+    const profile = {
+      ...emptyProfile(), city: "Vice City", country: "United States", likes: ["Fruity"], locationVerified: false,
+      dislikesAsked: true, occasionAsked: true,
+    };
     expect(getMissingRequiredFields(profile)).toEqual(["city"]);
     expect(isProfileReadyForAnalysis(profile)).toBe(false);
   });
