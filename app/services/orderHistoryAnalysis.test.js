@@ -19,7 +19,9 @@ describe("analyzeCustomerProductCandidates", () => {
   it("returns real, catalog-backed candidates for the acceptance-scenario profile", async () => {
     const candidates = await analyzeCustomerProductCandidates(ACCEPTANCE_PROFILE);
     expect(candidates.length).toBeGreaterThan(0);
-    expect(candidates.length).toBeLessThanOrEqual(10);
+    // Fix (candidate pool ignored likes) — raised from 10 to 15 now that a like-matched tier feeds
+    // into the same pool alongside the regional-popularity tiers (see MAX_CANDIDATES_RETURNED).
+    expect(candidates.length).toBeLessThanOrEqual(15);
     for (const c of candidates) {
       expect(typeof c.productName).toBe("string");
       expect(c.productName.length).toBeGreaterThan(0);
@@ -79,7 +81,24 @@ describe("analyzeCustomerProductCandidates", () => {
     }
   });
 
-  it("returns an empty array when even season is unrecognized (no real signal at all)", async () => {
+  it("returns an empty array when there is truly no signal at all — no region match, no likes", async () => {
+    const candidates = await analyzeCustomerProductCandidates({
+      city: "Nonexistent Fake City",
+      stateRegion: "Nowhere",
+      country: "Nonexistent Fake Country",
+      season: "NotARealSeason",
+      likes: [],
+      dislikes: [],
+    });
+    expect(candidates).toEqual([]);
+  });
+
+  // Fix (candidate pool ignored likes) — this used to return [] even with real likes stated,
+  // because likes only ever re-ranked an already region-built pool, never seeded it. Confirmed
+  // live: customers with completely different real likes got served the identical regionally-
+  // "popular" anchors. A real like should surface real candidates on its own, with zero regional
+  // signal of any kind.
+  it("finds real candidates from likes alone, even with zero region/season signal at all", async () => {
     const candidates = await analyzeCustomerProductCandidates({
       city: "Nonexistent Fake City",
       stateRegion: "Nowhere",
@@ -88,7 +107,14 @@ describe("analyzeCustomerProductCandidates", () => {
       likes: ["Fruity"],
       dislikes: [],
     });
-    expect(candidates).toEqual([]);
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const c of candidates) {
+      expect(c.sameCityOrders).toBe(0);
+      expect(c.sameStateOrders).toBe(0);
+      expect(c.sameCountryOrders).toBe(0);
+      expect(c.sameSeasonOrders).toBe(0);
+      expect(c.preferenceMatches).toContain("fruity");
+    }
   });
 
   it("completes well within the old ~44-60s live-aggregation time (ProductRegionSummary precompute)", async () => {
