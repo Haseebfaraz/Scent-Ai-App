@@ -63,6 +63,37 @@ async function getConversation(conversationId) {
 // draft-pitch checks, position-distribution checks, etc.) were deliberately discarded here to make
 // room for a new conversation design — see the "Backup checkpoint before rewriting the chat flow
 // from scratch" commit for the full previous version if anything needs to be recovered from it.
+
+// Fix (bare-greeting still triggers an early fragrance bridge) — telling the model "don't mention
+// fragrance yet" inside a long prompt that ALSO spends most of its length discussing fragrance in
+// detail was confirmed live, twice in a row on the identical pattern, to not reliably hold: a bare
+// "great, yours?" or "testing" reply still got answered with a stacked "how's your day / anything
+// special you're looking for in a fragrance today?" A prompt instruction is advisory, not
+// enforced — this is a real, deterministic, code-level gate instead: for the first couple of
+// exchanges, if the customer hasn't given genuine concrete context yet, the fragrance-bridging
+// instructions are structurally left OUT of the prompt for that turn entirely, rather than
+// included-but-forbidden. The model can't reach for an instruction it was never given. Deliberately
+// simple keyword matching (same pattern as textToPreferenceFamilies/deriveRefinementAdjustments
+// elsewhere in this codebase) — false negatives just mean one more routine question gets asked
+// first, which is the safe default anyway; false positives just mean the gate lifts slightly early,
+// which is fine per the customer's own explicit request to skip ahead when they've led with real
+// content.
+const CONCRETE_CONTEXT_PATTERN = new RegExp(
+  "\\b(" +
+  [
+    "perfume", "fragrance", "cologne", "scent", "smell",
+    "gym", "workout", "work", "office", "job", "meeting", "school", "university", "college", "class",
+    "wedding", "birthday", "anniversary", "date", "party", "event", "vacation", "trip", "holiday",
+    "interview", "presentation", "gift", "present",
+    "husband", "wife", "boyfriend", "girlfriend", "fiance", "fiancee",
+  ].join("|") +
+  ")\\b",
+  "i",
+);
+export function hasConcreteContext(text) {
+  return typeof text === "string" && CONCRETE_CONTEXT_PATTERN.test(text);
+}
+
 async function buildSystemPrompt(history, conversationId, knownCustomerEmail, knownCustomerName) {
   // The backend, not the model's own memory, tracks which structured profile fields are already
   // saved — Phase 13's fix for the old design depending on the model remembering "which turn it's
@@ -85,6 +116,33 @@ async function buildSystemPrompt(history, conversationId, knownCustomerEmail, kn
   }
 
   const profileStatusLine = `\nProfile fields already saved (from save_customer_profile_field — do not ask again for these): ${JSON.stringify(profile)}\nStill missing before analysis can run: ${missingFields.length ? missingFields.join(", ") : "nothing — ready to analyze."}\n`;
+
+  // Fix (bare-greeting still triggers an early fragrance bridge) — see CONCRETE_CONTEXT_PATTERN's
+  // own comment above. For the first couple of exchanges, if nothing the customer has said yet
+  // contains real concrete context, hand back a deliberately SHORT prompt that never mentions
+  // bridging into scent at all, instead of the full prompt with a "don't do this yet" instruction
+  // buried inside it. Lifts immediately the moment the customer says anything with real signal
+  // (an activity, occasion, gift, or fragrance/shopping intent itself) — never blocks a customer
+  // who's already leading with what they need.
+  // Confirmed live the threshold matters: when name is still unknown, that reply "spends" one
+  // exchange just getting the name, so 3 non-fragrance exchanges are needed (name, day, routine)
+  // before a bridge is appropriate — 2 was one turn too few and released the lock exactly on the
+  // customer's SECOND reply, the precise turn the reported bug happened on.
+  const userMessages = history.filter((m) => m.role === "user");
+  const latestUserText = userMessages.length ? userMessages[userMessages.length - 1].content : "";
+  const minExchangesBeforeBridge = confirmedCustomerName ? 2 : 3;
+  const earlyPhaseLocked = userMessages.length < minExchangesBeforeBridge && !hasConcreteContext(latestUserText);
+
+  if (earlyPhaseLocked) {
+    return `You are Dua Scent Agent, a high-end, empathetic, and knowledgeable fragrance expert — warm, observant, a little playful, genuinely curious about each customer. (You are having a text conversation, not standing anywhere physical — never tell the customer you're located somewhere or that they've walked into a shop.)
+${profileStatusLine}
+You are only a few messages into this conversation, and nothing the customer has said yet gives you real, concrete context to work with (no activity, occasion, gift, or fragrance mention). Your ONLY job in this reply is basic warm rapport — nothing else:
+${confirmedCustomerName ? `Their name is already known: ${confirmedCustomerName}. Do NOT ask for their name again.` : `Their name isn't known yet. If this is your very first message to them, ask for their name AS ITS OWN QUESTION and NOTHING ELSE (e.g. "Hey there! Hope you're having a good day. What should I call you?") — do not also ask how their day's going in that same first message. The moment they answer, CALL save_customer_profile_field("name", ...) immediately.`}
+${confirmedCustomerEmail ? "" : `Their email isn't available yet either — do not ask for it or block on it, it resolves from their account automatically.`}
+Once you have their name, ask ONE simple, warm question about their day or routine (e.g. "How's your day going so far?" or, once they've answered that, "What's on your schedule today?") — react briefly and warmly to whatever they say first if they said anything worth reacting to.
+Exactly ONE question per message, never two stacked together.
+Do NOT mention fragrance, scent, perfume, cologne, vibe, or ask what they're looking for today — not even briefly, not even as a passing remark — no matter what they just said. That comes later, once you actually have something real to bridge from. This restriction is temporary and lifts on its own in a later message once real context exists.`;
+  }
 
   return `You are Dua Scent Agent, a high-end, empathetic, and knowledgeable fragrance expert — the voice of a real, experienced perfumer with the warmth and conversational flair of a passionate expert at a high-end counter — observant, a little playful, genuinely curious about each customer. You help customers discover which real DUA fragrances suit them, and — when a genuinely new combination of real DUA products would suit them even better — recommend that too, always backed by real historical order data and real product notes, never invented. (That "counter" description is about your tone and expertise only — you are having a text conversation, not standing anywhere physical, so never actually tell the customer you're located somewhere or that they've walked into a shop.)
 ${profileStatusLine}
