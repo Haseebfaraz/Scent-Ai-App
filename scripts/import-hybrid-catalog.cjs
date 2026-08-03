@@ -28,6 +28,7 @@ const crypto = require('crypto');
 const path = require('path');
 const XLSX = require('xlsx');
 const { PrismaClient, Prisma } = require('@prisma/client');
+const { fixNoteEncoding } = require('./noteEncodingFixes.cjs');
 
 const prisma = new PrismaClient();
 const BATCH_SIZE = 500;
@@ -74,7 +75,12 @@ async function importBaseCatalog(workbook, normalizeProductName) {
     }
 
     const normalizedTitle = normalizeProductName(title);
-    const notesRaw = (row.Notes || '').trim() || null;
+    // Fix (note-encoding corruption) — the source sheet itself already contains the "ï¿½" mojibake
+    // artifact for every accented letter/apostrophe/trademark symbol (see noteEncodingFixes.cjs for
+    // the full root-cause explanation) — corrected here too so re-running this import against the
+    // same, still-corrupted source file never reintroduces it into a row scripts/fix-note-
+    // encoding.cjs already cleaned up.
+    const notesRaw = fixNoteEncoding((row.Notes || '').trim()) || null;
     const notesJson = notesRaw ? notesRaw.split(',').map((n) => n.trim()).filter(Boolean) : [];
 
     validRows.push({
