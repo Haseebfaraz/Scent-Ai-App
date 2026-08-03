@@ -10,7 +10,7 @@ import { executeFragranceTool, __deriveRefinementAdjustmentsForTesting as derive
 import { saveRecommendation } from "./recommendationConfirmation.server.js";
 import { resolveLegacyPreviewShortCircuit } from "./legacyPreviewRecovery.server.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
-import { saveCustomerProfileFields } from "./customerProfile.server.js";
+import { saveCustomerProfileFields, getCustomerProfile } from "./customerProfile.server.js";
 import prisma from "../db.server.js";
 
 function freshConversationId(label) {
@@ -146,6 +146,33 @@ describe("deriveRefinementAdjustments — direction fix (real bug: 'less X' matc
   });
 });
 
+// Fix (refinement feedback never updated the stored profile) — addLikes/addDislikes above are
+// FAMILY keys used only for the one-off regeneration bias; addLikeTerms/addDislikeTerms are what
+// actually get persisted to the customer's real likes/dislikes fields, same literal-note-preferring
+// shape save_customer_profile_field already uses elsewhere.
+describe("deriveRefinementAdjustments — addLikeTerms/addDislikeTerms (what gets persisted to the profile)", () => {
+  it("persists the literal note the customer named, not the family label, when one was given", () => {
+    const result = deriveRefinementAdjustments("dont want sandalwood");
+    expect(result.addDislikeTerms).toContain("sandalwood");
+    expect(result.addDislikeTerms).not.toContain("woody");
+  });
+
+  it("falls back to the matched family label when the clause is a pure style word with no specific note", () => {
+    const result = deriveRefinementAdjustments("less woody");
+    expect(result.addDislikeTerms.some((t) => t.toLowerCase().includes("wood"))).toBe(true);
+  });
+
+  it("keeps each named literal note separate across a multi-item list", () => {
+    const result = deriveRefinementAdjustments("remove patchouli, vanilla, sandalwood");
+    expect(result.addDislikeTerms).toEqual(expect.arrayContaining(["patchouli", "sandalwood"]));
+  });
+
+  it("a stated exclusion wins over an incidental positive mention of the same term elsewhere in the message", () => {
+    const result = deriveRefinementAdjustments("less woody, more fruity");
+    expect(result.addLikeTerms.some((t) => t.toLowerCase().includes("wood"))).toBe(false);
+  });
+});
+
 describe("refine_combination_recommendations — no-op bug (real bug: refinement outside the old 5-keyword list changed nothing)", () => {
   it("actually carries a family the old keyword list didn't recognize into the regenerated recommendation's profile", async () => {
     const conversationId = freshConversationId("refine-dislike");
@@ -174,6 +201,60 @@ describe("refine_combination_recommendations — no-op bug (real bug: refinement
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
       expect(record.customerProfileJson.dislikes).toContain("Musk");
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+});
+
+// Fix (refinement feedback never updated the stored profile) — real bug: a customer's explicit
+// refinement request ("I don't want sandalwood") is plainly a real dislike, but it only ever biased
+// this one regeneration — the customer's actual stored likes/dislikes (what the admin dashboard
+// shows, and what every LATER conversation/regeneration reads) never changed at all.
+describe("refine_combination_recommendations — persists the refinement into the stored profile", () => {
+  it("adds the literally-named note to the customer's real dislikes field, not just this one regeneration", async () => {
+    const conversationId = freshConversationId("refine-persist");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await verifyLosAngelesWithoutNetwork(conversationId);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "dislikes", value: ["vanilla"] }), ctx);
+      await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
+
+      const result = await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "dont want sandalwood" }),
+        ctx,
+      );
+      expect(result.modelContent).not.toMatch(/^Error/);
+
+      const profile = await getCustomerProfile(conversationId);
+      // The customer's ORIGINAL stated dislike survives — this is additive, never a replacement.
+      expect(profile.dislikes).toContain("vanilla");
+      // And the refinement's own literal note is now a real, persisted part of the profile.
+      expect(profile.dislikes).toContain("sandalwood");
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+
+  it("never touches the stored profile when the feedback carries no recognizable like/dislike at all", async () => {
+    const conversationId = freshConversationId("refine-persist-noop");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await verifyLosAngelesWithoutNetwork(conversationId);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity"] }), ctx);
+      await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
+
+      await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "give me a Hybrid only" }),
+        ctx,
+      );
+
+      const profile = await getCustomerProfile(conversationId);
+      expect(profile.likes).toEqual(["Fruity"]);
+      expect(profile.dislikes).toEqual([]);
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
