@@ -48,6 +48,18 @@ const VOCABULARY_CORRECTED_FIELDS = new Set(["likes", "dislikes", "preferredStyl
 // literal fact they stated.
 const NO_REAL_STYLE_PATTERN = /you should know|you decide|surprise me|not sure|no preference|i ?don'?t know|\bidk\b|whatever you (think|want|pick)/i;
 const NO_REAL_VALUE_PATTERN = /^(na|n\/a|none|nothing|no)$/i;
+// Fix (mood/filler reply saved as a real name) — the prompt already says "if it doesn't look like a
+// real name, gently clarify instead of guessing," but that's advisory only — confirmed live, a
+// customer's reply to "What should I call you?" ("not having a great day") got saved verbatim as
+// their name. A real backend gate instead: reject anything that reads like a mood/sentence rather
+// than a name, same pattern as NO_REAL_STYLE_PATTERN above.
+const IMPLAUSIBLE_NAME_PATTERN = /\b(day|today|feeling|doing|tired|busy|great|good|bad|fine|ok|okay|nothing|well|not|having|going|alright|stressed|happy|sad|meh)\b/i;
+function isImplausibleName(text) {
+  const trimmed = String(text).trim();
+  if (!trimmed) return true;
+  if (trimmed.split(/\s+/).length > 4) return true;
+  return IMPLAUSIBLE_NAME_PATTERN.test(trimmed);
+}
 function inferStyleFromProfile(profile) {
   const parts = [];
   const likeFamilies = textToPreferenceFamilies(profile.likes || []);
@@ -536,6 +548,9 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         }
         if (parsed.data.field === "email" && context.customerEmail) {
           return ok(`Email is already known and trusted — no need to save or ask again.`);
+        }
+        if (parsed.data.field === "name" && typeof parsed.data.value === "string" && isImplausibleName(parsed.data.value)) {
+          return fail(`"${parsed.data.value}" doesn't read like a real name — do not save it. They likely answered a different question, or their reply got misread as an answer to "what should I call you?" Gently ask for their name again instead of guessing.`);
         }
 
         // Fix (preference vocabulary normalization) — a controlled, whole-word misspelling

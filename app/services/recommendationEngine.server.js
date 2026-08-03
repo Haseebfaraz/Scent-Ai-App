@@ -529,6 +529,7 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   );
 
   let preferenceScore = 0;
+  let totalLiteralMatches = 0;
   const matchedPreferenceFamilies = new Set();
   for (const p of comboProducts) {
     const matches = matchedLikes(p.notes, likeFamilies);
@@ -541,7 +542,9 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     // (Pear, Blackcurrant) scored identically to one containing what the customer actually named.
     // This tie-breaker nudges combos toward the customer's literal words without ever requiring them
     // — a combo with zero literal matches can still win on every other axis, exactly as before.
-    preferenceScore += LITERAL_MATCH_BOOST * SCORE_WEIGHTS.matchesLike * literalNoteMatchCount(p.notes, literalLikeTerms);
+    const literalMatches = literalNoteMatchCount(p.notes, literalLikeTerms);
+    totalLiteralMatches += literalMatches;
+    preferenceScore += LITERAL_MATCH_BOOST * SCORE_WEIGHTS.matchesLike * literalMatches;
   }
 
   // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a
@@ -553,6 +556,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // component must actually carry one of those families, or this combination is rejected outright —
   // never silently substituted and described as matching something it doesn't.
   if (likeFamilies.length > 0 && matchedPreferenceFamilies.size === 0) return null;
+  // Fix (literal note terms lost to family-level matching, round 2) — matching the broader family
+  // was enough to pass the gate above even when a customer named specific real notes and the
+  // combination contains literally none of them, just a same-family stand-in. Confirmed live: a
+  // customer who named Apple/Strawberry/Peach got a confirmed combination containing NONE of them —
+  // it won purely on stronger regional evidence, despite every genuinely fruity alternative scoring
+  // far higher on preferenceScore. When the customer named actual notes (not just style words like
+  // "fruity"), a combination must contain AT LEAST ONE of them — same kind of hard requirement as
+  // the family-level gate above, just tightened one notch further for a customer specific enough to
+  // name real notes. Never triggers for a customer who only gave style words (literalLikeTerms empty).
+  if (literalLikeTerms.length > 0 && totalLiteralMatches === 0) return null;
 
   const seasonalScore = risks.some((r) => r.includes("summer heat")) ? 0 : SCORE_WEIGHTS.sameSeason;
 

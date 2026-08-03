@@ -4,6 +4,7 @@ import {
   validateCombinationShape, computeEvidenceScope,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength } from "../utils/fragranceScoring.js";
+import { literalNoteTermsFromLikes, literalNoteMatchCount } from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
 
@@ -199,6 +200,40 @@ describe("generateNewProductCombinations (real data)", () => {
       expect(combo.customerFacingName).toBeTruthy();
       expect(combo.customerFacingDescription).toBeTruthy();
     }
+  });
+
+  // Fix (literal note terms lost to family-level matching, round 2) — reproduces the exact real bug:
+  // a Karachi customer who named Apple/Strawberry/Peach got a CONFIRMED (auto-selected, top-ranked)
+  // combination containing none of them — it won purely on regional evidence despite every genuinely
+  // fruity alternative scoring far higher on preferenceScore. Every returned combination must now
+  // contain at least one of the customer's literally named notes; a combo with zero is rejected
+  // outright rather than merely out-scored.
+  it("only ever returns combinations containing at least one of the customer's literally named notes", async () => {
+    const profile = {
+      city: "Karachi", country: "Pakistan", season: "Summer",
+      likes: ["Fruity", "Fresh", "Apple", "Strawberry", "Peach"], dislikes: ["Amber", "Sandalwood"],
+      occasion: "office", locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    const literalTerms = literalNoteTermsFromLikes(profile.likes);
+    expect(combinations.length).toBeGreaterThan(0);
+    for (const combo of combinations) {
+      const allNotes = combo.internalProducts.flatMap((p) => p.notes || []);
+      expect(literalNoteMatchCount(allNotes, literalTerms)).toBeGreaterThan(0);
+    }
+  });
+
+  // The requirement above must never fire for a customer who only gave style words (no literal
+  // terms to require) — unaffected, exactly as before this fix.
+  it("never restricts results when the customer only gave style words, not specific note names", async () => {
+    const profile = {
+      city: "Los Angeles", stateRegion: "California", country: "United States", season: "Summer",
+      likes: ["Fruity", "Sweet"], dislikes: [], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(combinations.length).toBeGreaterThan(0);
   });
 });
 
