@@ -14,6 +14,7 @@ import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLe
 import {
   textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter,
   interpretLifestyleContext, countPreferredDirectionMatches,
+  literalNoteTermsFromLikes, literalNoteMatchCount,
 } from "../utils/fragranceCompatibility.js";
 
 // Matches the MIN_SAMPLE_SIZE convention already established in app/routes/chat.jsx's
@@ -73,7 +74,14 @@ async function cityCountsByProduct(cityWhere, candidateNames) {
 // already used to weight preferenceScore in recommendationEngine.server.js) — merged into the same
 // candidateNames pool below, so a fruity/fresh product gets a real shot at becoming an anchor even
 // with zero regional order history, instead of being excluded before relevanceScore ever runs.
-async function topProductsByLikeMatch(likeFamilies) {
+// Fix (literal note terms lost to family-level matching) — `strength` alone treats a product built
+// from Apple/Pear/Blackcurrant as equally "fruity" as one containing the customer's actual named
+// notes (e.g. real Peach). `literalTerms` (from literalNoteTermsFromLikes) breaks that tie: each
+// literal match adds a fixed boost, so a genuinely-named-note product is never crowded out of the
+// LIKE_MATCH_SHORTLIST by an equally-dominant but differently-fruited one.
+const LITERAL_MATCH_BOOST = 0.5;
+
+async function topProductsByLikeMatch(likeFamilies, literalTerms = []) {
   if (!likeFamilies.length) return [];
   const allProducts = await prisma.fragranceProduct.findMany({
     select: { normalizedTitle: true, notesJson: true },
@@ -82,10 +90,11 @@ async function topProductsByLikeMatch(likeFamilies) {
     .map((p) => {
       const notes = Array.isArray(p.notesJson) ? p.notesJson : [];
       const strength = Math.max(0, ...likeFamilies.map((family) => likeMatchStrength(notes, family)));
-      return { normalizedTitle: p.normalizedTitle, strength };
+      const rank = strength + LITERAL_MATCH_BOOST * literalNoteMatchCount(notes, literalTerms);
+      return { normalizedTitle: p.normalizedTitle, strength, rank };
     })
     .filter((p) => p.strength > 0)
-    .sort((a, b) => b.strength - a.strength)
+    .sort((a, b) => b.rank - a.rank)
     .slice(0, LIKE_MATCH_SHORTLIST)
     .map((p) => p.normalizedTitle);
 }
@@ -184,13 +193,14 @@ export async function analyzeCustomerProductCandidates(profile) {
   // Computed here (not further down with dislikeFamilies below) specifically so the like-matched
   // tier can use it — see topProductsByLikeMatch's own comment for why this tier exists.
   const likeFamiliesForCandidates = textToPreferenceFamilies(likes);
+  const literalLikeTerms = literalNoteTermsFromLikes(likes);
 
   const [cityTop, stateTop, countryTop, seasonTop, likeMatchTop] = await Promise.all([
     topProductsByCityLive(cityWhere, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("state", stateRegion, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("country", country, CANDIDATE_SHORTLIST_PER_TIER),
     topProductsFromSummary("season", seasonValues, CANDIDATE_SHORTLIST_PER_TIER),
-    topProductsByLikeMatch(likeFamiliesForCandidates),
+    topProductsByLikeMatch(likeFamiliesForCandidates, literalLikeTerms),
   ]);
   const candidateNames = [...new Set([...cityTop, ...stateTop, ...countryTop, ...seasonTop, ...likeMatchTop])];
   if (!candidateNames.length) return [];
@@ -261,6 +271,11 @@ export async function analyzeCustomerProductCandidates(profile) {
     if (sameStateOrders > 0) relevanceScore += SCORE_WEIGHTS.sameStateRegionOrClimate;
     if (sameSeasonOrders > 0) relevanceScore += SCORE_WEIGHTS.sameSeason;
     relevanceScore += preferenceMatches.length * SCORE_WEIGHTS.matchesLike;
+    // Fix (literal note terms lost to family-level matching) — same tie-breaker as
+    // topProductsByLikeMatch above, applied to the final ranking so a candidate genuinely containing
+    // the customer's named notes (not just the broader family) is more likely to make the top
+    // MAX_CANDIDATES_RETURNED / become an anchor, not just get into the shortlist.
+    relevanceScore += literalNoteMatchCount(notes, literalLikeTerms) * SCORE_WEIGHTS.matchesLike * LITERAL_MATCH_BOOST;
     relevanceScore += dislikeConflict.matchedFamilies.length * SCORE_WEIGHTS.conflictsDislike;
     if (repeatPurchaseCustomers > 0) relevanceScore += SCORE_WEIGHTS.repeatPurchaseBySimilarCustomer;
     if (distinctSimilarCustomers >= POPULARITY_THRESHOLD) relevanceScore += SCORE_WEIGHTS.popularAmongSimilarCustomers;

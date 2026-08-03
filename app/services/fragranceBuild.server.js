@@ -7,7 +7,7 @@
 import prisma from "../db.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
 import { assignNotePositions, classifyNote } from "../utils/notePositionMapping.js";
-import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { textToPreferenceFamilies, literalNoteTermsFromLikes } from "../utils/fragranceCompatibility.js";
 
 const BOTTLE_ML = 34;
 const FALLBACK_PRICE_PER_5ML = 20;
@@ -31,7 +31,8 @@ export function computeNotePositionBuckets(internalProducts, excludedNotes = [],
   const excludedLower = new Set((excludedNotes || []).map((n) => String(n).toLowerCase()));
   const allNotes = (internalProducts || []).flatMap((p) => p.notes || []);
   const likeFamilies = textToPreferenceFamilies(customerLikes);
-  const buckets = assignNotePositions(allNotes, likeFamilies);
+  const literalTerms = literalNoteTermsFromLikes(customerLikes);
+  const buckets = assignNotePositions(allNotes, likeFamilies, literalTerms);
   return {
     top: buckets.top.filter((n) => !excludedLower.has(n.toLowerCase())),
     middle: buckets.middle.filter((n) => !excludedLower.has(n.toLowerCase())),

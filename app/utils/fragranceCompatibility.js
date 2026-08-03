@@ -113,6 +113,42 @@ export function textToPreferenceFamilies(strings) {
   return [...families];
 }
 
+// Fix (literal note terms lost to family-level matching) — a customer who names specific notes
+// ("Apple", "Strawberry", "Peach") has all three collapsed into one `fruity` family tag by
+// textToPreferenceFamilies above, so a product matching via unrelated fruity notes (e.g. Pear,
+// Blackcurrant) scores identically to one containing what the customer actually named. These are
+// the family keywords that are themselves just a generic style/descriptor word, not a specific real
+// note — excluded here so "Fruity"/"Fresh" don't count as literal note terms, only "Apple" etc do.
+const FAMILY_DESCRIPTOR_WORDS = new Set([
+  "fruity", "sweet", "fresh", "spicy", "spice", "strong", "heavy", "woody", "musk", "musky", "powdery",
+]);
+
+// Extracts the specific real-note keyword(s) each liked string actually matched (skipping pure
+// descriptor words), so a caller can prefer/boost products that genuinely contain the customer's
+// named notes over ones that only share the broader family.
+export function literalNoteTermsFromLikes(strings) {
+  const terms = new Set();
+  for (const s of strings || []) {
+    if (!s) continue;
+    const lower = String(s).toLowerCase();
+    for (const keywords of Object.values(PREFERENCE_FAMILIES)) {
+      for (const kw of keywords) {
+        if (!FAMILY_DESCRIPTOR_WORDS.has(kw) && lower.includes(kw)) terms.add(kw);
+      }
+    }
+  }
+  return [...terms];
+}
+
+// How many of a product's real notes literally contain one of the customer's named terms — a
+// tie-breaker on top of family-level matching, never a replacement for it (a product still needs a
+// real, existing catalog match; this only decides which of several family-matching products wins).
+export function literalNoteMatchCount(notes, literalTerms) {
+  if (!literalTerms?.length || !notes?.length) return 0;
+  const noteText = notes.join(" | ").toLowerCase();
+  return literalTerms.filter((term) => noteText.includes(term)).length;
+}
+
 // Phase 6 "note compatibility guidance" — each pair is a PREFERENCE_FAMILIES or
 // COMPATIBILITY_TAGS key. The spec's "Gourmand + vanilla" rule has no separate "gourmand" family
 // defined anywhere in Phase 3 — DUA's gourmand direction is exactly the `sweet` family's own note

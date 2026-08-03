@@ -32,6 +32,8 @@ import {
   passesIntensityFilter,
   countPreferredDirectionMatches,
   countAvoidedDirectionMatches,
+  literalNoteTermsFromLikes,
+  literalNoteMatchCount,
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, likeMatchStrength } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
@@ -96,6 +98,11 @@ function noteOverlapRatio(notesA, notesB) {
   return overlap / Math.min(setA.size, setB.size);
 }
 const NEAR_DUPLICATE_OVERLAP_RATIO = 0.5;
+// Fix (literal note terms lost to family-level matching) — same tie-breaker weight used in
+// orderHistoryAnalysis.server.js's candidate ranking, kept in sync so a product that wins the
+// candidate pool for containing a customer's literal named note doesn't lose that edge once it's
+// scored again here as part of a full combination.
+const LITERAL_MATCH_BOOST = 0.5;
 
 // Fix 7 (Aniq spec) — a plain top-N slice let the same 1-2 anchor products dominate an entire
 // batch (confirmed against real production data: 8 "different" recommendations sharing one
@@ -498,6 +505,7 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
 
   const { season, likes = [], dislikes = [] } = profile || {};
   const likeFamilies = textToPreferenceFamilies(likes);
+  const literalLikeTerms = literalNoteTermsFromLikes(likes);
   const dislikeFamilies = textToPreferenceFamilies(dislikes);
 
   // A single high-severity conflicting component disqualifies the whole combination.
@@ -528,6 +536,12 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
       matchedPreferenceFamilies.add(family);
       preferenceScore += SCORE_WEIGHTS.matchesLike * Math.max(0.2, likeMatchStrength(p.notes, family));
     });
+    // Fix (literal note terms lost to family-level matching) — a stated like of "Apple, Strawberry,
+    // Peach" collapses to one `fruity` family above, so a combo built from unrelated fruity notes
+    // (Pear, Blackcurrant) scored identically to one containing what the customer actually named.
+    // This tie-breaker nudges combos toward the customer's literal words without ever requiring them
+    // — a combo with zero literal matches can still win on every other axis, exactly as before.
+    preferenceScore += LITERAL_MATCH_BOOST * SCORE_WEIGHTS.matchesLike * literalNoteMatchCount(p.notes, literalLikeTerms);
   }
 
   // Fix (preference enforcement) — a stated like used to only ever be a scoring bonus, never a

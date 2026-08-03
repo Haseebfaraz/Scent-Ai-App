@@ -60,4 +60,16 @@ describe("assignNotePositions", () => {
     const withLikes = assignNotePositions(notes, ["fruity"]);
     expect(withLikes.middle).toContain("Apple");
   });
+
+  // Fix (literal note terms lost to family-level matching) — among several notes that all share
+  // the same liked family, the customer's literally-named one ("Peach") used to be just as likely
+  // to lose its slot as any other same-family note ("Mango", "Pear") — arrival order decided.
+  it("prioritizes a customer's literal named note over other same-family notes competing for the cap", () => {
+    const notes = ["Mango", "Pear", "Blackcurrant", "Guava", "Apricot", "Peach", "Lily of the Valley"];
+    const familyOnly = assignNotePositions(notes, ["fruity"]);
+    expect(familyOnly.middle).not.toContain("Peach");
+
+    const withLiteral = assignNotePositions(notes, ["fruity"], ["peach"]);
+    expect(withLiteral.middle).toContain("Peach");
+  });
 });
