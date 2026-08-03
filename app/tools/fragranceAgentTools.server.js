@@ -862,10 +862,19 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           await saveCustomerProfileFields(conversationId, { likes: updatedLikes, dislikes: updatedDislikes });
         }
         const adjustedProfile = { ...queriedProfile, likes: updatedLikes, dislikes: updatedDislikes };
+        // Fix (refinement "remove X" didn't actually remove X) — a customer's general stated
+        // dislikes stay a soft signal (one incidental trace note never disqualifies a product,
+        // per spec) — but confirmed live, that softness let a single buried "Sandalwood" note
+        // survive a refinement explicitly asking to remove it, and the same combo won again
+        // unchanged. The family(ies) named in THIS refinement turn specifically are hard-excluded
+        // from every anchor/support candidate for this regeneration — a stronger, more immediate
+        // guarantee than the general dislike system, scoped only to what was just asked to remove.
+        const hardExcludeFamilies = textToPreferenceFamilies(adjustments.addDislikeTerms);
         const combinations = await generateNewProductCombinations({
           profile: adjustedProfile,
           candidateProducts: scratch.candidateProducts,
           allowedTypes: adjustments.allowedTypes,
+          hardExcludeFamilies,
         });
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),

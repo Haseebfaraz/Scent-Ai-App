@@ -88,6 +88,21 @@ function familiesOf(notes) {
   return detectFamilies(notes, ALL_FAMILIES);
 }
 
+// Fix (refinement "remove X" didn't actually remove X) — a customer's stated profile dislike is
+// deliberately a SOFT signal (spec: "don't reject a product for one minor supporting note unless
+// the conflict is substantial" — classifyDislikeConflict's per-component severity system, untouched
+// by this). Confirmed live: that softness let a single incidental "Sandalwood" trace, buried deep in
+// a shared support component, survive a refinement asking to remove it — the same two top-ranked
+// combos won again, unchanged. A refinement's OWN freshly-named exclusion is a stronger, more
+// immediate signal ("get rid of this, now, for this result") than a general profile dislike, so it
+// hard-excludes ANY product containing so much as a trace of the family — scoped ONLY to the
+// family(ies) named in THIS refinement turn (hardExcludeFamilies), never the customer's whole
+// dislike history, which keeps the existing softer behavior exactly as before.
+export function hasHardExcludedFamily(notes, hardExcludeFamilies) {
+  if (!hardExcludeFamilies?.length) return false;
+  return detectFamilies(notes, PREFERENCE_FAMILIES).some((f) => hardExcludeFamilies.includes(f));
+}
+
 // Fraction of the SMALLER note list shared between two products. Two genuinely different products
 // that happen to both be, say, fruity+vanilla typically share a handful of notes; two entries from
 // the same product line ("Poseidon's Elixir 2.0"/"16A"/"13N", "Princeless Princess"/"Hey Princeless
@@ -450,7 +465,7 @@ function isEligibleCombinationComponent(product, finishedCombinationTitles) {
 // siblings ("Poseidon's Elixir 2.0"/"16A"/"13N") — which share the same family and thus never any
 // compatible PAIR — flood the shortlist and crowd out genuinely different, complementary products.
 // Same-family siblings fail the compatibleCount>0 gate here and are correctly excluded.
-function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent) {
+function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent, hardExcludeFamilies = []) {
   const anchorFamilies = familiesOf(anchor.orderHistoryNotes);
   const anchorNotes = new Set((anchor.orderHistoryNotes || []).map((n) => String(n).toLowerCase()));
 
@@ -461,6 +476,9 @@ function buildSupportShortlistForAnchor(anchor, allProducts, finishedCombination
     // Fix (Aniq spec) — a highly sensitive customer never sees an intense product enter the
     // support shortlist at all, not just at final combination scoring.
     if (!passesIntensityFilter(product.notesJson, preferenceIntent)) continue;
+    // Fix (refinement "remove X" didn't actually remove X) — see hasHardExcludedFamily's own
+    // comment; never even offered as a support candidate for this pass.
+    if (hasHardExcludedFamily(product.notesJson, hardExcludeFamilies)) continue;
     const families = familiesOf(product.notesJson);
     const compatibleCount = anchorFamilies.filter((af) => families.some((f) => pairIsCompatible(af, f))).length;
     if (compatibleCount === 0) continue;
@@ -963,9 +981,9 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
 // completely absent from the normal pass, instead of duplicating the anchor/type/support-combo
 // triple loop a second time.
 function generateCombosForAnchor(anchor, ctx) {
-  const { allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile, allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords, existingComponentKeys, seenComponentKeys } = ctx;
+  const { allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile, allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords, existingComponentKeys, seenComponentKeys, hardExcludeFamilies } = ctx;
   const proposals = [];
-  const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent);
+  const shortlist = buildSupportShortlistForAnchor(anchor, allProducts, finishedCombinationTitles, preferenceIntent, hardExcludeFamilies);
   if (!shortlist.length) return proposals;
 
   for (const type of allowedTypes) {
@@ -1012,7 +1030,7 @@ function generateCombosForAnchor(anchor, ctx) {
 // Bounded to a small number of real products per missing term; this is a targeted top-up, not a
 // full catalog re-scan.
 const FALLBACK_ANCHORS_PER_MISSING_TERM = 3;
-export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts }) {
+export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts, hardExcludeFamilies = [] }) {
   const byNormalizedTitle = new Map((candidateProducts || []).map((c) => [c.normalizedProductName, c]));
   const seen = new Set();
   const anchors = [];
@@ -1023,6 +1041,7 @@ export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts,
       if (seen.has(product.normalizedTitle)) continue;
       if (!isEligibleCombinationComponent(product, finishedCombinationTitles)) continue;
       if (!passesIntensityFilter(product.notesJson, preferenceIntent)) continue;
+      if (hasHardExcludedFamily(product.notesJson, hardExcludeFamilies)) continue;
       if (matchedLiteralTerms(product.notesJson, [term]).length === 0) continue;
 
       seen.add(product.normalizedTitle);
@@ -1049,8 +1068,12 @@ export function buildFallbackAnchorsForMissingTerms(missingTerms, { allProducts,
  * @param {Array} args.candidateProducts - ProductCandidate[] from analyzeCustomerProductCandidates.
  * @param {number} [args.maximumResults]
  * @param {string[]} [args.allowedTypes] - subset of ["HYBRID","TRIBRID","QUADBRID"].
+ * @param {string[]} [args.hardExcludeFamilies] - PREFERENCE_FAMILIES keys to hard-exclude from every
+ *   anchor and support candidate this call — for a refinement's own freshly-named "remove X" request
+ *   only (see hasHardExcludedFamily's comment), never the customer's general stated dislikes, which
+ *   keep the existing softer per-component severity treatment.
  */
-export async function generateNewProductCombinations({ profile, candidateProducts, maximumResults = DEFAULT_MAX_RESULTS, allowedTypes = ALL_TYPES }) {
+export async function generateNewProductCombinations({ profile, candidateProducts, maximumResults = DEFAULT_MAX_RESULTS, allowedTypes = ALL_TYPES, hardExcludeFamilies = [] }) {
   const { allProducts, allCombinations } = await getCatalogAndCombinations();
   const notesByNormalizedTitle = new Map(allProducts.map((p) => [p.normalizedTitle, p.notesJson || []]));
   // Loaded once, checked in-memory per candidate combo below — avoids one DB round trip per
@@ -1069,7 +1092,8 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   const anchors = (candidateProducts || [])
     .filter((c) =>
       isEligibleCombinationComponent({ title: c.productName, normalizedTitle: c.normalizedProductName, collection: c.collection }, finishedCombinationTitles) &&
-      passesIntensityFilter(c.orderHistoryNotes, preferenceIntent),
+      passesIntensityFilter(c.orderHistoryNotes, preferenceIntent) &&
+      !hasHardExcludedFamily(c.orderHistoryNotes, hardExcludeFamilies),
     )
     .slice()
     .sort((a, b) => b.relevanceScore - a.relevanceScore)
@@ -1084,7 +1108,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   const genCtx = {
     allProducts, finishedCombinationTitles, preferenceIntent, allowedTypes, profile,
     allCombinations, notesByNormalizedTitle, lifestyleContext, vocabUsedWords,
-    existingComponentKeys, seenComponentKeys,
+    existingComponentKeys, seenComponentKeys, hardExcludeFamilies,
   };
 
   for (const anchor of anchors) {
@@ -1107,7 +1131,7 @@ export async function generateNewProductCombinations({ profile, candidateProduct
     const batchNotes = finalResults.flatMap((r) => r.internalProducts.flatMap((p) => p.notes || []));
     const missing = missingLiteralTerms(batchNotes, literalLikeTerms);
     if (missing.length) {
-      const fallbackAnchors = buildFallbackAnchorsForMissingTerms(missing, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts });
+      const fallbackAnchors = buildFallbackAnchorsForMissingTerms(missing, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts, hardExcludeFamilies });
       for (const anchor of fallbackAnchors) {
         results.push(...generateCombosForAnchor(anchor, genCtx));
       }

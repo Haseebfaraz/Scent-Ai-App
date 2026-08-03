@@ -8,6 +8,7 @@
 import { describe, it, expect } from "vitest";
 import { executeFragranceTool, __deriveRefinementAdjustmentsForTesting as deriveRefinementAdjustments } from "../tools/fragranceAgentTools.server.js";
 import { saveRecommendation } from "./recommendationConfirmation.server.js";
+import { hasHardExcludedFamily } from "./recommendationEngine.server.js";
 import { resolveLegacyPreviewShortCircuit } from "./legacyPreviewRecovery.server.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import { saveCustomerProfileFields, getCustomerProfile } from "./customerProfile.server.js";
@@ -201,6 +202,40 @@ describe("refine_combination_recommendations — no-op bug (real bug: refinement
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
       expect(record.customerProfileJson.dislikes).toContain("Musk");
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+});
+
+// Fix (refinement "remove X" didn't actually remove X) — real bug: a customer's refinement asking
+// to remove sandalwood got the exact same combination back, sandalwood still in it, because a
+// single incidental trace note only ever counted as "low" severity (a small penalty, never a
+// reject). hardExcludeFamilies makes this a real, verifiable guarantee for the family(ies) named in
+// the refinement itself.
+describe("refine_combination_recommendations — hard-excludes the family named in the refinement", () => {
+  it("the refined recommendation contains zero trace of the family the customer just asked to remove", async () => {
+    const conversationId = freshConversationId("refine-hardexclude");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await verifyLosAngelesWithoutNetwork(conversationId);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity", "Apple", "Strawberry", "Peach"] }), ctx);
+      await executeFragranceTool("generate_new_product_combinations", "{}", ctx);
+
+      const result = await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "dont want sandalwood" }),
+        ctx,
+      );
+      expect(result.modelContent).not.toMatch(/^Error/);
+      expect(result.sseEvent.type).toBe("preview_ready");
+
+      const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
+      const allNotes = record.productsJson.flatMap((p) => p.notes || []);
+      expect(allNotes.some((n) => /\bsandalwood\b/i.test(n))).toBe(false);
+      // Also confirmed via the exact mechanism the fix itself uses (the full woody family — cedar/
+      // vetiver/patchouli/guaiac too, not just the one literal note the customer happened to name).
+      expect(hasHardExcludedFamily(allNotes, ["woody"])).toBe(false);
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
