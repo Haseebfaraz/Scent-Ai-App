@@ -50,6 +50,14 @@ describe("textToPreferenceFamilies (customer free-text likes/dislikes)", () => {
     expect(textToPreferenceFamilies(["Spicy"])).toEqual(["spicy"]);
     expect(textToPreferenceFamilies(["Strong"])).toEqual(["strongHeavy"]);
   });
+
+  // Fix (real customers say "candy", not "cotton candy") — confirmed live: a customer who said
+  // "sweet and candy" and later "candy want some candy type also" got zero recognition for "candy"
+  // specifically, since only the two-word spec phrase "cotton candy" was ever a keyword.
+  it("recognizes bare 'candy', not just the two-word 'cotton candy' phrase", () => {
+    expect(textToPreferenceFamilies(["candy"])).toEqual(["sweet"]);
+    expect(textToPreferenceFamilies(["candy want some candy type also.."])).toEqual(["sweet"]);
+  });
 });
 
 // Fix (literal note terms lost to family-level matching) — "Apple", "Strawberry", "Peach" used to
@@ -350,6 +358,20 @@ describe("interpretCustomerPreferences (Test 1: natural-language sensitivity map
     expect(interpretCustomerPreferences({ dislikes: ["gives me a headache"] }).sensitivityLevel).toBe("high");
     expect(interpretCustomerPreferences({ dislikes: ["it's overpowering and suffocating"] }).sensitivityLevel).toBe("high");
     expect(interpretCustomerPreferences({ dislikes: ["I cannot tolerate strong perfume"] }).sensitivityLevel).toBe("high");
+  });
+
+  // Fix (real customers say "strong scents", not "too strong") — confirmed live: a customer whose
+  // ONLY stated dislike was "strong scents" produced zero sensitivity signal at all (only the
+  // narrower "too strong" phrasing was recognized before), so a QUADBRID with 40+ combined notes
+  // still won despite the customer explicitly saying the opposite of what they wanted.
+  it("recognizes 'strong scent(s)/perfume/fragrance' as its own sensitivity phrasing, not just 'too strong'", () => {
+    expect(interpretCustomerPreferences({ dislikes: ["oud", "strong scents"] }).sensitivityLevel).toBe("high");
+    expect(interpretCustomerPreferences({ dislikes: ["strong perfume"] }).sensitivityLevel).toBe("high");
+    expect(interpretCustomerPreferences({ dislikes: ["strong fragrance"] }).sensitivityLevel).toBe("high");
+  });
+
+  it("never flags a merely strong PREFERENCE (unrelated to scent intensity) as a sensitivity signal", () => {
+    expect(interpretCustomerPreferences({ dislikes: ["I have a strong preference for citrus"] }).sensitivityLevel).toBe("none");
   });
 
   it("does not flag sensitivity for an unrelated dislike", () => {

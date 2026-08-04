@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
   validateCombinationShape, computeEvidenceScope, computeHistoryScore, MAX_HISTORY_SCORE,
-  buildFallbackAnchorsForMissingTerms,
+  buildFallbackAnchorsForMissingTerms, hasHardExcludedFamily,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength, classifyDislikeConflict } from "../utils/fragranceScoring.js";
 import {
@@ -115,6 +115,29 @@ describe("computeHistoryScore", () => {
     // sameCity (5) + sameCountry (4) = 9, over the cap.
     const anchor = { sameCityOrders: 1, sameCountryOrders: 1, sameStateOrders: 0, repeatPurchaseCustomers: 0, distinctSimilarCustomers: 0 };
     expect(computeHistoryScore(anchor)).toBe(MAX_HISTORY_SCORE);
+  });
+});
+
+// Fix (refinement "remove X" didn't actually remove X) — a customer's general stated dislikes stay
+// a soft per-component severity signal (one incidental trace note never disqualifies a product, per
+// spec); hardExcludeFamilies is a stronger, separate mechanism scoped only to a refinement's own
+// freshly-named exclusion.
+describe("hasHardExcludedFamily", () => {
+  it("excludes a product containing even a single trace note of the hard-excluded family", () => {
+    // A single "Sandalwood" trace buried among many other notes — exactly the real case that
+    // survived the old soft severity system (only "low" severity, a -2 penalty, never a reject).
+    const notes = ["Salt", "Watermelon Syrup", "Blueberry Juice", "Mandarin Orange Rinds", "Sandalwood", "White Musk"];
+    expect(hasHardExcludedFamily(notes, ["woody"])).toBe(true);
+  });
+
+  it("never excludes a product with no trace of the hard-excluded family at all", () => {
+    const notes = ["Peach Purée", "Strawberry Purée", "Vodka", "White Musk"];
+    expect(hasHardExcludedFamily(notes, ["woody"])).toBe(false);
+  });
+
+  it("is a no-op when no families are hard-excluded", () => {
+    expect(hasHardExcludedFamily(["Sandalwood"], [])).toBe(false);
+    expect(hasHardExcludedFamily(["Sandalwood"], undefined)).toBe(false);
   });
 });
 

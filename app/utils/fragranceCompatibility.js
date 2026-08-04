@@ -22,8 +22,11 @@ export const PREFERENCE_FAMILIES = {
     "apricot", "guava", "black currant", "blackcurrant", "fig",
   ],
   // Spec: vanilla, sugar, marshmallow, cotton candy, caramel, honey, tonka, whipped cream.
+  // Fix (real customers say "candy", not "cotton candy") — confirmed live: "candy" alone matched
+  // nothing at all (only the two-word spec phrase did), so a customer's own most natural word for
+  // this family was invisible to likes, dislikes, and refinement feedback alike.
   sweet: [
-    "sweet", "vanilla", "sugar", "marshmallow", "cotton candy", "caramel",
+    "sweet", "vanilla", "sugar", "marshmallow", "cotton candy", "candy", "caramel",
     "honey", "tonka", "whipped cream",
   ],
   // Spec: citrus, aquatic, green, mint, neroli, aromatic freshness. Concrete citrus notes
@@ -451,6 +454,11 @@ const SENSITIVITY_PHRASES = [
   /\bpiercing\b/i,
   /\bharsh\b/i,
   /too\s*strong/i,
+  // Fix (real customers say "strong scents", not "too strong") — confirmed live: a customer whose
+  // ONLY stated dislike was "strong scents" produced zero sensitivity signal (only the narrower
+  // "too strong" phrasing was recognized), so a QUADBRID with 40+ combined notes still won despite
+  // the customer explicitly saying the opposite of what they wanted.
+  /\bstrong\s*(scent|smell|perfume|fragrance|cologne)/i,
   /overpowering/i,
   /suffocat/i,
   /\bheavy\b/i,

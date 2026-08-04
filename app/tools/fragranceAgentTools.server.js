@@ -31,7 +31,7 @@ import {
   hasSeasonWeatherConflict, getCalendarSeason,
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
-import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { textToPreferenceFamilies, literalNoteTermsFromLikes } from "../utils/fragranceCompatibility.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import { correctPreferenceVocabulary, correctPreferenceVocabularyList } from "../utils/fragranceNormalization.js";
 
@@ -475,14 +475,26 @@ function deriveRefinementAdjustments(feedback) {
   const clauses = feedback.split(/[,;]|\band\b|\bbut\b/i).map((c) => c.trim()).filter(Boolean);
   const addLikes = new Set();
   const addDislikes = new Set();
+  // Fix (refinement feedback never updated the stored profile) — addLikes/addDislikes above are
+  // FAMILY keys (e.g. "woody"), used only as a one-off regeneration bias — a refinement request
+  // never actually persisted anything to the customer's real likes/dislikes fields, so "I don't
+  // want sandalwood" never showed up on their profile even though it plainly is one. These parallel
+  // sets capture what to persist instead: the literal note the customer actually named per clause
+  // when there is one (e.g. "sandalwood"), same shape save_customer_profile_field already uses
+  // elsewhere — falling back to the matched family label only when the clause was a pure style word
+  // with no specific note ("less woody" -> "woody").
+  const addLikeTerms = new Set();
+  const addDislikeTerms = new Set();
   let polarity = "like";
   for (const clause of clauses.length ? clauses : [feedback]) {
     if (NEGATION_PATTERN.test(clause)) polarity = "dislike";
     else if (POSITIVE_OVERRIDE_PATTERN.test(clause)) polarity = "like";
     const target = polarity === "dislike" ? addDislikes : addLikes;
+    const targetTerms = polarity === "dislike" ? addDislikeTerms : addLikeTerms;
 
+    const clauseFamilies = new Set();
     for (const { pattern, family } of REFINEMENT_FAMILY_KEYWORDS) {
-      if (pattern.test(clause)) target.add(family);
+      if (pattern.test(clause)) { target.add(family); clauseFamilies.add(family); }
     }
     // Fix (literal note names not recognized) — REFINEMENT_FAMILY_KEYWORDS above only covers
     // generic descriptor words (sweet/woody/spicy...); a customer naming actual notes ("remove
@@ -490,16 +502,23 @@ function deriveRefinementAdjustments(feedback) {
     // names only live in PREFERENCE_FAMILIES' own keyword lists — confirmed live. Reuses
     // textToPreferenceFamilies exactly as the rest of this file already does, instead of a
     // separate, narrower duplicate.
-    for (const family of textToPreferenceFamilies([clause])) target.add(family);
+    for (const family of textToPreferenceFamilies([clause])) { target.add(family); clauseFamilies.add(family); }
+
+    const literalTerms = literalNoteTermsFromLikes([clause]);
+    if (literalTerms.length) literalTerms.forEach((t) => targetTerms.add(t));
+    else clauseFamilies.forEach((f) => targetTerms.add(f));
   }
   // A stated exclusion wins over an incidental positive mention of the same family elsewhere in
   // the same message.
   addDislikes.forEach((f) => addLikes.delete(f));
+  addDislikeTerms.forEach((t) => addLikeTerms.delete(t));
 
   const typeMatch = REFINEMENT_TYPE_KEYWORDS.find((k) => k.pattern.test(feedback));
   return {
     addLikes: [...addLikes],
     addDislikes: [...addDislikes],
+    addLikeTerms: [...addLikeTerms],
+    addDislikeTerms: [...addDislikeTerms],
     allowedTypes: typeMatch ? typeMatch.types : undefined,
     onlyNew: ONLY_NEW_PATTERN.test(feedback), // always true anyway — this engine never proposes existing combos
   };
@@ -831,18 +850,31 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
         const adjustments = deriveRefinementAdjustments(parsed.data.feedback);
-        // One-off bias for this regeneration only — not persisted to the stored profile, since a
-        // refinement request ("make it sweeter") is a request about THIS recommendation round, not
-        // necessarily a permanent change to the customer's stated preferences.
-        const adjustedProfile = {
-          ...queriedProfile,
-          likes: [...new Set([...(profile.likes || []), ...adjustments.addLikes])],
-          dislikes: [...new Set([...(profile.dislikes || []), ...adjustments.addDislikes])],
-        };
+        // Fix (refinement feedback never updated the stored profile) — a refinement request is a
+        // real, explicit statement of preference ("I don't want sandalwood" plainly IS a dislike),
+        // not just a one-off nudge for this regeneration round — confirmed live: the customer's own
+        // stated exclusion never showed up on their profile at all. Persisted here using the same
+        // literal-term-preferring shape save_customer_profile_field already uses, so the dashboard
+        // and every later conversation/regeneration see it too, not just this one call.
+        const updatedLikes = [...new Set([...(profile.likes || []), ...adjustments.addLikeTerms])];
+        const updatedDislikes = [...new Set([...(profile.dislikes || []), ...adjustments.addDislikeTerms])];
+        if (adjustments.addLikeTerms.length || adjustments.addDislikeTerms.length) {
+          await saveCustomerProfileFields(conversationId, { likes: updatedLikes, dislikes: updatedDislikes });
+        }
+        const adjustedProfile = { ...queriedProfile, likes: updatedLikes, dislikes: updatedDislikes };
+        // Fix (refinement "remove X" didn't actually remove X) — a customer's general stated
+        // dislikes stay a soft signal (one incidental trace note never disqualifies a product,
+        // per spec) — but confirmed live, that softness let a single buried "Sandalwood" note
+        // survive a refinement explicitly asking to remove it, and the same combo won again
+        // unchanged. The family(ies) named in THIS refinement turn specifically are hard-excluded
+        // from every anchor/support candidate for this regeneration — a stronger, more immediate
+        // guarantee than the general dislike system, scoped only to what was just asked to remove.
+        const hardExcludeFamilies = textToPreferenceFamilies(adjustments.addDislikeTerms);
         const combinations = await generateNewProductCombinations({
           profile: adjustedProfile,
           candidateProducts: scratch.candidateProducts,
           allowedTypes: adjustments.allowedTypes,
+          hardExcludeFamilies,
         });
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),
