@@ -58,7 +58,6 @@ const CONFIDENCE_DIMENSION_LABELS = {
   compatibility: "Note compatibility / risk",
   novelty: "Similarity to existing combinations",
   customerFit: "Fit to this customer's stated preferences",
-  performance: "Measured longevity/projection data",
 };
 const LEVEL_TONE = { low: "critical", medium: "warning", high: "success" };
 const LEVEL_BAR = { low: { width: "33%", background: "#d82c0d" }, medium: { width: "66%", background: "#b98900" }, high: { width: "100%", background: "#008060" } };

@@ -106,7 +106,7 @@ describe("Lifestyle cache invalidation", () => {
 });
 
 describe("Multidimensional confidence", () => {
-  it("every combination carries a confidenceBreakdown with all six dimensions, each with a value and a reason", async () => {
+  it("every combination carries a confidenceBreakdown with all five dimensions, each with a value and a reason", async () => {
     const anchor = syntheticCandidate({ productName: "Test Confidence Anchor", orderHistoryNotes: ["Bergamot", "Lime", "Musk"], relevanceScore: 20, sameCityOrders: 10 });
     const results = await generateNewProductCombinations({
       profile: { ...BASE_PROFILE, likes: ["Fresh"] },
@@ -116,7 +116,7 @@ describe("Multidimensional confidence", () => {
     expect(results.length).toBeGreaterThan(0);
     for (const r of results) {
       expect(r.confidenceBreakdown).toBeTruthy();
-      for (const dim of ["data", "historical", "compatibility", "novelty", "customerFit", "performance"]) {
+      for (const dim of ["data", "historical", "compatibility", "novelty", "customerFit"]) {
         expect(["low", "medium", "high"]).toContain(r.confidenceBreakdown[dim].value);
         expect(typeof r.confidenceBreakdown[dim].reason).toBe("string");
         expect(r.confidenceBreakdown[dim].reason.length).toBeGreaterThan(0);
@@ -124,7 +124,11 @@ describe("Multidimensional confidence", () => {
     }
   });
 
-  it("performance confidence is always low — no measured longevity/projection/sillage data exists anywhere in this system", async () => {
+  // Fix (remove the always-low performance dimension) — it used to always read "low" on every
+  // recommendation (no real longevity/projection/sillage data exists anywhere in this system),
+  // carried no real signal, never capped the overall confidence, and only ever made every result
+  // look worse than the other five dimensions actually supported.
+  it("no longer includes the always-low, no-signal performance dimension", async () => {
     const anchor = syntheticCandidate({ productName: "Test Performance Anchor", orderHistoryNotes: ["Oud", "Amber", "Musk"], relevanceScore: 999, sameCityOrders: 500, distinctSimilarCustomers: 200 });
     const results = await generateNewProductCombinations({
       profile: { ...BASE_PROFILE, likes: ["Strong"] },
@@ -133,7 +137,7 @@ describe("Multidimensional confidence", () => {
     });
     expect(results.length).toBeGreaterThan(0);
     for (const r of results) {
-      expect(r.confidenceBreakdown.performance.value).toBe("low");
+      expect(r.confidenceBreakdown.performance).toBeUndefined();
     }
   });
 

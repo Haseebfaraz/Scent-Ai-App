@@ -77,13 +77,11 @@ export default function Documentation() {
 
       <s-section heading="4. Confidence">
         <s-paragraph>
-          Confidence is not a single guess — it's a blended read of six real dimensions (note data
+          Confidence is not a single guess — it's a blended read of five real dimensions (note data
           quality, real order-history evidence, compatibility/risk, similarity to existing
-          combinations, fit to this specific customer, and measured performance data — which is
-          always "low" today, since no real longevity/projection data exists yet). Each dimension, and
-          the overall confidence badge, can be clicked on the customer detail page to see exactly why
-          it landed where it did, including the real risk factors and which of the customer's named
-          notes made it in.
+          combinations, and fit to this specific customer). Each dimension, and the overall confidence
+          badge, can be clicked on the customer detail page to see exactly why it landed where it did,
+          including the real risk factors and which of the customer's named notes made it in.
         </s-paragraph>
         <s-stack direction="block" gap="tight">
           <Bullet>Confidence is capped downward whenever real evidence is thin, the profile is incomplete, roles aren't complementary, or genuine risks were found — it can never read "very high" purely by accumulating small positive signals elsewhere.</Bullet>

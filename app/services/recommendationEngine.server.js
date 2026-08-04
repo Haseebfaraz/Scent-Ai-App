@@ -812,18 +812,17 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const customerFitRaw = preferenceScore + styleMatchScore + lifestyleMatchScore;
   const customerFitConfidence = !profileComplete ? "low" : customerFitRaw >= 8 ? "high" : customerFitRaw >= 3 ? "medium" : "low";
 
-  // Never measured anywhere in this system — no real longevity/projection/sillage data exists in
-  // the source data at all, so this can never honestly read as anything but low, regardless of how
-  // strong every other dimension is.
-  const performanceConfidence = "low";
-
   const confidenceBreakdown = {
     data: { value: dataConfidence, reason: dataConfidence === "high" ? "Every component has a full, real note list on file." : "At least one component's real note list is thin." },
     historical: { value: historicalConfidence, reason: `Evidence scope: ${evidenceScope}.` },
     compatibility: { value: compatibilityConfidence, reason: risks.length ? `${risks.length} real compatibility risk(s) identified.` : "No compatibility risks identified; roles are complementary." },
     novelty: { value: noveltyConfidence, reason: analogousExistingCombinations.length ? `${analogousExistingCombinations.length} analogous existing combination(s) share real notes with this one.` : "No closely analogous existing combination found." },
     customerFit: { value: customerFitConfidence, reason: !profileComplete ? "Profile is missing required signal (location/likes/style)." : `Preference/style/lifestyle match score: ${customerFitRaw}.` },
-    performance: { value: performanceConfidence, reason: "No measured longevity, projection, or sillage data is available; strength is inferred from note roles only." },
+    // Fix (remove the always-low performance dimension) — this used to always read "low," on every
+    // single recommendation, since no real longevity/projection/sillage data exists anywhere in the
+    // source data — it never carried any real signal, never capped the overall confidence (it was
+    // display-only), and only ever made every result look worse than the other five dimensions
+    // actually supported. Removed rather than kept as permanent dead weight.
   };
   // Fix (multidimensional confidence) — customer-fit and data quality are the two dimensions most
   // likely to silently diverge from a healthy-looking blended score (a combination can be
