@@ -174,6 +174,26 @@ describe("deriveRefinementAdjustments — addLikeTerms/addDislikeTerms (what get
   });
 });
 
+// Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
+// — real bug: naming a real note with no family entry at all ("Jackfruit") did nothing. Passing the
+// current recommendation's own real notes lets any of THEM be recognized directly.
+describe("deriveRefinementAdjustments — currentNotes (recognizes any real note on screen, not just curated vocabulary)", () => {
+  it("recognizes a real note with no PREFERENCE_FAMILIES entry when it's one of the current notes", () => {
+    const result = deriveRefinementAdjustments("dont want jackfruit", ["Gin", "Mojito", "Jackfruit", "Pear"]);
+    expect(result.addDislikeTerms).toContain("jackfruit");
+  });
+
+  it("ignores a currentNotes entry the customer didn't actually mention", () => {
+    const result = deriveRefinementAdjustments("dont want jackfruit", ["Gin", "Mojito", "Jackfruit", "Pear"]);
+    expect(result.addDislikeTerms).not.toContain("pear");
+  });
+
+  it("still works exactly as before when currentNotes is omitted", () => {
+    const result = deriveRefinementAdjustments("dont want sandalwood");
+    expect(result.addDislikeTerms).toContain("sandalwood");
+  });
+});
+
 describe("refine_combination_recommendations — no-op bug (real bug: refinement outside the old 5-keyword list changed nothing)", () => {
   it("actually carries a family the old keyword list didn't recognize into the regenerated recommendation's profile", async () => {
     const conversationId = freshConversationId("refine-dislike");
@@ -236,6 +256,53 @@ describe("refine_combination_recommendations — hard-excludes the family named 
       // Also confirmed via the exact mechanism the fix itself uses (the full woody family — cedar/
       // vetiver/patchouli/guaiac too, not just the one literal note the customer happened to name).
       expect(hasHardExcludedFamily(allNotes, ["woody"])).toBe(false);
+    } finally {
+      await prisma.customerProfileState.deleteMany({ where: { conversationId } });
+    }
+  }, 60000);
+});
+
+// Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
+// — real bug: "dont want coconut" was a silent no-op until "coconut" was manually added to a family
+// list, and the same gap recurs for any real note not yet in the vocabulary (confirmed:
+// textToPreferenceFamilies(["Jackfruit"]) === [] — it has no family entry at all). Matching against
+// the CURRENT recommendation's own real notes (always known at refinement time) closes this for any
+// note the customer can actually see, without hand-maintaining an ever-growing word list.
+describe("refine_combination_recommendations — recognizes a real note with no PREFERENCE_FAMILIES entry at all", () => {
+  it("hard-excludes a real catalog note with zero family membership, once it's named in the currently-viewed recommendation", async () => {
+    const conversationId = freshConversationId("refine-orphan-note");
+    const ctx = { conversationId, customerName: "Test Customer", customerEmail: "test@example.com" };
+    try {
+      await verifyLosAngelesWithoutNetwork(conversationId);
+      await executeFragranceTool("save_customer_profile_field", JSON.stringify({ field: "likes", value: ["Fruity", "Pear", "Guava", "Pineapple"] }), ctx);
+
+      // Seeds selectedRecommendationId with a REAL catalog product ("Juicy Pear") whose real notes
+      // include "Jackfruit" — deterministic, unlike hoping the auto-generated first recommendation
+      // happens to contain it.
+      const seededId = await saveRecommendation({
+        conversationId,
+        profile: { likes: ["Fruity", "Pear", "Guava", "Pineapple"], dislikes: [] },
+        combination: realCombo({
+          first: { title: "Juicy Pear", notes: ["Pear", "Guava", "Melon", "Pineapple", "Jackfruit", "Vanilla", "Gin", "Mojito", "and Musk"] },
+          second: { title: "Water of Arabia", notes: ["Mandarin", "Bergamot", "Blackcurrant", "Green Tea", "Sandalwood"] },
+        }),
+      });
+      await saveCustomerProfileFields(conversationId, { selectedRecommendationId: seededId });
+
+      const result = await executeFragranceTool(
+        "refine_combination_recommendations",
+        JSON.stringify({ feedback: "dont want jackfruit" }),
+        ctx,
+      );
+      expect(result.modelContent).not.toMatch(/^Error/);
+      expect(result.sseEvent.type).toBe("preview_ready");
+
+      const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
+      const allNotes = record.productsJson.flatMap((p) => p.notes || []);
+      expect(allNotes.some((n) => /\bjackfruit\b/i.test(n))).toBe(false);
+
+      const profile = await getCustomerProfile(conversationId);
+      expect(profile.dislikes).toContain("jackfruit");
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }

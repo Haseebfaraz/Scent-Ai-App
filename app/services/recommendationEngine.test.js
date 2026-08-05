@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   computeRatios, assignRoles, generateNewProductCombinations,
   validateCombinationShape, computeEvidenceScope, computeHistoryScore, MAX_HISTORY_SCORE,
-  buildFallbackAnchorsForMissingTerms, hasHardExcludedFamily,
+  buildFallbackAnchorsForMissingTerms, hasHardExcludedFamily, hasHardExcludedTerm,
 } from "./recommendationEngine.server.js";
 import { likeMatchStrength, classifyDislikeConflict } from "../utils/fragranceScoring.js";
 import {
@@ -138,6 +138,24 @@ describe("hasHardExcludedFamily", () => {
   it("is a no-op when no families are hard-excluded", () => {
     expect(hasHardExcludedFamily(["Sandalwood"], [])).toBe(false);
     expect(hasHardExcludedFamily(["Sandalwood"], undefined)).toBe(false);
+  });
+});
+
+// Fix (refinement couldn't exclude a note with no PREFERENCE_FAMILIES entry at all) — a real
+// catalog note like "Jackfruit" matches no family whatsoever, so hasHardExcludedFamily alone can
+// never exclude it no matter how clearly a customer names it in a refinement.
+describe("hasHardExcludedTerm", () => {
+  it("excludes a product literally containing the named term, family or no family", () => {
+    expect(hasHardExcludedTerm(["Gin", "Mojito", "Jackfruit"], ["jackfruit"])).toBe(true);
+  });
+
+  it("never excludes a product with no trace of the named term", () => {
+    expect(hasHardExcludedTerm(["Gin", "Mojito", "Coconut"], ["jackfruit"])).toBe(false);
+  });
+
+  it("is a no-op when no terms are hard-excluded", () => {
+    expect(hasHardExcludedTerm(["Jackfruit"], [])).toBe(false);
+    expect(hasHardExcludedTerm(["Jackfruit"], undefined)).toBe(false);
   });
 });
 

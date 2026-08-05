@@ -20,6 +20,7 @@ import {
   exactNoteCoverageScore,
   matchedLiteralTerms,
   missingLiteralTerms,
+  matchedRealNotesInText,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -140,6 +141,36 @@ describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
     const terms = literalNoteTermsFromLikes(["Wood"]);
     expect(literalNoteMatchCount(["Sandalwood"], terms)).toBe(0);
     expect(literalNoteMatchCount(["Aged Wood Accord"], terms)).toBe(1);
+  });
+});
+
+// Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
+// — confirmed live: "dont want coconut" was a silent no-op until "coconut" was hand-added to a
+// family list, and the same gap recurs for any real note not yet in the vocabulary. Checking
+// directly against the SPECIFIC real notes of whatever recommendation is on screen closes that gap
+// for any note, without needing to enumerate the whole catalog's vocabulary up front.
+describe("matchedRealNotesInText", () => {
+  it("recognizes a real note by name even though it belongs to no PREFERENCE_FAMILIES entry at all", () => {
+    expect(textToPreferenceFamilies(["Jackfruit"])).toEqual([]); // confirms the gap this closes
+    expect(matchedRealNotesInText("dont want jackfruit", ["Gin", "Mojito", "Jackfruit"])).toEqual(["jackfruit"]);
+  });
+
+  it("only matches notes that are actually in the given list, not any word in the text", () => {
+    expect(matchedRealNotesInText("dont want jackfruit", ["Gin", "Mojito", "Coconut"])).toEqual([]);
+  });
+
+  it("matches a multi-word note as a whole phrase", () => {
+    expect(matchedRealNotesInText("remove the griotte syrup please", ["Black Cherry", "Griotte Syrup"])).toEqual(["griotte syrup"]);
+  });
+
+  it("never lets a shorter note falsely match inside a longer unrelated word", () => {
+    expect(matchedRealNotesInText("pineapple please", ["Apple"])).toEqual([]);
+  });
+
+  it("returns nothing for empty input", () => {
+    expect(matchedRealNotesInText("", ["Coconut"])).toEqual([]);
+    expect(matchedRealNotesInText("dont want coconut", [])).toEqual([]);
+    expect(matchedRealNotesInText("dont want coconut", null)).toEqual([]);
   });
 });
 
