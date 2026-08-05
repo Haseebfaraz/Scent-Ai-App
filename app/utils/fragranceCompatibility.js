@@ -17,9 +17,14 @@ export const PREFERENCE_FAMILIES = {
   // currant, fig. "berr" (not just "strawberry") is used so it also catches "Raspberry" and any
   // other real berry note under the spec's own "berries" example. "fruity" itself is included
   // because the real catalog uses generic notes like "Fruity Notes" as a catch-all entry.
+  // Fix (real customer named a real catalog note we didn't recognize) — confirmed live: "coconut"
+  // is a real note that appears in the catalog (e.g. alongside Gin/Mojito in a Top Notes list), but
+  // matched nothing in this family at all — a dislike naming it silently vanished (never persisted,
+  // never excluded from the next recommendation) instead of being treated as the plain fruity/
+  // tropical note it is.
   fruity: [
     "fruity", "mango", "pineapple", "pear", "apple", "berr", "strawberry", "peach",
-    "apricot", "guava", "black currant", "blackcurrant", "fig",
+    "apricot", "guava", "black currant", "blackcurrant", "fig", "coconut",
   ],
   // Spec: vanilla, sugar, marshmallow, cotton candy, caramel, honey, tonka, whipped cream.
   // Fix (real customers say "candy", not "cotton candy") — confirmed live: "candy" alone matched

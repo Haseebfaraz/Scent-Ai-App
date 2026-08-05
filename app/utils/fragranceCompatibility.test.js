@@ -58,6 +58,15 @@ describe("textToPreferenceFamilies (customer free-text likes/dislikes)", () => {
     expect(textToPreferenceFamilies(["candy"])).toEqual(["sweet"]);
     expect(textToPreferenceFamilies(["candy want some candy type also.."])).toEqual(["sweet"]);
   });
+
+  // Fix (real customer named a real catalog note we didn't recognize) — confirmed live: "coconut"
+  // is a real catalog note (shown in an actual Top Notes list), but a refinement saying "dont want
+  // coconut" matched no family and no literal term at all, so it never persisted to the customer's
+  // dislikes and never excluded coconut from the regenerated recommendation.
+  it("recognizes 'coconut' as a fruity/tropical note", () => {
+    expect(textToPreferenceFamilies(["coconut"])).toEqual(["fruity"]);
+    expect(textToPreferenceFamilies(["dont want coconut"])).toEqual(["fruity"]);
+  });
 });
 
 // Fix (literal note terms lost to family-level matching) — "Apple", "Strawberry", "Peach" used to
@@ -69,6 +78,14 @@ describe("literalNoteTermsFromLikes / literalNoteMatchCount", () => {
     expect(terms).toEqual(expect.arrayContaining(["apple", "strawberry", "peach"]));
     expect(terms).not.toContain("fruity");
     expect(terms).not.toContain("fresh");
+  });
+
+  // Fix (refinement "dont want coconut" persisted nothing and excluded nothing) — coconut was
+  // previously absent from every family, so it was invisible to both profile persistence and
+  // refinement hard-exclusion.
+  it("extracts 'coconut' as a literal note term", () => {
+    const terms = literalNoteTermsFromLikes(["dont want coconut"]);
+    expect(terms).toContain("coconut");
   });
 
   it("returns zero literal matches for a product that only shares the family, not the named note", () => {
