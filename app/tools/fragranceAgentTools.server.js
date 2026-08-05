@@ -176,7 +176,7 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
     if (!confirmResult.ok) continue;
 
     await saveCustomerProfileFields(conversationId, { selectedRecommendationId: candidate.recommendationId });
-    const previewUrl = buildPreviewUrl(candidate.recommendationId);
+    const previewUrl = await buildPreviewUrl(candidate.recommendationId);
     logPreviewEvent("BEST_RECOMMENDATION_SELECTED", {
       conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
       eventType: "preview_ready", previewUrl,
@@ -931,7 +931,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         // needed for the primary new-conversation flow (generate_new_product_combinations now
         // auto-selects and auto-confirms the best recommendation by itself) — it's kept only for
         // legacy conversations that already have a manually-selected recommendationId.
-        const legacyPreviewUrl = buildPreviewUrl(recommendationId);
+        const legacyPreviewUrl = await buildPreviewUrl(recommendationId);
         logPreviewEvent("PREVIEW_READY_EMITTED", {
           conversationId, recommendationId, previewId: recommendationId, eventType: "preview_ready", previewUrl: legacyPreviewUrl,
         });

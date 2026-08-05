@@ -62,5 +62,5 @@ export async function resolveLegacyPreviewShortCircuit(conversationId, userMessa
   if (!result.ok && !result.reason?.includes("already been confirmed")) return null;
 
   await saveCustomerProfileFields(conversationId, { selectedRecommendationId: recommendationId });
-  return { recommendationId, previewUrl: buildPreviewUrl(recommendationId) };
+  return { recommendationId, previewUrl: await buildPreviewUrl(recommendationId) };
 }

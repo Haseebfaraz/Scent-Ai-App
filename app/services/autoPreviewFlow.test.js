@@ -45,7 +45,7 @@ describe("generate_new_product_combinations — auto-select + auto-confirm (Test
       expect(result.sseEvent.recommendationId).toBeTruthy();
       // Absolute URL, on this app's own domain — the widget runs on the storefront domain, so a
       // relative path would resolve against the wrong origin (see previewUrl.server.js).
-      expect(result.sseEvent.previewUrl).toBe(buildPreviewUrl(result.sseEvent.recommendationId));
+      expect(result.sseEvent.previewUrl).toBe(await buildPreviewUrl(result.sseEvent.recommendationId));
       expect(() => new URL(result.sseEvent.previewUrl)).not.toThrow();
 
       // The customer must never be shown a list to pick from — this event type is retired for
@@ -97,7 +97,7 @@ describe("refine_combination_recommendations — auto-select + auto-confirm (rea
       expect(result.sseEvent.type).toBe("preview_ready");
       expect(result.sseEvent.type).not.toBe("recommendation_refined");
       expect(result.sseEvent.recommendationId).toBeTruthy();
-      expect(result.sseEvent.previewUrl).toBe(buildPreviewUrl(result.sseEvent.recommendationId));
+      expect(result.sseEvent.previewUrl).toBe(await buildPreviewUrl(result.sseEvent.recommendationId));
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: result.sseEvent.recommendationId } });
       expect(record.status).toBe("confirmed");
@@ -364,7 +364,7 @@ describe("resolveLegacyPreviewShortCircuit — deterministic recovery for a stuc
       const result = await resolveLegacyPreviewShortCircuit(conversationId, "1", "Test", "test@example.com");
       expect(result).toBeTruthy();
       expect(result.recommendationId).toBe(firstId);
-      expect(result.previewUrl).toBe(buildPreviewUrl(firstId));
+      expect(result.previewUrl).toBe(await buildPreviewUrl(firstId));
 
       const record = await prisma.fragranceRecommendation.findUnique({ where: { id: firstId } });
       expect(record.status).toBe("confirmed");

@@ -11,9 +11,16 @@
 // AFTER a build is saved) — same fonts/palette/note-row/slider/action-bar language, plus the same
 // animated 3D bottle, so Recreate/Save Build/Add to Cart feel like one continuous experience
 // rather than a plain page before and a designed one after.
+//
+// Lives under /api and requires a valid App Proxy signature (see shopify.app.shop-chat-agent.toml's
+// [app_proxy]: prefix "apps", subpath "scent-library") so the customer-facing URL is the merchant's own store
+// domain (https://{shop}/apps/scent-library/fragrance-preview) instead of this app's Render URL —
+// Shopify's edge fetches this route server-to-server and relays the response back under that
+// domain. authenticate.public.appProxy throws its own 400 on a bad/missing signature, so a request
+// that didn't genuinely come through the proxy never reaches the handlers below.
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useLoaderData, useFetcher } from "react-router";
-import { unauthenticated } from "../shopify.server";
+import { authenticate } from "../shopify.server";
 import prisma from "../db.server";
 import { getCustomerProfile, saveCustomerProfileFields } from "../services/customerProfile.server";
 import {
@@ -22,7 +29,6 @@ import {
   computePricePer5mlByPosition,
 } from "../services/fragranceBuild.server";
 import { estimateTotalPrice } from "../utils/fragrancePricing";
-import { resolveShopDomain } from "../services/shopDomain.server";
 
 const POSITION_LABELS = { top: "Top Notes", middle: "Middle Notes", base: "Base Notes" };
 
@@ -43,6 +49,11 @@ function numericIdFromGid(gid) {
 }
 
 export async function loader({ request }) {
+  const { session } = await authenticate.public.appProxy(request);
+  if (!session) {
+    throw new Response("Shop not found.", { status: 401 });
+  }
+
   const url = new URL(request.url);
   const recommendationId = url.searchParams.get("recommendationId");
   if (!recommendationId) {
@@ -88,6 +99,11 @@ export async function loader({ request }) {
 }
 
 export async function action({ request }) {
+  const { session, admin } = await authenticate.public.appProxy(request);
+  if (!session) {
+    return Response.json({ error: "Shop not found." }, { status: 401 });
+  }
+
   const formData = await request.formData();
   const intent = formData.get("intent");
   const recommendationId = formData.get("recommendationId");
@@ -100,7 +116,7 @@ export async function action({ request }) {
     return Response.json({ error: "Recommendation not found." }, { status: 404 });
   }
 
-  const shopDomain = await resolveShopDomain();
+  const shopDomain = session.shop;
 
   if (intent === "recreate") {
     // 1. Save current preview state as an internal draft only — no Shopify product/variant, no
@@ -124,8 +140,6 @@ export async function action({ request }) {
     let productUrl = null;
 
     try {
-      const { admin } = await unauthenticated.admin(shopDomain);
-
       if (!shopifyProductId) {
         // First-time creation — the Top/Middle/Base Note product shape api.save-build.jsx expects.
         const identityProfile = await getCustomerProfile(recommendation.conversationId);
