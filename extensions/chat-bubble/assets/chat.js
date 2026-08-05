@@ -865,7 +865,12 @@
 
           // No messages, show welcome message
           if (!data.messages || data.messages.length === 0) {
-            const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
+            // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
+// and is never sent to the backend as history, so the AI has no memory that a question was asked
+// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
+// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
+// fresh once the customer actually replies.
+const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
             ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
             return;
           }
@@ -897,7 +902,12 @@
           }
 
           // Show error and welcome message
-          const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
+          // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
+// and is never sent to the backend as history, so the AI has no memory that a question was asked
+// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
+// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
+// fresh once the customer actually replies.
+const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
           ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
 
           // Clear the conversation ID since we couldn't fetch this conversation
@@ -1229,7 +1239,12 @@
         divider.textContent = 'Today';
         this.UI.elements.messagesContainer.appendChild(divider);
 
-        const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! How's your day going so far?";
+        // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
+// and is never sent to the backend as history, so the AI has no memory that a question was asked
+// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
+// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
+// fresh once the customer actually replies.
+const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
         this.Message.add(welcomeMessage, 'assistant', this.UI.elements.messagesContainer);
       }
     }
