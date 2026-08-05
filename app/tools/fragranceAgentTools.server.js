@@ -53,7 +53,14 @@ const NO_REAL_VALUE_PATTERN = /^(na|n\/a|none|nothing|no)$/i;
 // customer's reply to "What should I call you?" ("not having a great day") got saved verbatim as
 // their name. A real backend gate instead: reject anything that reads like a mood/sentence rather
 // than a name, same pattern as NO_REAL_STYLE_PATTERN above.
-const IMPLAUSIBLE_NAME_PATTERN = /\b(day|today|feeling|doing|tired|busy|great|good|bad|fine|ok|okay|nothing|well|not|having|going|alright|stressed|happy|sad|meh)\b/i;
+// Fix (round 2 — greeting words and generic placeholder nouns accepted as a name) — confirmed live:
+// a customer who typed "hello" (an interjection, not a name) then "user" (a generic role noun, not
+// a name) had BOTH accepted and saved verbatim. Genuine part-of-speech tagging ("only accept
+// nouns") isn't practical here without a full NLP/dictionary dependency this codebase doesn't use
+// anywhere else — every other vocabulary check in this file is a deterministic keyword list, so
+// this stays consistent with that: a bounded list of the specific common greeting/placeholder words
+// people actually type instead of a real name, same pattern as the mood-word list above.
+const IMPLAUSIBLE_NAME_PATTERN = /\b(day|today|feeling|doing|tired|busy|great|good|bad|fine|ok|okay|nothing|well|not|having|going|alright|stressed|happy|sad|meh|hello|hi|hey|yo|sup|greetings|user|guest|customer|client|admin|test|testing|anonymous|unknown|nobody|somebody)\b/i;
 function isImplausibleName(text) {
   const trimmed = String(text).trim();
   if (!trimmed) return true;

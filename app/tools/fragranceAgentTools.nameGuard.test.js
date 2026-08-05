@@ -48,6 +48,20 @@ describe("save_customer_profile_field name guard", () => {
     }
   });
 
+  // Fix (round 2 — greeting words and generic placeholder nouns accepted as a name) — confirmed
+  // live: "hello" (an interjection) and "user" (a generic role noun) both got accepted verbatim.
+  it("rejects greeting interjections and generic placeholder/role nouns", async () => {
+    const conversationId = newConversationId();
+    for (const value of ["hello", "hi", "hey", "user", "guest", "customer", "admin", "test"]) {
+      const result = await executeFragranceTool(
+        "save_customer_profile_field",
+        JSON.stringify({ field: "name", value }),
+        ctx(conversationId),
+      );
+      expect(result.modelContent).toMatch(/^Error/);
+    }
+  });
+
   it("still accepts a real name", async () => {
     const conversationId = newConversationId();
     const result = await executeFragranceTool(
