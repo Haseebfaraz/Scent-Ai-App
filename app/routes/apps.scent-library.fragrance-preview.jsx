@@ -12,12 +12,22 @@
 // animated 3D bottle, so Recreate/Save Build/Add to Cart feel like one continuous experience
 // rather than a plain page before and a designed one after.
 //
-// Lives under /api and requires a valid App Proxy signature (see shopify.app.shop-chat-agent.toml's
-// [app_proxy]: prefix "apps", subpath "scent-library") so the customer-facing URL is the merchant's own store
-// domain (https://{shop}/apps/scent-library/fragrance-preview) instead of this app's Render URL —
-// Shopify's edge fetches this route server-to-server and relays the response back under that
-// domain. authenticate.public.appProxy throws its own 400 on a bad/missing signature, so a request
-// that didn't genuinely come through the proxy never reaches the handlers below.
+// Lives at the exact path the App Proxy exposes on the storefront (see
+// shopify.app.shop-chat-agent.toml's [app_proxy]: prefix "apps", subpath "scent-library", url
+// ".../apps/scent-library") — Shopify's edge fetches this route server-to-server and relays the
+// response back under the merchant's own store domain (https://{shop}/apps/scent-library/
+// fragrance-preview) instead of this app's Render URL. Deliberately NOT under /api like this app's
+// other proxy-adjacent endpoints (api.save-build.jsx, api.customer-builds.jsx): those are plain
+// fetch()-based JSON endpoints with no client-side page to hydrate, so an internal path that
+// differs from the public one is harmless. This route renders an interactive React Router page,
+// and React's client bundle matches window.location's REAL path (the public one) against its own
+// route table to hydrate — a mismatched internal path (it used to live at /api/fragrance-preview)
+// made that match fail, so hydration silently aborted and every button/slider on the page went
+// dead (confirmed live: page content rendered fine, zero interactivity). Matching the internal
+// route path to the public one exactly is what fixes that, not a basename or client-side hack.
+//
+// authenticate.public.appProxy throws its own 400 on a bad/missing signature, so a request that
+// didn't genuinely come through the proxy never reaches the handlers below.
 import { useState, useEffect, useMemo, useRef } from "react";
 import { useLoaderData, useFetcher } from "react-router";
 import { authenticate } from "../shopify.server";

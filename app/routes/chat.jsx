@@ -403,7 +403,8 @@ async function callAI(history, conversationId, knownCustomerEmail, knownCustomer
 // the "preview_ready" SSE event below); the customer explicitly creates the real product from
 // there via Save Build or Add to Cart. That creation logic (the Top/Middle/Base Note product
 // shape, matching app/routes/api.save-build.jsx's existing expectations) now lives in
-// app/services/fragranceBuild.server.js and app/routes/api.fragrance-preview.jsx, not here.
+// app/services/fragranceBuild.server.js and app/routes/apps.scent-library.fragrance-preview.jsx,
+// not here.
 
 // ============================================================
 // 7. LOADER — handles history fetch (GET) requests
@@ -487,8 +488,8 @@ export async function action({ request }) {
 
     // Fix (fragrance preview page) — chat.jsx no longer needs a Shopify Admin API session at all:
     // it never creates a product itself anymore (see the "6. DYNAMIC PRODUCT CREATION" header
-    // above) — that now happens on the api.fragrance-preview route, which authenticates its own
-    // admin session when the customer actually clicks Save Build/Add to Cart.
+    // above) — that now happens on the apps.scent-library.fragrance-preview route, which
+    // authenticates its own admin session when the customer actually clicks Save Build/Add to Cart.
     const userMessage = body.message || "";
     const { id: conversationId, history } = await getConversation(body.conversation_id);
 

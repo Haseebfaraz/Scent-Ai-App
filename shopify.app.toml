@@ -22,9 +22,11 @@ redirect_urls = [
   "https://scent-ai-app.onrender.com/api/auth/callback"
 ]
 
-# Enable App Proxy when using storefront widget calls
+# Enable App Proxy when using storefront widget calls — url ends in "/apps/scent-library" (not
+# "/api") so the proxied fragrance-preview route's internal path matches its public path exactly;
+# see apps.scent-library.fragrance-preview.jsx for why that's required for client hydration.
 [app_proxy]
-url = "https://scent-ai-app.onrender.com/api"
+url = "https://scent-ai-app.onrender.com/apps/scent-library"
 subpath = "scent-library"
 prefix = "apps"
 
