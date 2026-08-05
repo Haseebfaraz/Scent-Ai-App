@@ -36,20 +36,26 @@ if (host === "localhost") {
 }
 
 export default defineConfig(({ command }) => ({
-  // Fix (dead preview page behind the App Proxy) — confirmed live: entry.client/root/route JS all
-  // 404'd once this app was reached via https://{shop}/apps/scent-library/..., because Vite's
-  // default root-relative asset URLs ("/assets/...") resolve against whatever origin served the
-  // HTML — the storefront domain in that case, not this app. An absolute base makes every built
-  // asset URL point at this app's own origin regardless of what domain/path proxies the page.
-  //
-  // Hardcoded rather than read from SHOPIFY_APP_URL: the Dockerfile's `RUN npm run build` runs
-  // during the image build, before Render injects any dashboard env var into the container, so
-  // process.env.SHOPIFY_APP_URL is always empty at exactly the point this needs it (confirmed —
-  // the Dockerfile declares no ARG/ENV bridge for it). Matches the same URL this codebase already
-  // hardcodes in shopify.app.shop-chat-agent.toml's application_url. Only applied for `command ===
-  // "build"` — local/tunnel dev (`shopify app dev`) keeps serving its own assets from "/" exactly
-  // as before; forcing the production origin there would break HMR.
-  base: command === "build" ? "https://scent-ai-app.onrender.com/" : "/",
+  // Fix (dead preview page behind the App Proxy) — confirmed live, in two stages:
+  // 1. Vite's default root-relative asset URLs ("/assets/...") resolve against whatever origin
+  //    served the HTML — the storefront domain once this app is reached via
+  //    https://{shop}/apps/scent-library/..., not this app — so entry.client/root/route JS all
+  //    404'd and no client JS ever ran.
+  // 2. Pointing `base` at this app's own absolute Render origin instead (the first fix attempt)
+  //    made the files load, but a cross-origin <script type="module"> is always fetched with CORS,
+  //    and this server sends no Access-Control-Allow-Origin header — so the browser fetched the
+  //    file successfully and then refused to execute it.
+  // Using the App Proxy's own relative path as `base` instead avoids both: the browser now
+  // requests assets through the SAME origin that served the page (the store domain, relayed by
+  // Shopify's proxy) rather than cross-origin, so CORS never applies. This also needs no server
+  // changes — react-router-serve mounts its static-asset middleware at this exact same `base`
+  // value (see build.publicPath in its cli.js), so it starts serving assets at
+  // /apps/scent-library/assets automatically. Must match shopify.app.shop-chat-agent.toml's
+  // [app_proxy] prefix ("apps") + subpath ("scent-library") exactly. Direct (non-proxied) access
+  // to this app's other pages (the embedded admin UI, etc.) is unaffected: their own script tags
+  // become same-origin-relative to /apps/scent-library/assets/... too, which this same server
+  // still serves correctly regardless of which page asked for it.
+  base: command === "build" ? "/apps/scent-library/" : "/",
   server: {
     allowedHosts: [host],
     cors: {
