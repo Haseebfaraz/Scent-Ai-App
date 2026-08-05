@@ -76,9 +76,8 @@ export async function loader({ request }) {
   }
 
   const internalProducts = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
-  const excludedNotes = Array.isArray(recommendation.draftExcludedNotes) ? recommendation.draftExcludedNotes : [];
   const customerLikes = recommendation.customerProfileJson?.likes || [];
-  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes, customerLikes);
+  const buckets = computeNotePositionBuckets(internalProducts, customerLikes);
   const ratios = recommendation.draftRatiosJson || computeDefaultRatios(buckets);
   const customerFacingName = recommendation.customerFacingJson?.customerFacingName || "Custom Blend";
 
@@ -96,7 +95,6 @@ export async function loader({ request }) {
     name: recommendation.draftName || customerFacingName,
     buckets,
     ratios,
-    excludedNotes,
     buildStatus: recommendation.buildStatus,
     shopifyProductId: recommendation.shopifyProductId,
     // Fix (price didn't update while dragging) — exposed so the component can recompute a live
@@ -118,7 +116,6 @@ export async function action({ request }) {
   const intent = formData.get("intent");
   const recommendationId = formData.get("recommendationId");
   const name = formData.get("name") || null;
-  const excludedNotes = JSON.parse(formData.get("excludedNotes") || "[]");
   const ratios = JSON.parse(formData.get("ratios") || "null");
 
   const recommendation = await prisma.fragranceRecommendation.findUnique({ where: { id: recommendationId } });
@@ -131,7 +128,7 @@ export async function action({ request }) {
   if (intent === "recreate") {
     // 1. Save current preview state as an internal draft only — no Shopify product/variant, no
     // cart addition, matches the exact required behaviour.
-    await markRecommendationDraft(recommendationId, { name, excludedNotes, ratios });
+    await markRecommendationDraft(recommendationId, { name, ratios });
     // 2. Flag this conversation so chat.jsx's history loader asks "What would you like to change
     // about your fragrance?" the next time it's resumed (the widget already persists
     // conversationId in sessionStorage and auto-resumes it on load — no URL param needed).
@@ -143,7 +140,7 @@ export async function action({ request }) {
   }
 
   if (intent === "save_build" || intent === "add_to_cart") {
-    await markRecommendationDraft(recommendationId, { name, excludedNotes, ratios });
+    await markRecommendationDraft(recommendationId, { name, ratios });
 
     let shopifyProductId = recommendation.shopifyProductId;
     let shopifyVariantId = recommendation.shopifyVariantId;
@@ -156,7 +153,7 @@ export async function action({ request }) {
         const result = await createShopifyBuildProduct({
           admin, shopDomain, recommendation,
           customName: name || recommendation.customerFacingJson?.customerFacingName || "Custom Blend",
-          ratios, excludedNotes,
+          ratios,
           customerName: identityProfile.name, customerEmail: identityProfile.email,
         });
         shopifyProductId = result.productId;
@@ -294,10 +291,6 @@ const PAGE_STYLES = `
     margin-bottom: 12px;
     line-height: 1.55;
   }
-  .cs-note-notes-text button {
-    border: none; background: none; cursor: pointer; padding: 0; font: inherit; color: inherit;
-  }
-  .cs-note-notes-text button.excluded { text-decoration: line-through; opacity: 0.45; }
 
   /* Filled portion drawn via an inline background gradient (percent-driven, one color per
      position — matches the reference page's Top=blue/Middle=gold/Base=wine slider fills) since a
@@ -835,7 +828,7 @@ function AutoGrowTitleInput({ value, onChange }) {
 // BottleVisualization below — same three colors, applied here as a flat 2D fill).
 const SLIDER_FILL_COLOR = { top: "#2655d8", middle: "#D9AE68", base: "#8C4A3C" };
 
-function NoteRow({ position, notes, percent, excluded, onToggleExclude, onSlide }) {
+function NoteRow({ position, notes, percent, onSlide }) {
   const pct = Math.round(percent);
   return (
     <div className="cs-note-row" data-position={position}>
@@ -843,24 +836,7 @@ function NoteRow({ position, notes, percent, excluded, onToggleExclude, onSlide 
         <span>{POSITION_LABELS[position]}</span>
         <span className="cs-note-pct">{pct}%</span>
       </div>
-      <div className="cs-note-notes-text">
-        {notes.map((note, i) => {
-          const isExcluded = excluded.includes(note);
-          return (
-            <span key={note}>
-              {i > 0 ? " · " : ""}
-              <button
-                type="button"
-                className={isExcluded ? "excluded" : ""}
-                onClick={() => onToggleExclude(note)}
-                title={isExcluded ? "Excluded — click to restore" : "Click to exclude from display"}
-              >
-                {note}
-              </button>
-            </span>
-          );
-        })}
-      </div>
+      <div className="cs-note-notes-text">{notes.join(" · ")}</div>
       <input
         type="range" className="cs-slider" min="0" max="100" value={pct}
         onChange={(e) => onSlide(position, Number(e.target.value))}
@@ -922,12 +898,8 @@ export default function FragrancePreview() {
   const fetcher = useFetcher();
   const [name, setName] = useState(data.name);
   const [ratios, setRatios] = useState(data.ratios);
-  const [excludedNotes, setExcludedNotes] = useState(data.excludedNotes);
   const [pendingIntent, setPendingIntent] = useState(null);
 
-  const toggleExclude = (note) => {
-    setExcludedNotes((prev) => (prev.includes(note) ? prev.filter((n) => n !== note) : [...prev, note]));
-  };
   const handleSlide = (position, value) => setRatios((prev) => adjustRatios(prev, position, value));
 
   // Fix (price didn't update while dragging) — each position now has its own real $/5ml rate
@@ -942,10 +914,7 @@ export default function FragrancePreview() {
   const submit = (intent) => {
     setPendingIntent(intent);
     fetcher.submit(
-      {
-        intent, recommendationId: data.recommendationId, name,
-        excludedNotes: JSON.stringify(excludedNotes), ratios: JSON.stringify(ratios),
-      },
+      { intent, recommendationId: data.recommendationId, name, ratios: JSON.stringify(ratios) },
       { method: "post" },
     );
   };
@@ -1005,9 +974,9 @@ export default function FragrancePreview() {
           <div className="cs-title-edit-hint">&#9998; Click to rename</div>
 
           <div className="cs-notes">
-            <NoteRow position="top" notes={data.buckets.top} percent={ratios.top} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
-            <NoteRow position="middle" notes={data.buckets.middle} percent={ratios.middle} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
-            <NoteRow position="base" notes={data.buckets.base} percent={ratios.base} excluded={excludedNotes} onToggleExclude={toggleExclude} onSlide={handleSlide} />
+            <NoteRow position="top" notes={data.buckets.top} percent={ratios.top} onSlide={handleSlide} />
+            <NoteRow position="middle" notes={data.buckets.middle} percent={ratios.middle} onSlide={handleSlide} />
+            <NoteRow position="base" notes={data.buckets.base} percent={ratios.base} onSlide={handleSlide} />
           </div>
         </div>
 
