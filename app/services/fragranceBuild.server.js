@@ -16,28 +16,19 @@ const BOTTLE_IMAGE_URL = "https://cdn.shopify.com/s/files/1/1005/4379/1236/files
 
 /**
  * Buckets every real note across every real component product into Top/Middle/Base, using the one
- * shared, deterministic utility — never duplicated in frontend code. `excludedNotes` (customer
- * edits from the preview page) are filtered out of the DISPLAY lists only; they never change the
- * real formula/pricing, which is always driven by the real component products.
+ * shared, deterministic utility — never duplicated in frontend code.
  * Fix (customer's own liked notes silently dropped from display) — `customerLikes` (the profile's
  * stated likes, e.g. ["Fruity", "Fresh", "Apple"]) lets assignNotePositions keep a customer's own
  * liked notes over arbitrary others when a position has more real notes than the 5-note display
  * cap — never changes which position a note belongs to, only which ones survive that cap.
  * @param {Array<{title: string, notes: string[]}>} internalProducts
- * @param {string[]} [excludedNotes]
  * @param {string[]} [customerLikes]
  */
-export function computeNotePositionBuckets(internalProducts, excludedNotes = [], customerLikes = []) {
-  const excludedLower = new Set((excludedNotes || []).map((n) => String(n).toLowerCase()));
+export function computeNotePositionBuckets(internalProducts, customerLikes = []) {
   const allNotes = (internalProducts || []).flatMap((p) => p.notes || []);
   const likeFamilies = textToPreferenceFamilies(customerLikes);
   const literalTerms = literalNoteTermsFromLikes(customerLikes);
-  const buckets = assignNotePositions(allNotes, likeFamilies, literalTerms);
-  return {
-    top: buckets.top.filter((n) => !excludedLower.has(n.toLowerCase())),
-    middle: buckets.middle.filter((n) => !excludedLower.has(n.toLowerCase())),
-    base: buckets.base.filter((n) => !excludedLower.has(n.toLowerCase())),
-  };
+  return assignNotePositions(allNotes, likeFamilies, literalTerms);
 }
 
 // A simple, deterministic default split weighted by how many real notes landed in each position —
@@ -126,12 +117,11 @@ export async function computePricePer5mlByPosition(internalProducts, ratiosByPro
  * @param {object} args.recommendation - the FragranceRecommendation Prisma record.
  * @param {string} args.customName - customer-facing product name (draftName, or the deterministic fallback).
  * @param {{top: number, middle: number, base: number}} args.ratios - must sum to 100.
- * @param {string[]} [args.excludedNotes]
  * @param {string|null} args.customerName
  * @param {string|null} args.customerEmail
  * @returns {Promise<{productId: string, variantId: string, price: number, productUrl: string}>}
  */
-export async function createShopifyBuildProduct({ admin, shopDomain, recommendation, customName, ratios, excludedNotes, customerName, customerEmail }) {
+export async function createShopifyBuildProduct({ admin, shopDomain, recommendation, customName, ratios, customerName, customerEmail }) {
   const pctSum = ratios.top + ratios.middle + ratios.base;
   if (pctSum !== 100) {
     throw new Error(`Top/Middle/Base ratios must sum to 100 (got ${pctSum}).`);
@@ -139,7 +129,7 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
 
   const internalProducts = Array.isArray(recommendation.productsJson) ? recommendation.productsJson : [];
   const customerLikes = recommendation.customerProfileJson?.likes || [];
-  const buckets = computeNotePositionBuckets(internalProducts, excludedNotes, customerLikes);
+  const buckets = computeNotePositionBuckets(internalProducts, customerLikes);
 
   const ratiosByProduct = Array.isArray(recommendation.ratiosJson) ? recommendation.ratiosJson : [];
   const pricePer5mlByPosition = await computePricePer5mlByPosition(internalProducts, ratiosByProduct);
@@ -265,13 +255,12 @@ export async function createShopifyBuildProduct({ admin, shopDomain, recommendat
   return { productId: product.id, variantId: defaultVariantId, price: parseFloat(priceString), productUrl };
 }
 
-export async function markRecommendationDraft(recommendationId, { name, excludedNotes, ratios }) {
+export async function markRecommendationDraft(recommendationId, { name, ratios }) {
   return prisma.fragranceRecommendation.update({
     where: { id: recommendationId },
     data: {
       buildStatus: "draft",
       draftName: name ?? undefined,
-      draftExcludedNotes: excludedNotes ?? undefined,
       draftRatiosJson: ratios ?? undefined,
     },
   });

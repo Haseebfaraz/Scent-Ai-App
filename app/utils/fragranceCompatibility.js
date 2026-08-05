@@ -17,9 +17,14 @@ export const PREFERENCE_FAMILIES = {
   // currant, fig. "berr" (not just "strawberry") is used so it also catches "Raspberry" and any
   // other real berry note under the spec's own "berries" example. "fruity" itself is included
   // because the real catalog uses generic notes like "Fruity Notes" as a catch-all entry.
+  // Fix (real customer named a real catalog note we didn't recognize) — confirmed live: "coconut"
+  // is a real note that appears in the catalog (e.g. alongside Gin/Mojito in a Top Notes list), but
+  // matched nothing in this family at all — a dislike naming it silently vanished (never persisted,
+  // never excluded from the next recommendation) instead of being treated as the plain fruity/
+  // tropical note it is.
   fruity: [
     "fruity", "mango", "pineapple", "pear", "apple", "berr", "strawberry", "peach",
-    "apricot", "guava", "black currant", "blackcurrant", "fig",
+    "apricot", "guava", "black currant", "blackcurrant", "fig", "coconut",
   ],
   // Spec: vanilla, sugar, marshmallow, cotton candy, caramel, honey, tonka, whipped cream.
   // Fix (real customers say "candy", not "cotton candy") — confirmed live: "candy" alone matched
@@ -142,7 +147,7 @@ function escapeRegex(text) {
 // word "Apple" (as in "Pink Lady Apple"), never the middle of "Pineapple" — confirmed live as a real
 // bug during a targeted audit. Case-insensitive since callers already lowercase on one side or the
 // other inconsistently; matching case-insensitively here removes that footgun entirely.
-function containsWholeWord(text, term) {
+export function containsWholeWord(text, term) {
   return new RegExp(`\\b${escapeRegex(term)}\\b`, "i").test(text);
 }
 
@@ -164,6 +169,32 @@ export function literalNoteTermsFromLikes(strings) {
     }
   }
   return [...terms];
+}
+
+// Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
+// — confirmed live: "dont want coconut" did nothing until "coconut" was hand-added to a family list,
+// and the same silent no-op will recur for the next catalog note a customer names that isn't in any
+// family's keywords yet (there are hundreds of real notes; this file will never enumerate them all).
+// Checked instead against the SPECIFIC real notes of the recommendation actually being refined
+// (always known at refinement time — it's exactly what's on screen) rather than a fixed global list,
+// so any real note the customer can see and name is recognized, not just pre-approved ones.
+// FAMILY_DESCRIPTOR_WORDS excluded here too, same reasoning as literalNoteTermsFromLikes above — a
+// bare note that's actually a generic style word (e.g. a product literally listing "Musk" as one of
+// its notes) must still fall back to the FAMILY-level exclusion, not be treated as one specific
+// literal note, or "no musk" would stop catching "White Musk"/"Musky Amber" elsewhere in the catalog.
+export function matchedRealNotesInText(text, realNotes) {
+  if (!text || !realNotes?.length) return [];
+  const seen = new Set();
+  const matches = [];
+  for (const note of realNotes) {
+    const trimmed = String(note || "").trim();
+    if (!trimmed) continue;
+    const key = trimmed.toLowerCase();
+    if (seen.has(key) || FAMILY_DESCRIPTOR_WORDS.has(key) || !containsWholeWord(text, trimmed)) continue;
+    seen.add(key);
+    matches.push(key);
+  }
+  return matches;
 }
 
 // How many of a product's real notes literally contain one of the customer's named terms — a

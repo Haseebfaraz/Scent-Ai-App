@@ -162,7 +162,6 @@ async function main() {
     console.log("\n--- DB cross-check (FragranceRecommendation) ---");
     console.log("buildStatus:", recommendation.buildStatus);
     console.log("draftName:", recommendation.draftName);
-    console.log("draftExcludedNotes:", JSON.stringify(recommendation.draftExcludedNotes));
     console.log("draftRatiosJson:", JSON.stringify(recommendation.draftRatiosJson));
     console.log("shopifyProductId:", recommendation.shopifyProductId);
     console.log("shopifyVariantId:", recommendation.shopifyVariantId);

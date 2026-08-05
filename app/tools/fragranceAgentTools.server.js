@@ -31,7 +31,7 @@ import {
   hasSeasonWeatherConflict, getCalendarSeason,
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
-import { textToPreferenceFamilies, literalNoteTermsFromLikes } from "../utils/fragranceCompatibility.js";
+import { textToPreferenceFamilies, literalNoteTermsFromLikes, matchedRealNotesInText } from "../utils/fragranceCompatibility.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import { correctPreferenceVocabulary, correctPreferenceVocabularyList } from "../utils/fragranceNormalization.js";
 
@@ -476,7 +476,14 @@ const NEGATION_PATTERN = /\b(no|not|don'?t|without|remove|less|avoid|take out|ex
 const POSITIVE_OVERRIDE_PATTERN = /\b(more|want|add|keep|prefer|love|like)\b/i;
 const ONLY_NEW_PATTERN = /\bonly new\b|\bnew combinations? only\b/i;
 
-function deriveRefinementAdjustments(feedback) {
+// Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
+// — confirmed live: "dont want coconut" was a silent no-op until "coconut" was hand-added to a
+// family list, and the same gap will recur for the next real catalog note a customer names that
+// isn't in the vocabulary yet — there are hundreds of real notes, this file will never enumerate
+// them all. `currentNotes` (the real notes of the recommendation actually on screen when the
+// customer typed this, passed in by the caller) lets ANY note they can see and name be recognized
+// directly via matchedRealNotesInText, not just pre-approved ones — see that function's own comment.
+function deriveRefinementAdjustments(feedback, currentNotes = []) {
   // Split into clauses so "less woody, more fruity" resolves each family against ITS OWN clause's
   // polarity, not the sentence as a whole.
   const clauses = feedback.split(/[,;]|\band\b|\bbut\b/i).map((c) => c.trim()).filter(Boolean);
@@ -511,8 +518,9 @@ function deriveRefinementAdjustments(feedback) {
     // separate, narrower duplicate.
     for (const family of textToPreferenceFamilies([clause])) { target.add(family); clauseFamilies.add(family); }
 
-    const literalTerms = literalNoteTermsFromLikes([clause]);
-    if (literalTerms.length) literalTerms.forEach((t) => targetTerms.add(t));
+    const literalTerms = new Set(literalNoteTermsFromLikes([clause]));
+    matchedRealNotesInText(clause, currentNotes).forEach((t) => literalTerms.add(t));
+    if (literalTerms.size) literalTerms.forEach((t) => targetTerms.add(t));
     else clauseFamilies.forEach((f) => targetTerms.add(f));
   }
   // A stated exclusion wins over an incidental positive mention of the same family elsewhere in
@@ -533,8 +541,8 @@ function deriveRefinementAdjustments(feedback) {
 
 // Test-only escape hatch, same pattern as __getScratchForTesting above — lets the regression suite
 // check like/dislike direction deterministically without going through a full tool call.
-export function __deriveRefinementAdjustmentsForTesting(feedback) {
-  return deriveRefinementAdjustments(feedback);
+export function __deriveRefinementAdjustmentsForTesting(feedback, currentNotes) {
+  return deriveRefinementAdjustments(feedback, currentNotes);
 }
 
 // ============================================================
@@ -856,7 +864,19 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         if (!scratch.candidateProducts) {
           scratch.candidateProducts = await analyzeCustomerProductCandidates(queriedProfile);
         }
-        const adjustments = deriveRefinementAdjustments(parsed.data.feedback);
+        // Fix (refinement could only recognize notes already in a curated vocabulary) — the real
+        // notes of whatever recommendation the customer is actually looking at right now (set by
+        // autoSelectAndConfirmBest whenever a preview opens, including this tool's own previous
+        // call) let ANY note they can see and name be recognized, not just pre-approved ones.
+        let currentNotes = [];
+        if (profile.selectedRecommendationId) {
+          const currentRecommendation = await prisma.fragranceRecommendation.findUnique({
+            where: { id: profile.selectedRecommendationId },
+            select: { productsJson: true },
+          });
+          currentNotes = (currentRecommendation?.productsJson || []).flatMap((p) => p.notes || []);
+        }
+        const adjustments = deriveRefinementAdjustments(parsed.data.feedback, currentNotes);
         // Fix (refinement feedback never updated the stored profile) — a refinement request is a
         // real, explicit statement of preference ("I don't want sandalwood" plainly IS a dislike),
         // not just a one-off nudge for this regeneration round — confirmed live: the customer's own
@@ -876,12 +896,17 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         // unchanged. The family(ies) named in THIS refinement turn specifically are hard-excluded
         // from every anchor/support candidate for this regeneration — a stronger, more immediate
         // guarantee than the general dislike system, scoped only to what was just asked to remove.
+        // hardExcludeTerms is a second, narrower guarantee alongside it: a note recognized via
+        // matchedRealNotesInText above but with no PREFERENCE_FAMILIES entry at all (so
+        // textToPreferenceFamilies finds no family to hard-exclude by) still gets excluded directly,
+        // by literally matching its own name against each candidate's real notes.
         const hardExcludeFamilies = textToPreferenceFamilies(adjustments.addDislikeTerms);
         const combinations = await generateNewProductCombinations({
           profile: adjustedProfile,
           candidateProducts: scratch.candidateProducts,
           allowedTypes: adjustments.allowedTypes,
           hardExcludeFamilies,
+          hardExcludeTerms: adjustments.addDislikeTerms,
         });
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),
