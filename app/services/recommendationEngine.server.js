@@ -758,9 +758,21 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // compatibility scores are added back in. This directly implements "prefer two-product Hybrids...
   // avoid automatically filling results with Tribrids... use Quadbrids only when specifically
   // requested or strongly justified" as its own real scoring line, not just an indirect hope.
+  //
+  // Fix (every single recommendation came back Quadbrid for an ordinary, non-sensitive customer) —
+  // confirmed live: this bias used to be entirely OFF (all zeros) unless preferSimple was true, which
+  // only ever happens for a customer with an explicit sensitivity signal (SENSITIVITY_PHRASES). The
+  // spec line above says "use Quadbrids only when specifically requested or strongly justified" for
+  // EVERY customer, not just sensitive ones — with the bias fully zeroed by default, a Quadbrid's
+  // sheer product-count advantage on every OTHER additive score (more components = more chances to
+  // rack up preference/history/compatibility points) went completely unopposed, so it mechanically
+  // won every single time regardless of whether it genuinely fit better. Reusing the same magnitude
+  // already used for the sensitive case as the real default now, with sensitivity layering on an
+  // even stronger penalty on top — not zero, since "strongly justified" was never meant to mean
+  // "no justification needed at all" for the common, non-sensitive customer.
   const TYPE_SIMPLICITY_SCORE = preferSimple
-    ? { HYBRID: 10, TRIBRID: -6, QUADBRID: -16 }
-    : { HYBRID: 0, TRIBRID: 0, QUADBRID: 0 };
+    ? { HYBRID: 14, TRIBRID: -10, QUADBRID: -22 }
+    : { HYBRID: 10, TRIBRID: -6, QUADBRID: -16 };
   const typeSimplicityScore = TYPE_SIMPLICITY_SCORE[type] ?? 0;
 
   // Fix (flat risk-count penalty replaced with severity) — every identified risk used to cost a

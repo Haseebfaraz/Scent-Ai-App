@@ -243,6 +243,42 @@ describe("generateNewProductCombinations (real data)", () => {
     }
   });
 
+  // Fix (real bug: every single recommendation for a customer came back Quadbrid, never Hybrid or
+  // Tribrid) — TYPE_SIMPLICITY_SCORE used to be all zeros unless the customer had an explicit
+  // sensitivity signal, so an ordinary customer got zero bias toward Hybrid at all — a Quadbrid's
+  // sheer product-count advantage on every other additive score won every time by default.
+  describe("TYPE_SIMPLICITY_SCORE — Hybrid preferred by default, not only for a sensitive customer", () => {
+    const ordinaryProfile = {
+      city: "Los Angeles", stateRegion: "California", country: "United States", season: "Summer",
+      likes: ["Fruity", "Sweet"], dislikes: [], locationVerified: true,
+    };
+
+    it("gives an ordinary, non-sensitive customer a real non-zero bias toward Hybrid and against Quadbrid", async () => {
+      const candidates = await analyzeCustomerProductCandidates(ordinaryProfile);
+      const hybridResults = await generateNewProductCombinations({ profile: ordinaryProfile, candidateProducts: candidates, allowedTypes: ["HYBRID"], maximumResults: 5 });
+      const quadbridResults = await generateNewProductCombinations({ profile: ordinaryProfile, candidateProducts: candidates, allowedTypes: ["QUADBRID"], maximumResults: 5 });
+      expect(hybridResults.length).toBeGreaterThan(0);
+      expect(quadbridResults.length).toBeGreaterThan(0);
+      for (const r of hybridResults) expect(r.typeSimplicityScore).toBe(10);
+      for (const r of quadbridResults) expect(r.typeSimplicityScore).toBe(-16);
+    });
+
+    it("strengthens the bias further for a sensitive customer, on top of the ordinary-customer baseline", async () => {
+      const sensitiveProfile = { ...ordinaryProfile, dislikes: ["too strong"] };
+      const candidates = await analyzeCustomerProductCandidates(sensitiveProfile);
+      const hybridResults = await generateNewProductCombinations({ profile: sensitiveProfile, candidateProducts: candidates, allowedTypes: ["HYBRID"], maximumResults: 5 });
+      for (const r of hybridResults) expect(r.typeSimplicityScore).toBe(14);
+    });
+
+    it("never returns an exclusively-Quadbrid batch for an ordinary customer when Hybrid candidates exist", async () => {
+      const candidates = await analyzeCustomerProductCandidates(ordinaryProfile);
+      const combinations = await generateNewProductCombinations({ profile: ordinaryProfile, candidateProducts: candidates, maximumResults: 8 });
+      const types = new Set(combinations.map((c) => c.type));
+      // Only meaningful if there was real competition across types to begin with.
+      if (types.size > 0) expect(types.has("QUADBRID") && types.size === 1).toBe(false);
+    });
+  });
+
   // Fix 3 — real source products/notes must never appear on customer-facing fields, and every
   // customer-facing field must actually be populated (never left for the model to invent).
   // Fix (Aniq spec, sections 11-12) — reverses the earlier hidden-name policy: real product names
