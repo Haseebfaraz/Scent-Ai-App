@@ -38,6 +38,7 @@ import {
   exactNoteCoverageScore,
   matchedLiteralTerms,
   missingLiteralTerms,
+  splitDislikesByExactness,
 } from "../utils/fragranceCompatibility.js";
 import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, likeMatchStrength } from "../utils/fragranceScoring.js";
 import { describeCharacter, directionForRole, pickWords, DIRECTION_VOCABULARY } from "../utils/fragranceVocabulary.js";
@@ -557,11 +558,19 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const { season, likes = [], dislikes = [] } = profile || {};
   const likeFamilies = textToPreferenceFamilies(likes);
   const literalLikeTerms = literalNoteTermsFromLikes(likes);
-  const dislikeFamilies = textToPreferenceFamilies(dislikes);
+  // Fix (exact-note dislike collapsed into whole-family dislike) — confirmed live: "I dislike
+  // Sandalwood" used to convert straight into the whole `woody` family, so a component loaded with
+  // Cedar/Vetiver/Patchouli (zero Sandalwood) could still hit "high" severity below and reject the
+  // whole combination, purely for sharing a family with the one note actually named. A literal
+  // named note now hard-rejects directly on ITS OWN presence (see hasHardExcludedTerm just below);
+  // only a bare family/style dislike ("Woody fragrances") still feeds the broader severity check.
+  const { exactNoteDislikes, explicitFamilyDislikes } = splitDislikesByExactness(dislikes);
+  const dislikeFamilies = explicitFamilyDislikes;
 
   // A single high-severity conflicting component disqualifies the whole combination.
   let conflictPenalty = 0;
   for (const p of comboProducts) {
+    if (hasHardExcludedTerm(p.notes, exactNoteDislikes)) return null;
     const conflict = classifyDislikeConflict(p.notes, dislikeFamilies);
     if (conflict.severity === "high") return null;
     if (conflict.severity === "medium") conflictPenalty -= 5;
@@ -574,9 +583,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // assigned on purpose to a genuinely different-direction product.
   if (roledProducts.filter((p) => !p.hasDetectedFamily).length >= 2) return null;
 
+  // Fix (single_family_concentration needs to know what the customer actually asked for) —
+  // likeFamilies/strengthPreference/roledProducts let the risk rules distinguish "every product
+  // shares a family the customer never mentioned" (duplicate_direction, a real defect) from "every
+  // product shares the family the customer explicitly asked for" (single_family_concentration,
+  // whose real severity depends on role diversity and whether it actually causes a problem — see
+  // that rule's own comment in fragranceCompatibility.js).
+  const riskContext = { season, likeFamilies, strengthPreference: preferenceIntent?.strengthPreference, roledProducts };
   const risks = assessCombinationRisks(
     comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
-    { season },
+    riskContext,
   );
   // Fix (flat risk-count penalty replaced with severity) — severity-weighted, correlation-grouped
   // version of the same risk detection above (`risks` itself is untouched, still consumed by
@@ -585,7 +601,7 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // combination outright, the same way a high-severity dislike conflict already does.
   const riskDetails = assessCombinationRiskDetails(
     comboProducts.map((p) => ({ title: p.title, notes: p.notes })),
-    { season },
+    riskContext,
   );
   if (riskDetails.hasCritical) return null;
 
@@ -671,7 +687,14 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   // check silently never caught it despite the rule's own id being "duplicate_direction". Every
   // product sharing one identical primary role is exactly the case Test 9 requires to zero out the
   // balance score.
-  const balanceRiskHit = risks.some((r) => /compete|duplicate|complex|no contrasting role/i.test(r));
+  // Fix (single_family_concentration) — the regex above can't reliably catch every phrasing of the
+  // new excessive_direction_stacking case (its message varies by which real problem it found), so
+  // it's checked directly by id via riskDetails (already computed) instead — the advisory/low
+  // single_family_concentration/insufficient_role_diversity cases deliberately do NOT zero the
+  // balance score, since those represent the customer getting exactly the one direction they asked
+  // for, not a real structural flaw.
+  const hasExcessiveDirectionStacking = riskDetails.breakdown.some((r) => r.id === "excessive_direction_stacking");
+  const balanceRiskHit = hasExcessiveDirectionStacking || risks.some((r) => /compete|duplicate|complex|no contrasting role/i.test(r));
   const balanceScore = balanceRiskHit ? 0 : 10;
   const rolesComplementary = !balanceRiskHit && roledProducts.every((p) => p.hasDetectedFamily);
 
@@ -816,7 +839,16 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   if (risks.length > 0) cap("high");
   if (!profileComplete) cap("high");
   if (evidenceScope === "limited" || evidenceScope === "global") cap("medium");
-  if (risks.length >= 2) cap("low");
+  // Fix (confidence's own hard-cap-to-"low" rule used a raw risk COUNT, the exact flat-count
+  // anti-pattern the rest of this codebase already moved away from for risk scoring itself) —
+  // confirmed as a real, newly-consequential bug once confidence started gating auto-confirmation
+  // (Phase 15): two merely "advisory" risks (e.g. competing_fruits + quadbrid_complexity, -1 each)
+  // forced "low" exactly as hard as two "high" ones would, blocking a perfectly reasonable
+  // recommendation from ever auto-confirming. riskDetails.riskPenalty is the SAME severity-weighted,
+  // correlation-deduplicated total already used in finalScore — reusing it here instead of the raw
+  // count means only a genuinely serious risk load (roughly one high-severity hit, or several real
+  // medium ones) caps this low, not a couple of minor nitpicks.
+  if (riskDetails.riskPenalty <= -10) cap("low");
   // Fix (Aniq spec) — a highly sensitive/simple-preference customer can never read a very-high- or
   // high-complexity combination as more confident than the complexity genuinely supports.
   if (preferSimple && combinedComplexity === "very-high") cap("low");
@@ -1156,10 +1188,19 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // a full re-scan, and never required to succeed (a note nothing eligible actually contains stays
   // honestly reported as missing, not silently dropped).
   const literalLikeTerms = literalNoteTermsFromLikes(profile?.likes || []);
+  // Fix (final-batch coverage metadata incomplete) — matchedExactNotes/missingExactNotes were
+  // already persisted, but nothing recorded WHAT was originally requested (as its own field, not
+  // just matched-union-missing) or WHETHER/WHAT a fallback regeneration pass actually targeted —
+  // so admin/debug metadata could never distinguish "never needed a fallback" from "a fallback ran
+  // and these specific terms were the target," which the spec calls for explicitly.
+  let fallbackUsed = false;
+  let fallbackTargetNotes = [];
   if (literalLikeTerms.length > 0) {
     const batchNotes = finalResults.flatMap((r) => r.internalProducts.flatMap((p) => p.notes || []));
     const missing = missingLiteralTerms(batchNotes, literalLikeTerms);
     if (missing.length) {
+      fallbackUsed = true;
+      fallbackTargetNotes = missing;
       const fallbackAnchors = buildFallbackAnchorsForMissingTerms(missing, { allProducts, finishedCombinationTitles, preferenceIntent, candidateProducts, hardExcludeFamilies, hardExcludeTerms });
       for (const anchor of fallbackAnchors) {
         results.push(...generateCombosForAnchor(anchor, genCtx));
@@ -1173,11 +1214,16 @@ export async function generateNewProductCombinations({ profile, candidateProduct
   // of the customer's literally named notes IT covers and which it doesn't, regardless of whether
   // the regeneration pass above found anything — internal/debug metadata only (see
   // recommendationConfirmation.server.js's scoreJson persistence and toCustomerSafeRecommendation's
-  // explicit allow-list, which never exposes this).
+  // explicit allow-list, which never exposes this). Recomputed AFTER the fallback rerank above (not
+  // assumed from the fallback attempt alone), so a term that still isn't in the true final batch is
+  // honestly reported as missing rather than assumed covered just because a fallback pass ran.
   for (const r of finalResults) {
     const notes = r.internalProducts.flatMap((p) => p.notes || []);
+    r.requestedExactNotes = literalLikeTerms;
     r.matchedExactNotes = matchedLiteralTerms(notes, literalLikeTerms);
     r.missingExactNotes = missingLiteralTerms(notes, literalLikeTerms);
+    r.fallbackUsed = fallbackUsed;
+    r.fallbackTargetNotes = fallbackTargetNotes;
   }
 
   // Fix (vagueness diagnosis) — only the proposals actually being returned pay for a real,

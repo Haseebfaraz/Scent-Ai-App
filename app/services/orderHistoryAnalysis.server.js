@@ -14,7 +14,7 @@ import { SCORE_WEIGHTS, classifyDislikeConflict, matchedLikes, computeEvidenceLe
 import {
   textToPreferenceFamilies, interpretCustomerPreferences, passesIntensityFilter,
   interpretLifestyleContext, countPreferredDirectionMatches,
-  literalNoteTermsFromLikes, literalNoteMatchCount,
+  literalNoteTermsFromLikes, literalNoteMatchCount, splitDislikesByExactness,
 } from "../utils/fragranceCompatibility.js";
 
 // Matches the MIN_SAMPLE_SIZE convention already established in app/routes/chat.jsx's
@@ -231,7 +231,12 @@ export async function analyzeCustomerProductCandidates(profile) {
   const productByNormalizedTitle = new Map(products.map((p) => [p.normalizedTitle, p]));
 
   const likeFamilies = likeFamiliesForCandidates;
-  const dislikeFamilies = textToPreferenceFamilies(dislikes);
+  // Fix (exact-note dislike collapsed into whole-family dislike) — a literal disliked note (e.g.
+  // "Sandalwood") now hard-excludes only products literally containing it; a bare family/style
+  // dislike (e.g. "Woody fragrances") keeps the existing softer, severity-scaled treatment below.
+  // See splitDislikesByExactness's own comment for why these can't share one treatment.
+  const { exactNoteDislikes, explicitFamilyDislikes } = splitDislikesByExactness(dislikes);
+  const dislikeFamilies = explicitFamilyDislikes;
   // Fix (Aniq spec, sections 2/4) — a customer's free-text sensitivity/style signals now become a
   // real, deterministic pre-generation filter at the candidate-scoring stage itself, not just at
   // final combination scoring — a highly sensitive customer never even sees an intense product as
@@ -260,6 +265,9 @@ export async function analyzeCustomerProductCandidates(profile) {
     const preferenceMatches = matchedLikes(notes, likeFamilies);
     const dislikeConflict = classifyDislikeConflict(notes, dislikeFamilies);
 
+    // Fix (exact-note dislike collapsed into whole-family dislike) — hard-exclude directly on the
+    // literal named note, independent of the family-level severity check below.
+    if (literalNoteMatchCount(notes, exactNoteDislikes) > 0) continue;
     // Spec: "Products with a high conflict should normally be excluded."
     if (dislikeConflict.severity === "high") continue;
     // Fix (Aniq spec) — a hard pre-generation exclusion for a highly sensitive customer.

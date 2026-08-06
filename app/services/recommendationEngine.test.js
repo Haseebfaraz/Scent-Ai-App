@@ -7,7 +7,7 @@ import {
 import { likeMatchStrength, classifyDislikeConflict } from "../utils/fragranceScoring.js";
 import {
   literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore, matchedLiteralTerms,
-  missingLiteralTerms, textToPreferenceFamilies,
+  missingLiteralTerms, textToPreferenceFamilies, splitDislikesByExactness,
 } from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
@@ -444,19 +444,18 @@ describe("generateNewProductCombinations (real data)", () => {
     const combinations = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
     expect(combinations.length).toBeGreaterThan(0);
 
-    const dislikeFamilies = textToPreferenceFamilies(profile.dislikes);
     const existing = await prisma.existingCombination.findMany({ select: { componentKey: true } });
     const existingKeys = new Set(existing.map((e) => e.componentKey));
 
-    // scoreProposedCombination's hard reject checks severity PER COMPONENT (never rejecting a whole
-    // combo for one merely-supporting note elsewhere) — so this checks the same granularity, not
-    // the combo's combined note list, which can legitimately read as a stronger conflict once
-    // several individually-mild components are summed together (that's a real, intentional design
-    // choice, not a bug — see classifyDislikeConflict's own spec comment).
+    // Fix (exact-note dislike vs explicit-family dislike, Phase 4) — "Amber" and "Sandalwood" here
+    // are both literal named notes (real PREFERENCE_FAMILIES keywords, not bare descriptor words),
+    // so they now hard-exclude directly on their own presence, never the whole strongHeavy/woody
+    // family — a component containing Oud/Leather/Tobacco (zero Amber) or Cedar/Vetiver (zero
+    // Sandalwood) is legitimately allowed through now, which is the fix working as intended, not a
+    // regression from this test's old, broader assertion.
     for (const combo of combinations) {
       for (const product of combo.internalProducts) {
-        const conflict = classifyDislikeConflict(product.notes, dislikeFamilies);
-        expect(conflict.severity).not.toBe("high");
+        expect(literalNoteMatchCount(product.notes, ["amber", "sandalwood"])).toBe(0);
       }
       expect(existingKeys.has(combo.canonicalKey)).toBe(false);
     }
@@ -575,5 +574,94 @@ describe("computeEvidenceScope (Fix 9)", () => {
 
   it("falls back to 'limited' when there's no real evidence of any kind", () => {
     expect(computeEvidenceScope(zeroEvidence, { locationVerified: true })).toBe("limited");
+  });
+});
+
+// Fix (exact-note dislike collapsed into whole-family dislike) — confirmed as a real gap: "I
+// dislike Sandalwood" used to convert straight into the whole `woody` family via
+// textToPreferenceFamilies, so a component loaded with Cedar/Vetiver/Patchouli (zero Sandalwood)
+// could still accumulate enough matched notes to hit "high" severity and be hard-rejected, purely
+// for sharing a family with the one note actually named. These test the exact functions wired into
+// scoreProposedCombination/orderHistoryAnalysis/confirmRecommendation, since all three route
+// through splitDislikesByExactness + hasHardExcludedTerm/classifyDislikeConflict identically.
+describe("exact-note dislike vs explicit-family dislike (Phase 4)", () => {
+  it("an exact 'Sandalwood' dislike never triggers a family-level conflict for a product containing only OTHER woody notes", () => {
+    const { exactNoteDislikes, explicitFamilyDislikes } = splitDislikesByExactness(["Sandalwood"]);
+    const cedarVetiverProduct = ["Cedar", "Vetiver", "Patchouli", "Musk"];
+    expect(hasHardExcludedTerm(cedarVetiverProduct, exactNoteDislikes)).toBe(false);
+    expect(classifyDislikeConflict(cedarVetiverProduct, explicitFamilyDislikes).severity).toBe("none");
+  });
+
+  it("an exact 'Sandalwood' dislike DOES hard-exclude a product that actually contains Sandalwood", () => {
+    const { exactNoteDislikes } = splitDislikesByExactness(["Sandalwood"]);
+    expect(hasHardExcludedTerm(["Bergamot", "Sandalwood", "Musk"], exactNoteDislikes)).toBe(true);
+  });
+
+  it("a broad 'Woody fragrances' dislike still rejects a heavily woody product via the existing severity system, unaffected by the split", () => {
+    const { explicitFamilyDislikes } = splitDislikesByExactness(["Woody fragrances"]);
+    const heavilyWoodyProduct = ["Cedar", "Vetiver", "Patchouli", "Guaiac"];
+    expect(classifyDislikeConflict(heavilyWoodyProduct, explicitFamilyDislikes).severity).toBe("high");
+  });
+
+  it("an exact 'Amber' dislike follows the documented Amber-material policy — stays a literal note, never expands to the whole strongHeavy family (Oud/Leather/Tobacco/Smoke/Resin)", () => {
+    const { exactNoteDislikes, explicitFamilyDislikes } = splitDislikesByExactness(["Amber"]);
+    const oudLeatherProduct = ["Oud", "Leather", "Tobacco", "Smoke", "Resin"];
+    expect(hasHardExcludedTerm(oudLeatherProduct, exactNoteDislikes)).toBe(false);
+    expect(classifyDislikeConflict(oudLeatherProduct, explicitFamilyDislikes).severity).toBe("none");
+    expect(hasHardExcludedTerm(["Bergamot", "Amber", "Musk"], exactNoteDislikes)).toBe(true);
+  });
+});
+
+// Fix (sensory-direction words produced zero signal) — real, live-confirmed bug: a customer whose
+// entire stated likes were "dry, earthy, natural" got recommendations built from sweet/spicy/amber
+// candidates because those three words matched nothing anywhere in the engine, so candidate
+// ranking fell back to pure regional popularity with zero input from what was actually said.
+describe("Bruce profile — dry/earthy/natural likes actually reach candidate ranking (spec regression test)", () => {
+  it("candidates get a real preferenceMatches hit for dry/earthy/natural, not just regional popularity", async () => {
+    const profile = {
+      city: "Liverpool", stateRegion: null, country: "United Kingdom", season: "Winter",
+      likes: ["dry", "earthy", "natural"], dislikes: ["fruity", "fruity gourmand"], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    expect(candidates.length).toBeGreaterThan(0);
+    const hasDirectionMatch = candidates.some((c) =>
+      c.preferenceMatches.some((f) => ["dry", "earthy", "natural"].includes(f)),
+    );
+    expect(hasDirectionMatch).toBe(true);
+  });
+
+  it("a real moss/vetiver/herb-forward product outranks a sweet-fruit product once likes actually carry signal", () => {
+    // Direct, deterministic proof of the underlying scoring mechanism (no catalog/network
+    // dependency): before this fix, BOTH products below scored identically on preference (zero
+    // family matches for either), so a sweet-fruit product could rank above a dry/earthy/natural
+    // one purely on regional popularity. Now the dry/earthy/natural product gets real credit.
+    const likeFamilies = textToPreferenceFamilies(["dry", "earthy", "natural"]);
+    const dryEarthyProduct = ["Vetiver", "Moss", "Galbanum", "Green Tea"];
+    const sweetFruitProduct = ["Sugar", "Caramel", "Mango", "Pineapple"];
+    expect(likeMatchStrength(dryEarthyProduct, "dry")).toBeGreaterThan(0);
+    expect(likeMatchStrength(dryEarthyProduct, "earthy")).toBeGreaterThan(0);
+    expect(likeMatchStrength(dryEarthyProduct, "natural")).toBeGreaterThan(0);
+    const dryEarthyMatches = likeFamilies.filter((f) => likeMatchStrength(dryEarthyProduct, f) > 0);
+    const sweetFruitMatches = likeFamilies.filter((f) => likeMatchStrength(sweetFruitProduct, f) > 0);
+    expect(dryEarthyMatches.length).toBeGreaterThan(sweetFruitMatches.length);
+  });
+});
+
+// Fix (final-batch coverage metadata incomplete) — requestedExactNotes/fallbackUsed/
+// fallbackTargetNotes weren't tracked at all; matchedExactNotes/missingExactNotes/
+// exactNoteCoverageScore already were.
+describe("final-batch coverage metadata (Phase 12)", () => {
+  it("every returned result carries requestedExactNotes and a fallbackUsed flag", async () => {
+    const profile = {
+      city: "Los Angeles", stateRegion: "California", country: "United States", season: "Summer",
+      likes: ["Fruity", "Apple"], dislikes: [], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const results = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 5 });
+    for (const r of results) {
+      expect(r.requestedExactNotes).toEqual(expect.arrayContaining(["apple"]));
+      expect(typeof r.fallbackUsed).toBe("boolean");
+      expect(Array.isArray(r.fallbackTargetNotes)).toBe(true);
+    }
   });
 });
