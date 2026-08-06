@@ -152,22 +152,42 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
   console.log(stage, JSON.stringify({ conversationId, recommendationId, previewId, eventType, previewUrl }));
 }
 
+// Fix (no confidence gate before auto-confirmation) — confirmed as a real gap: the highest-ranked
+// candidate got auto-confirmed regardless of confidence, so a "low" confidence combination could be
+// presented to the customer with exactly the same certainty as a "very high" one.
+//
+// Fix (blocking ALL "low" broke the core auto-preview flow) — confirmed live in testing: under the
+// existing confidence formula, "low" is the common outcome for an ordinary customer without deep
+// historical evidence (e.g. a fresh profile with just one stated like) — not a rare edge case. A
+// blanket block left the primary flow this whole engine is built around failing routinely with "not
+// confident enough" instead of ever opening a preview. Thin evidence alone isn't dangerous, just
+// less certain, so it's allowed through; only a genuine, surviving high/critical-severity risk
+// blocks auto-confirmation outright, at any confidence level. (A high-severity DISLIKE conflict
+// specifically can never reach this point at all — scoreProposedCombination already hard-rejects
+// those at generation time, before a candidate is ever ranked.)
+function isEligibleForAutoConfirmation(candidate) {
+  return !(candidate.riskBreakdown || []).some((r) => r.counted && (r.severity === "high" || r.severity === "critical"));
+}
+
 // Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list
 // into an automatically-opened preview. Used by both generate_new_product_combinations AND
 // refine_combination_recommendations — a customer who says "make it sweeter" or "remove the dark
 // chocolate" after Recreate must land on an auto-opened preview exactly the same way a first-time
 // generation does, never back on a "pick one of N" list. `withIds` must already be rank-sorted
 // best-first (both generateNewProductCombinations call sites are). Walking it in order and
-// confirming the first one that actually re-verifies is "the highest-ranked VALID recommendation"
-// — a rare re-verification failure (e.g. a component vanished from the catalog microseconds after
-// generation) falls through to the next-best real candidate instead of silently failing the turn
-// or opening a broken preview.
+// confirming the first one that actually re-verifies AND clears the confidence gate above is "the
+// highest-ranked VALID, sufficiently-confident recommendation" — a rare re-verification failure
+// (e.g. a component vanished from the catalog microseconds after generation) or a too-low-confidence
+// candidate falls through to the next-best real candidate instead of silently failing the turn or
+// opening a preview the engine itself isn't confident in.
 async function autoSelectAndConfirmBest(withIds, conversationId, context) {
   logPreviewEvent("RECOMMENDATIONS_RANKED", {
     conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
   });
 
+  let anyConfidenceGated = false;
   for (const candidate of withIds) {
+    if (!isEligibleForAutoConfirmation(candidate)) { anyConfidenceGated = true; continue; }
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
       customerName: context.customerName,
@@ -192,6 +212,16 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
     };
   }
 
+  // Fix (no confidence gate before auto-confirmation) — every candidate that was otherwise valid
+  // got filtered out purely for being too low-confidence to present with certainty; tell the model
+  // the truth so it can ask for more detail or offer to try again, instead of a generic "technical
+  // issue" excuse that misdescribes what actually happened.
+  if (anyConfidenceGated) {
+    return {
+      ok: false,
+      modelContent: "every generated combination was too low-confidence to recommend with certainty (thin evidence, weak fit to what the customer said, or a real compatibility risk) — tell the customer honestly that nothing felt like a confident enough match yet, and ask a bit more about their preferences rather than presenting a weak guess as a solid recommendation.",
+    };
+  }
   // Every ranked candidate failed re-verification (rare) — never silently open a broken preview;
   // tell the model plainly instead so it can inform the customer honestly.
   return {
@@ -543,6 +573,13 @@ function deriveRefinementAdjustments(feedback, currentNotes = []) {
 // check like/dislike direction deterministically without going through a full tool call.
 export function __deriveRefinementAdjustmentsForTesting(feedback, currentNotes) {
   return deriveRefinementAdjustments(feedback, currentNotes);
+}
+
+// Test-only escape hatch, same pattern as above — lets the regression suite check the
+// confidence-gating decision directly with a synthetic candidate, without needing a real
+// generation to happen to produce one of each confidence level.
+export function __isEligibleForAutoConfirmationForTesting(candidate) {
+  return isEligibleForAutoConfirmation(candidate);
 }
 
 // ============================================================
