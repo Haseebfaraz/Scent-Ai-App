@@ -1,4 +1,4 @@
-import { PREFERENCE_FAMILIES } from "./fragranceCompatibility.js";
+import { PREFERENCE_FAMILIES, containsWholeWord } from "./fragranceCompatibility.js";
 
 const LITERAL_MATCH_RANK = 2;
 const FAMILY_MATCH_RANK = 1;
@@ -71,9 +71,16 @@ const MAX_NOTES_PER_POSITION = 5;
 // Fix (literal note terms lost to family-level matching) — a note literally matching one of the
 // customer's own named terms (e.g. "Peach") now outranks one that only matches the broader family
 // (e.g. "Pear", also `fruity`) — previously both ranked identically as long as either was "liked".
+// Fix (preview prioritization let Apple match Pineapple) — the literal-term branch used plain
+// `.includes()`, unlike every other literal-term matcher in this codebase (literalNoteMatchCount/
+// matchedLiteralTerms/missingLiteralTerms all use containsWholeWord) — confirmed the exact same
+// bug class as the real Apple/Pineapple substring bug those were fixed for, just in this one
+// preview-display code path that never got the word-boundary fix. Family-level matching below
+// intentionally stays substring-based (that's the established, accepted design for broad family
+// detection everywhere else — see detectFamilies).
 function noteLikeRank(note, likeFamilies, literalTerms) {
+  if (literalTerms?.length && literalTerms.some((term) => containsWholeWord(note, term))) return LITERAL_MATCH_RANK;
   const lower = String(note).toLowerCase();
-  if (literalTerms?.length && literalTerms.some((term) => lower.includes(term))) return LITERAL_MATCH_RANK;
   if (likeFamilies?.length && likeFamilies.some((family) => {
     const keywords = PREFERENCE_FAMILIES[family];
     return keywords && keywords.some((kw) => lower.includes(kw));

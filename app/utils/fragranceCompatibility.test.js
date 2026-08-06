@@ -21,6 +21,7 @@ import {
   matchedLiteralTerms,
   missingLiteralTerms,
   matchedRealNotesInText,
+  splitDislikesByExactness,
 } from "./fragranceCompatibility.js";
 
 describe("detectFamilies", () => {
@@ -344,6 +345,74 @@ describe("assessCombinationRiskDetails (severity-weighted, correlation-grouped)"
   });
 });
 
+// Fix (single_family_concentration) — confirmed live: duplicate_direction used to fire "high" for
+// EVERY customer whose entire stated preference is one family (e.g. Fruity/Apple/Strawberry/Peach,
+// or Bruce's dry/earthy/natural) — an extremely common, entirely ordinary customer type, not a real
+// defect. These test the contextual replacement directly.
+describe("single_family_concentration (contextual severity for a customer's OWN requested direction)", () => {
+  it("stays advisory for a fruity-only customer's fruity products with distinct roles and no real conflict", () => {
+    const products = [
+      { title: "A", notes: ["Mango", "Bergamot"] },
+      { title: "B", notes: ["Pineapple", "Vanilla"] },
+    ];
+    const roledProducts = [
+      { ...products[0], role: "Main fruit body" },
+      { ...products[1], role: "Sweetness" },
+    ];
+    const result = assessCombinationRiskDetails(products, { likeFamilies: ["fruity"], roledProducts });
+    expect(result.breakdown.some((r) => r.id === "duplicate_direction")).toBe(false);
+    const hit = result.breakdown.find((r) => r.id === "single_family_concentration");
+    expect(hit).toMatchObject({ severity: "advisory", counted: true, penalty: -1 });
+  });
+
+  it("escalates to high for a fruity-only customer whose three gourmand-heavy products conflict with hot weather", () => {
+    const products = [
+      { title: "A", notes: ["Mango", "Sugar"] },
+      { title: "B", notes: ["Pineapple", "Caramel"] },
+      { title: "C", notes: ["Guava", "Marshmallow"] },
+    ];
+    const result = assessCombinationRiskDetails(products, { likeFamilies: ["fruity"], season: "Summer" });
+    const hit = result.breakdown.find((r) => r.id === "excessive_direction_stacking");
+    expect(hit).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+  });
+
+  it("stays advisory for a dry/earthy customer's moss/vetiver products with distinct roles (Bruce-shaped profile)", () => {
+    const products = [
+      { title: "A", notes: ["Vetiver", "Bergamot"] },
+      { title: "B", notes: ["Moss", "Vanilla"] },
+    ];
+    const roledProducts = [
+      { ...products[0], role: "Freshness" },
+      { ...products[1], role: "Sweetness" },
+    ];
+    const result = assessCombinationRiskDetails(products, { likeFamilies: ["dry", "earthy"], roledProducts });
+    const hit = result.breakdown.find((r) => r.id === "single_family_concentration");
+    expect(hit).toMatchObject({ severity: "advisory" });
+  });
+
+  it("escalates to medium/high when two products in the requested family have near-duplicate note profiles", () => {
+    const products = [
+      { title: "A", notes: ["Mango", "Pineapple", "Guava", "Bergamot"] },
+      { title: "B", notes: ["Mango", "Pineapple", "Guava", "Vanilla"] },
+    ];
+    const result = assessCombinationRiskDetails(products, { likeFamilies: ["fruity"] });
+    const hit = result.breakdown.find((r) => r.id === "excessive_direction_stacking");
+    expect(hit).toBeTruthy();
+    expect(["medium", "high"]).toContain(hit.severity);
+  });
+
+  it("a repeated direction the customer did NOT ask for remains a meaningful, unchanged high-severity risk", () => {
+    const products = [
+      { title: "A", notes: ["Mango"] },
+      { title: "B", notes: ["Pineapple"] },
+    ];
+    const result = assessCombinationRiskDetails(products, { likeFamilies: ["woody"] }); // likes woody, not fruity
+    const hit = result.breakdown.find((r) => r.id === "duplicate_direction");
+    expect(hit).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+    expect(result.breakdown.some((r) => r.id === "single_family_concentration")).toBe(false);
+  });
+});
+
 describe("groupAndPenalizeRisks (pure grouping/penalty function)", () => {
   it("counts every uncorrelated hit independently", () => {
     const result = groupAndPenalizeRisks([
@@ -563,5 +632,62 @@ describe("countPreferredDirectionMatches / countAvoidedDirectionMatches (Test 2 
 
   it("never penalizes a direction the customer didn't actually avoid", () => {
     expect(countAvoidedDirectionMatches(["Black Pepper"], ["oud", "leather"])).toBe(0);
+  });
+});
+
+// Fix (sensory-direction words produced zero signal) — confirmed live: a customer whose entire
+// stated likes were "dry, earthy, natural" matched nothing anywhere in this file, so their
+// candidate pool fell back to pure regional popularity with zero input from what they actually said.
+describe("dry / earthy / natural sensory-direction families", () => {
+  it("recognizes the bare direction words themselves", () => {
+    expect(textToPreferenceFamilies(["dry"])).toContain("dry");
+    expect(textToPreferenceFamilies(["earthy"])).toContain("earthy");
+    expect(textToPreferenceFamilies(["natural"])).toContain("natural");
+  });
+
+  it("matches real catalog notes the spec calls out for each direction", () => {
+    expect(detectFamilies(["Vetiver", "Oakmoss"], PREFERENCE_FAMILIES)).toContain("dry");
+    expect(detectFamilies(["Patchouli", "Galbanum"], PREFERENCE_FAMILIES)).toContain("earthy");
+    expect(detectFamilies(["Sage", "Sea Salt"], PREFERENCE_FAMILIES)).toContain("natural");
+  });
+
+  it("a combined 'dry, earthy, natural' like statement matches all three families on a real moss/vetiver/herb product", () => {
+    const families = textToPreferenceFamilies(["dry, earthy, natural"]);
+    expect(families).toEqual(expect.arrayContaining(["dry", "earthy", "natural"]));
+    expect(detectFamilies(["Vetiver", "Moss", "Sage"], PREFERENCE_FAMILIES)).toEqual(
+      expect.arrayContaining(["dry", "earthy", "natural"]),
+    );
+  });
+
+  it("never treats the bare direction words as a literal exact note (they are not real catalog notes)", () => {
+    expect(literalNoteTermsFromLikes(["dry, earthy, natural"])).toEqual([]);
+  });
+});
+
+// Fix (exact-note dislike collapsed into whole-family dislike) — confirmed as a real gap: "I
+// dislike Sandalwood" used to convert straight into the whole `woody` family.
+describe("splitDislikesByExactness", () => {
+  it("puts a named literal note in exactNoteDislikes, not explicitFamilyDislikes", () => {
+    const result = splitDislikesByExactness(["Sandalwood"]);
+    expect(result.exactNoteDislikes).toContain("sandalwood");
+    expect(result.explicitFamilyDislikes).not.toContain("woody");
+  });
+
+  it("puts a bare family/style word in explicitFamilyDislikes, not exactNoteDislikes", () => {
+    const result = splitDislikesByExactness(["Woody fragrances"]);
+    expect(result.explicitFamilyDislikes).toContain("woody");
+    expect(result.exactNoteDislikes).toEqual([]);
+  });
+
+  it("follows the documented Amber-material policy — exact Amber stays a literal note, not the whole strongHeavy family", () => {
+    const result = splitDislikesByExactness(["Amber"]);
+    expect(result.exactNoteDislikes).toContain("amber");
+    expect(result.explicitFamilyDislikes).not.toContain("strongHeavy");
+  });
+
+  it("keeps each dislike phrase independent when both kinds appear in the same array", () => {
+    const result = splitDislikesByExactness(["Sandalwood", "Fruity fragrances"]);
+    expect(result.exactNoteDislikes).toContain("sandalwood");
+    expect(result.explicitFamilyDislikes).toContain("fruity");
   });
 });
