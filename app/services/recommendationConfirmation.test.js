@@ -162,3 +162,54 @@ describe("confirmRecommendation", () => {
     expect(result.reason).toMatch(/high-severity conflict/);
   });
 });
+
+// Fix (no deduplication) — confirmed as a real gap: nothing stopped the exact same component
+// signature from being persisted twice for one active conversation (e.g. two generation calls
+// both scoring the same top candidate identically), each with its own id and its own name.
+describe("saveRecommendation deduplication (Phase 16)", () => {
+  it("reuses the existing recommendation instead of creating a duplicate for the same conversation + component signature", async () => {
+    const conversationId = "vitest-dedup-" + Date.now();
+    const combination = await baseCombination();
+    const firstId = await saveRecommendation({ conversationId, profile: { dislikes: [] }, combination });
+    createdRecommendationIds.push(firstId);
+
+    const secondId = await saveRecommendation({ conversationId, profile: { dislikes: [] }, combination });
+    expect(secondId).toBe(firstId);
+
+    const rows = await prisma.fragranceRecommendation.findMany({ where: { conversationId }, select: { evidenceJson: true } });
+    const count = rows.filter((r) => r.evidenceJson?.canonicalKey === combination.canonicalKey).length;
+    expect(count).toBe(1);
+  });
+
+  it("does NOT dedupe across different conversations, even with the same component signature", async () => {
+    const combination = await baseCombination();
+    const firstId = await saveRecommendation({ conversationId: "vitest-dedup-a-" + Date.now(), profile: { dislikes: [] }, combination });
+    createdRecommendationIds.push(firstId);
+    const secondId = await saveRecommendation({ conversationId: "vitest-dedup-b-" + Date.now(), profile: { dislikes: [] }, combination });
+    createdRecommendationIds.push(secondId);
+    expect(secondId).not.toBe(firstId);
+  });
+
+  it("does NOT dedupe against an expired recommendation — a fresh one is created instead", async () => {
+    const combination = await baseCombination();
+    const conversationId = "vitest-dedup-expired-" + Date.now();
+    const old = await prisma.fragranceRecommendation.create({
+      data: {
+        conversationId,
+        customerProfileJson: { dislikes: [] },
+        productsJson: combination.internalProducts,
+        combinationType: combination.type,
+        scoreJson: {},
+        evidenceJson: { canonicalKey: combination.canonicalKey },
+        ratiosJson: combination.recommendedRatio,
+        status: "pending",
+        createdAt: new Date(Date.now() - 48 * 60 * 60 * 1000), // 48h ago — past the 24h window
+      },
+    });
+    createdRecommendationIds.push(old.id);
+
+    const freshId = await saveRecommendation({ conversationId, profile: { dislikes: [] }, combination });
+    createdRecommendationIds.push(freshId);
+    expect(freshId).not.toBe(old.id);
+  });
+});
