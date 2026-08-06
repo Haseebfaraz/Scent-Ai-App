@@ -160,13 +160,22 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
 // existing confidence formula, "low" is the common outcome for an ordinary customer without deep
 // historical evidence (e.g. a fresh profile with just one stated like) — not a rare edge case. A
 // blanket block left the primary flow this whole engine is built around failing routinely with "not
-// confident enough" instead of ever opening a preview. Thin evidence alone isn't dangerous, just
-// less certain, so it's allowed through; only a genuine, surviving high/critical-severity risk
-// blocks auto-confirmation outright, at any confidence level. (A high-severity DISLIKE conflict
-// specifically can never reach this point at all — scoreProposedCombination already hard-rejects
-// those at generation time, before a candidate is ever ranked.)
+// confident enough" instead of ever opening a preview.
+//
+// Fix (never block on sparse evidence, only a genuinely bad formula) — data/historical/novelty
+// confidence are all "how much evidence backs this" — thin evidence alone isn't dangerous, just
+// less certain, so none of them (nor the blended `confidence` label, which mixes them in) gate
+// auto-confirmation. What DOES block: the formula is a poor match for this customer (customerFit
+// "low"), incompatible (compatibility "low" — 2+ real risks), or genuinely risky (a surviving
+// high/critical-severity risk). Invalid shapes never reach this point at all —
+// scoreProposedCombination/validateCombinationShape already hard-reject those at generation time.
 function isEligibleForAutoConfirmation(candidate) {
-  return !(candidate.riskBreakdown || []).some((r) => r.counted && (r.severity === "high" || r.severity === "critical"));
+  const hasHighSeverityRisk = (candidate.riskBreakdown || []).some((r) => r.counted && (r.severity === "high" || r.severity === "critical"));
+  if (hasHighSeverityRisk) return false;
+  const breakdown = candidate.confidenceBreakdown || {};
+  if (breakdown.customerFit?.value === "low") return false;
+  if (breakdown.compatibility?.value === "low") return false;
+  return true;
 }
 
 // Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list

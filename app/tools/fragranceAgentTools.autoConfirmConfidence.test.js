@@ -51,4 +51,31 @@ describe("isEligibleForAutoConfirmation", () => {
     };
     expect(isEligible(dedupedRisk)).toBe(true);
   });
+
+  // Round 3 — block on a genuinely bad formula (poor match, incompatible, risky), never on evidence
+  // being merely thin. customerFit/compatibility "low" both mean the formula itself is the problem,
+  // not that data is scarce, so they block even with zero counted risks.
+  it("rejects a candidate whose formula is a poor match for the customer (customerFit low)", () => {
+    const poorFit = { confidence: "medium", confidenceBreakdown: { customerFit: { value: "low" } }, riskBreakdown: [] };
+    expect(isEligible(poorFit)).toBe(false);
+  });
+
+  it("rejects a candidate flagged incompatible (compatibility low), even with no single high-severity risk", () => {
+    const incompatible = { confidence: "medium", confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "low" } }, riskBreakdown: [] };
+    expect(isEligible(incompatible)).toBe(false);
+  });
+
+  // Data/historical/novelty are pure evidence-sparsity dimensions — thin data, little history, no
+  // analogous existing combination. None of them describe the formula being wrong, so none block.
+  it("auto-confirms despite thin data, historical, and novelty confidence, as long as fit/compatibility/risk are fine", () => {
+    const sparseEvidence = {
+      confidence: "low",
+      confidenceBreakdown: {
+        data: { value: "low" }, historical: { value: "low" }, novelty: { value: "low" },
+        customerFit: { value: "high" }, compatibility: { value: "high" },
+      },
+      riskBreakdown: [],
+    };
+    expect(isEligible(sparseEvidence)).toBe(true);
+  });
 });

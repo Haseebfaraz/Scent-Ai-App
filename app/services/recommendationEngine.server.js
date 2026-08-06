@@ -865,7 +865,14 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const minNoteCount = Math.min(...comboProducts.map((p) => (p.notes || []).length));
   const dataConfidence = minNoteCount >= 3 ? "high" : minNoteCount >= 1 ? "medium" : "low";
 
-  const compatibilityConfidence = risks.length === 0 && rolesComplementary ? "high" : risks.length <= 1 ? "medium" : "low";
+  // Fix (compatibility confidence used a raw risk COUNT) — the same flat-count anti-pattern
+  // finalScore's own risk penalty and the "low" confidence cap were already fixed to avoid:
+  // two or more merely-advisory/low-severity risks (e.g. a spice_conflict plus a mild
+  // excessive_direction_stacking) read as "low" compatibility exactly as hard as an actual
+  // high-severity risk would, even though nothing about the combination is genuinely
+  // incompatible. Reuses the same severity-weighted riskPenalty everything else already does.
+  const compatibilityConfidence =
+    riskDetails.riskPenalty === 0 && rolesComplementary ? "high" : riskDetails.riskPenalty > -10 ? "medium" : "low";
 
   const noveltyConfidence = analogousExistingCombinations.length >= 2 ? "high" : analogousExistingCombinations.length >= 1 ? "medium" : "low";
 
