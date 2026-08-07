@@ -1,81 +1,131 @@
 // Fix (Phase 15 — no confidence gate before auto-confirmation) — confirmed as a real gap: the
 // highest-ranked candidate got auto-confirmed regardless of confidence, so a "low" confidence
 // combination (thin data, poor customer fit, or a real compatibility risk) could be presented to
-// the customer with exactly the same certainty as a "very high" one. Tests the gating decision
-// directly with synthetic candidates — no need for a real generation to happen to produce one of
-// each confidence level.
+// the customer with exactly the same certainty as a "very high" one.
+//
+// Fix (persist the gate's own reasoning) — evaluateAutoConfirmEligibility(candidate, profile) is
+// the ONE function that decides and explains auto-confirmation; these tests exercise it directly
+// with synthetic candidates/profiles, no real generation needed. A hard-dislike conflict needs a
+// profile (independent of the candidate's own scoring), so the test hook now takes both.
 import { describe, it, expect } from "vitest";
-import { __isEligibleForAutoConfirmationForTesting as isEligible } from "./fragranceAgentTools.server.js";
+import { __evaluateAutoConfirmEligibilityForTesting as evaluate } from "./fragranceAgentTools.server.js";
+import { CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
 
-describe("isEligibleForAutoConfirmation", () => {
-  // Round 1 (Phase 15 clarification) — "low" confidence alone must NOT block; it's the ordinary
-  // outcome for a customer without deep historical evidence, not a rare edge case. Only a real,
-  // counted high/critical-severity risk blocks auto-confirmation.
-  it("auto-confirms a low-confidence candidate that carries no counted high-severity risk", () => {
-    expect(isEligible({ confidence: "low", riskBreakdown: [] })).toBe(true);
+function candidate(overrides = {}) {
+  return {
+    type: "HYBRID",
+    internalProducts: [
+      { title: "A", notes: ["Bergamot", "Lemon"], contribution: "Freshness" },
+      { title: "B", notes: ["Vanilla", "Musk"], contribution: "Sweetness" },
+    ],
+    recommendedRatio: [
+      { productTitle: "A", ratioPercent: 50 },
+      { productTitle: "B", ratioPercent: 50 },
+    ],
+    confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" }, historical: { value: "low" }, data: { value: "low" }, novelty: { value: "low" } },
+    riskBreakdown: [],
+    ...overrides,
+  };
+}
+
+describe("evaluateAutoConfirmEligibility", () => {
+  it("auto-confirms strong customer fit with zero history (sparse evidence never blocks)", () => {
+    const c = candidate({ confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" }, historical: { value: "low" } } });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(true);
+    expect(result.autoConfirmReasons).toEqual([]);
   });
 
-  it("rejects a low-confidence candidate carrying a counted high-severity risk", () => {
-    expect(isEligible({ confidence: "low", riskBreakdown: [{ counted: true, severity: "high" }] })).toBe(false);
+  it("does NOT auto-confirm weak customer fit even with excellent history (a poor match is a bad formula, not thin evidence)", () => {
+    const c = candidate({ confidenceBreakdown: { customerFit: { value: "low" }, compatibility: { value: "high" }, historical: { value: "high" } } });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(false);
+    expect(result.autoConfirmReasons).toContain("customer_fit_low");
   });
 
-  it("always auto-confirms a very-high or high confidence candidate", () => {
-    expect(isEligible({ confidence: "very high", riskBreakdown: [] })).toBe(true);
-    expect(isEligible({ confidence: "high", riskBreakdown: [] })).toBe(true);
+  it("does NOT auto-confirm good customer fit with poor compatibility", () => {
+    const c = candidate({ confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "low" } } });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(false);
+    expect(result.autoConfirmReasons).toContain("compatibility_low");
   });
 
-  // Round 2 (evidence-based follow-up) — a medium-confidence customer-fit requirement is itself a
-  // "thin evidence" gate, the same class of block round 1 already ruled out for "low". Confirmed
-  // live: it reproduced the exact same "every candidate too low-confidence" failure for an ordinary
-  // Fruity-only customer after a refinement, since real medium-confidence candidates routinely carry
-  // customerFit "low"/"medium", not "high". The gate is unified to risk alone, at every tier.
-  it("auto-confirms a medium-confidence candidate with weak customer fit as long as it carries no high-severity risk", () => {
-    const weakFitMedium = { confidence: "medium", confidenceBreakdown: { customerFit: { value: "medium" } }, riskBreakdown: [] };
-    expect(isEligible(weakFitMedium)).toBe(true);
+  it("advisory/low risks do not block", () => {
+    const c = candidate({
+      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "medium" } },
+      riskBreakdown: [{ counted: true, severity: "advisory" }, { counted: true, severity: "low" }],
+    });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(true);
+    expect(result.highestCountedRiskSeverity).toBe("low");
   });
 
-  it("rejects a medium-confidence candidate carrying a counted high-severity risk, even with high customer fit", () => {
-    const riskyMedium = {
-      confidence: "medium",
-      confidenceBreakdown: { customerFit: { value: "high" } },
-      riskBreakdown: [{ counted: true, severity: "high" }],
-    };
-    expect(isEligible(riskyMedium)).toBe(false);
+  it("high/critical risks do block", () => {
+    const high = candidate({ riskBreakdown: [{ counted: true, severity: "high" }] });
+    const highResult = evaluate(high, { dislikes: [] });
+    expect(highResult.autoConfirmEligible).toBe(false);
+    expect(highResult.autoConfirmReasons).toContain("high_severity_risk:high");
+
+    const critical = candidate({ riskBreakdown: [{ counted: true, severity: "critical" }] });
+    const criticalResult = evaluate(critical, { dislikes: [] });
+    expect(criticalResult.autoConfirmEligible).toBe(false);
+    expect(criticalResult.autoConfirmReasons).toContain("high_severity_risk:critical");
   });
 
   it("ignores a high-severity risk that was correlation-deduplicated out (counted: false)", () => {
-    const dedupedRisk = {
-      confidence: "medium",
-      confidenceBreakdown: { customerFit: { value: "high" } },
-      riskBreakdown: [{ counted: false, severity: "high" }],
-    };
-    expect(isEligible(dedupedRisk)).toBe(true);
+    const c = candidate({ riskBreakdown: [{ counted: false, severity: "high" }] });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(true);
+    expect(result.highestCountedRiskSeverity).toBe(null);
   });
 
-  // Round 3 — block on a genuinely bad formula (poor match, incompatible, risky), never on evidence
-  // being merely thin. customerFit/compatibility "low" both mean the formula itself is the problem,
-  // not that data is scarce, so they block even with zero counted risks.
-  it("rejects a candidate whose formula is a poor match for the customer (customerFit low)", () => {
-    const poorFit = { confidence: "medium", confidenceBreakdown: { customerFit: { value: "low" } }, riskBreakdown: [] };
-    expect(isEligible(poorFit)).toBe(false);
-  });
-
-  it("rejects a candidate flagged incompatible (compatibility low), even with no single high-severity risk", () => {
-    const incompatible = { confidence: "medium", confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "low" } }, riskBreakdown: [] };
-    expect(isEligible(incompatible)).toBe(false);
-  });
-
-  // Data/historical/novelty are pure evidence-sparsity dimensions — thin data, little history, no
-  // analogous existing combination. None of them describe the formula being wrong, so none block.
-  it("auto-confirms despite thin data, historical, and novelty confidence, as long as fit/compatibility/risk are fine", () => {
-    const sparseEvidence = {
-      confidence: "low",
-      confidenceBreakdown: {
-        data: { value: "low" }, historical: { value: "low" }, novelty: { value: "low" },
-        customerFit: { value: "high" }, compatibility: { value: "high" },
-      },
+  // A hard dislike is checked independently of the candidate's own score/confidence — it must
+  // block even when everything else about the formula reads perfectly.
+  it("a hard dislike always blocks, regardless of final score or history", () => {
+    const c = candidate({
+      internalProducts: [
+        { title: "A", notes: ["Sandalwood", "Bergamot"], contribution: "Base" },
+        { title: "B", notes: ["Vanilla"], contribution: "Sweetness" },
+      ],
+      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" }, historical: { value: "high" } },
       riskBreakdown: [],
-    };
-    expect(isEligible(sparseEvidence)).toBe(true);
+    });
+    const result = evaluate(c, { dislikes: ["Sandalwood"] });
+    expect(result.autoConfirmEligible).toBe(false);
+    expect(result.autoConfirmReasons).toContain("hard_dislike_conflict");
+    expect(result.hasHardDislikeConflict).toBe(true);
+  });
+
+  it("a stated family dislike (not a literal note) does not trip the hard-dislike check — that's the existing severity-scaled path", () => {
+    const c = candidate({ confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } } });
+    const result = evaluate(c, { dislikes: ["Woody fragrances"] });
+    expect(result.hasHardDislikeConflict).toBe(false);
+  });
+
+  it("blocks an invalid combination shape (ratios that don't sum to 100%) regardless of everything else", () => {
+    const c = candidate({
+      recommendedRatio: [{ productTitle: "A", ratioPercent: 40 }, { productTitle: "B", ratioPercent: 40 }],
+      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } },
+      riskBreakdown: [],
+    });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.autoConfirmEligible).toBe(false);
+    expect(result.autoConfirmReasons).toContain("invalid_shape");
+    expect(result.shapeValid).toBe(false);
+  });
+
+  it("exposes the actual customer-fit threshold the gate compares against", () => {
+    const result = evaluate(candidate(), { dislikes: [] });
+    expect(result.customerFitThreshold).toBe(CUSTOMER_FIT_LOW_THRESHOLD);
+  });
+
+  it("reports the highest severity among counted risks, not just the first one", () => {
+    const c = candidate({
+      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "medium" } },
+      riskBreakdown: [{ counted: true, severity: "advisory" }, { counted: true, severity: "medium" }, { counted: true, severity: "low" }],
+    });
+    const result = evaluate(c, { dislikes: [] });
+    expect(result.highestCountedRiskSeverity).toBe("medium");
+    expect(result.autoConfirmEligible).toBe(true); // medium never blocks on its own, only high/critical
   });
 });

@@ -23,7 +23,7 @@ import {
   checkExactCombinationExists,
   findCombinationsUsingSimilarNotes,
 } from "../services/combinationAnalysis.server.js";
-import { generateNewProductCombinations } from "../services/recommendationEngine.server.js";
+import { generateNewProductCombinations, validateCombinationShape, CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
 import {
@@ -31,7 +31,10 @@ import {
   hasSeasonWeatherConflict, getCalendarSeason,
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
-import { textToPreferenceFamilies, literalNoteTermsFromLikes, matchedRealNotesInText } from "../utils/fragranceCompatibility.js";
+import {
+  textToPreferenceFamilies, literalNoteTermsFromLikes, matchedRealNotesInText,
+  splitDislikesByExactness, literalNoteMatchCount, SEVERITY_RANK,
+} from "../utils/fragranceCompatibility.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import { correctPreferenceVocabulary, correctPreferenceVocabularyList } from "../utils/fragranceNormalization.js";
 
@@ -167,15 +170,57 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
 // less certain, so none of them (nor the blended `confidence` label, which mixes them in) gate
 // auto-confirmation. What DOES block: the formula is a poor match for this customer (customerFit
 // "low"), incompatible (compatibility "low" — 2+ real risks), or genuinely risky (a surviving
-// high/critical-severity risk). Invalid shapes never reach this point at all —
-// scoreProposedCombination/validateCombinationShape already hard-reject those at generation time.
-function isEligibleForAutoConfirmation(candidate) {
-  const hasHighSeverityRisk = (candidate.riskBreakdown || []).some((r) => r.counted && (r.severity === "high" || r.severity === "critical"));
-  if (hasHighSeverityRisk) return false;
+// high/critical-severity risk).
+//
+// Fix (persist the gate's own reasoning) — the decision used to be made transiently inside the
+// confirm loop with no record of why; there was no way to audit or test a specific ranked
+// recommendation's eligibility after the fact. Computes and returns every raw value the gate
+// checks, so the caller can attach it to the recommendation before it's ever saved.
+//
+// hasHardDislikeConflict and shapeValid are independent re-checks, defense in depth exactly like
+// saveRecommendation/confirmRecommendation already apply for the same two things — generation-time
+// filtering (scoreProposedCombination/validateCombinationShape) already guarantees a ranked
+// candidate can't actually have either problem, but the gate never trusts that alone.
+function evaluateAutoConfirmEligibility(candidate, profile) {
   const breakdown = candidate.confidenceBreakdown || {};
-  if (breakdown.customerFit?.value === "low") return false;
-  if (breakdown.compatibility?.value === "low") return false;
-  return true;
+  const customerFitConfidence = breakdown.customerFit?.value ?? null;
+  const compatibilityConfidence = breakdown.compatibility?.value ?? null;
+
+  const countedRisks = (candidate.riskBreakdown || []).filter((r) => r.counted);
+  const highestCountedRiskSeverity = countedRisks.reduce(
+    (worst, r) => (worst === null || SEVERITY_RANK[r.severity] > SEVERITY_RANK[worst] ? r.severity : worst),
+    null,
+  );
+  const hasHighSeverityRisk = highestCountedRiskSeverity === "high" || highestCountedRiskSeverity === "critical";
+
+  const { exactNoteDislikes } = splitDislikesByExactness(profile?.dislikes || []);
+  const allNotes = (candidate.internalProducts || []).flatMap((p) => p.notes || []);
+  const hasHardDislikeConflict = literalNoteMatchCount(allNotes, exactNoteDislikes) > 0;
+
+  let shapeValid = true;
+  try {
+    validateCombinationShape({ type: candidate.type, products: candidate.internalProducts, recommendedRatio: candidate.recommendedRatio });
+  } catch {
+    shapeValid = false;
+  }
+
+  const reasons = [];
+  // Hard dislike and invalid shape are checked first and block unconditionally, regardless of how
+  // high the final score or how strong the history is — neither is a matter of degree.
+  if (hasHardDislikeConflict) reasons.push("hard_dislike_conflict");
+  if (!shapeValid) reasons.push("invalid_shape");
+  if (hasHighSeverityRisk) reasons.push(`high_severity_risk:${highestCountedRiskSeverity}`);
+  if (customerFitConfidence === "low") reasons.push("customer_fit_low");
+  if (compatibilityConfidence === "low") reasons.push("compatibility_low");
+
+  return {
+    autoConfirmEligible: reasons.length === 0,
+    autoConfirmReasons: reasons,
+    customerFitThreshold: CUSTOMER_FIT_LOW_THRESHOLD,
+    highestCountedRiskSeverity,
+    hasHardDislikeConflict,
+    shapeValid,
+  };
 }
 
 // Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list
@@ -196,7 +241,7 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
 
   let anyConfidenceGated = false;
   for (const candidate of withIds) {
-    if (!isEligibleForAutoConfirmation(candidate)) { anyConfidenceGated = true; continue; }
+    if (!candidate.autoConfirmEligible) { anyConfidenceGated = true; continue; }
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
       customerName: context.customerName,
@@ -585,10 +630,11 @@ export function __deriveRefinementAdjustmentsForTesting(feedback, currentNotes) 
 }
 
 // Test-only escape hatch, same pattern as above — lets the regression suite check the
-// confidence-gating decision directly with a synthetic candidate, without needing a real
-// generation to happen to produce one of each confidence level.
-export function __isEligibleForAutoConfirmationForTesting(candidate) {
-  return isEligibleForAutoConfirmation(candidate);
+// auto-confirmation gate's full decision (eligibility, reasons, and every raw value it used)
+// directly with a synthetic candidate/profile, without needing a real generation to happen to
+// produce one of each case.
+export function __evaluateAutoConfirmEligibilityForTesting(candidate, profile) {
+  return evaluateAutoConfirmEligibility(candidate, profile);
 }
 
 // ============================================================
@@ -876,6 +922,10 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           maximumResults: parsed.data.maximumResults,
           allowedTypes: parsed.data.allowedTypes,
         });
+        // Fix (persist the auto-confirm gate's own reasoning) — computed and attached before
+        // saveRecommendation so it's part of the immutable, persisted record for every ranked
+        // recommendation, not just recomputed transiently inside the confirm loop.
+        combinations.forEach((c) => Object.assign(c, evaluateAutoConfirmEligibility(c, queriedProfile)));
         // Persist every proposal now (not just the one the customer eventually confirms) so a
         // later confirm_product_combination call always has a real, immutable, re-verifiable
         // record to point at by ID — never a free-form model reconstruction.
@@ -954,6 +1004,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           hardExcludeFamilies,
           hardExcludeTerms: adjustments.addDislikeTerms,
         });
+        combinations.forEach((c) => Object.assign(c, evaluateAutoConfirmEligibility(c, adjustedProfile)));
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),
         );

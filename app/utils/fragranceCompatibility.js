@@ -544,7 +544,9 @@ export function assessCombinationRisks(products, context = {}) {
 // hit still appears in the returned breakdown (with `counted: false` for the suppressed duplicate)
 // so nothing is silently hidden.
 const RISK_SEVERITY_PENALTY = { advisory: -1, low: -2, medium: -5, high: -10, critical: -10 };
-const SEVERITY_RANK = { advisory: 0, low: 1, medium: 2, high: 3, critical: 4 };
+// Exported so callers outside this file (the auto-confirmation gate) can rank a candidate's own
+// counted risks by severity without duplicating this ordering.
+export const SEVERITY_RANK = { advisory: 0, low: 1, medium: 2, high: 3, critical: 4 };
 const FAMILY_SPECIFIC_RISK_FAMILY = {
   multiple_heavy_components: "strongHeavy",
   competing_fruits: "fruity",

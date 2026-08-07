@@ -90,6 +90,18 @@ export async function saveRecommendation({ conversationId, profile, combination 
         // Fix (multidimensional confidence) — persisted so a confirmed/previewed recommendation
         // still shows the same breakdown it was generated with, not just the blended overall value.
         confidenceBreakdown: combination.confidenceBreakdown,
+        customerFitScore: combination.customerFitScore,
+        // Fix (persist the auto-confirm gate's own reasoning) — every ranked recommendation now
+        // records not just whether it was eligible, but every raw value the gate actually checked
+        // (customerFitScore/customerFitThreshold above and compatibilityScore/confidenceBreakdown
+        // already persisted cover the score side; these cover the rest), so the decision can be
+        // audited or tested against the real persisted record, not just recomputed transiently.
+        autoConfirmEligible: combination.autoConfirmEligible,
+        autoConfirmReasons: combination.autoConfirmReasons,
+        customerFitThreshold: combination.customerFitThreshold,
+        highestCountedRiskSeverity: combination.highestCountedRiskSeverity,
+        hasHardDislikeConflict: combination.hasHardDislikeConflict,
+        shapeValid: combination.shapeValid,
       },
       evidenceJson: {
         historicalEvidence: combination.historicalEvidence,

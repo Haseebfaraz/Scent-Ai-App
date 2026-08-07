@@ -532,6 +532,10 @@ function findAnalogousCombinations(comboProducts, allCombinations, notesByNormal
 // scoreProposedCombination already rejects a zero-match combo before this is ever computed, and a
 // zero-history combo is never excluded here either — this only ever caps how much history can ADD.
 export const MAX_HISTORY_SCORE = 6;
+// Exported so the auto-confirmation gate (fragranceAgentTools.server.js) can persist/report the
+// exact threshold it's checking customerFitScore against, instead of a second hardcoded copy of
+// "3" that could silently drift from the one actually used to classify "low" here.
+export const CUSTOMER_FIT_LOW_THRESHOLD = 3;
 export function computeHistoryScore(anchor) {
   const rawHistoryScore =
     (anchor.sameCityOrders > 0 ? SCORE_WEIGHTS.sameCity : 0) +
@@ -877,7 +881,8 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
   const noveltyConfidence = analogousExistingCombinations.length >= 2 ? "high" : analogousExistingCombinations.length >= 1 ? "medium" : "low";
 
   const customerFitRaw = preferenceScore + styleMatchScore + lifestyleMatchScore;
-  const customerFitConfidence = !profileComplete ? "low" : customerFitRaw >= 8 ? "high" : customerFitRaw >= 3 ? "medium" : "low";
+  const customerFitConfidence =
+    !profileComplete ? "low" : customerFitRaw >= 8 ? "high" : customerFitRaw >= CUSTOMER_FIT_LOW_THRESHOLD ? "medium" : "low";
 
   const confidenceBreakdown = {
     data: { value: dataConfidence, reason: dataConfidence === "high" ? "Every component has a full, real note list on file." : "At least one component's real note list is thin." },
@@ -999,6 +1004,10 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     seasonalScore,
     historyScore,
     compatibilityScore,
+    // Fix (persist the auto-confirm gate's own values) — the raw preference/style/lifestyle total
+    // customerFitConfidence is banded from; exposed directly so the gate (and its persisted
+    // snapshot) reads the actual number instead of re-deriving it from confidenceBreakdown's text.
+    customerFitScore: customerFitRaw,
     balanceScore,
     conflictPenalty,
     styleMatchScore,

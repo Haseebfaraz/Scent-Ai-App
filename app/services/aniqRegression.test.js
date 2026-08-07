@@ -223,5 +223,11 @@ describe("Test 8: cache invalidation — a real profile change regenerates candi
     } finally {
       await prisma.customerProfileState.deleteMany({ where: { conversationId } });
     }
-  });
+  // Fix (flaky timeout under full-suite load) — confirmed live: two sequential real
+  // generate_new_product_combinations calls (each a real DB query + scoring pass) fit comfortably
+  // inside the global 45s testTimeout in isolation, but occasionally exceeded it when the full
+  // suite runs ~30 test files concurrently against the same database. Same explicit-timeout
+  // convention already used elsewhere in this suite for similarly-shaped multi-call tests (e.g.
+  // autoPreviewFlow.test.js), rather than raising the global default for every test.
+  }, 90000);
 });
