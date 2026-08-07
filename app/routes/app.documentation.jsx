@@ -86,6 +86,7 @@ export default function Documentation() {
         <s-stack direction="block" gap="tight">
           <Bullet>Confidence is capped downward whenever real evidence is thin, the profile is incomplete, roles aren't complementary, or genuine risks were found — it can never read "very high" purely by accumulating small positive signals elsewhere.</Bullet>
           <Bullet>A customer in a region with little real historical order data will honestly see lower confidence more often — that's an accurate reflection of thin evidence, not a bug.</Bullet>
+          <Bullet>Whether a preview is allowed to open automatically is a separate decision from the confidence badge. It's judged purely on whether the formula itself holds up — a real match to what the customer asked for, genuine compatibility, no disliked note present, no serious risk, and a structurally valid recipe — never on how much order-history evidence backs it. A brand-new customer with zero purchase history still gets an auto-opened preview as long as the formula itself is sound; thin evidence only ever shows up as a lower confidence badge, it never blocks the preview on its own.</Bullet>
         </s-stack>
       </s-section>
 
@@ -99,6 +100,36 @@ export default function Documentation() {
           trace of that family is excluded from that regeneration entirely, and the request is saved
           into the customer's real stored likes/dislikes so it carries forward, not just this one
           result.
+        </s-paragraph>
+      </s-section>
+
+      <s-section heading="6. From combination to preview">
+        <s-paragraph>
+          Every combination the engine ranks is saved as its own record right away — not just the
+          one that ends up shown to the customer. The top-ranked one is then checked against a fixed
+          pass/fail list before a preview is allowed to open automatically:
+        </s-paragraph>
+        <s-stack direction="block" gap="tight">
+          <Bullet>Does it genuinely fit what this customer asked for (not just a thin, technical match)?</Bullet>
+          <Bullet>Is it actually compatible — no real conflicts stacking up?</Bullet>
+          <Bullet>Does it contain zero disliked notes — checked independently here too, not just trusted from earlier filtering?</Bullet>
+          <Bullet>Is it free of a serious compatibility risk?</Bullet>
+          <Bullet>Is it structurally valid — the right number of real products, ratios that actually add up to 100%?</Bullet>
+        </s-stack>
+        <s-paragraph>
+          If the top-ranked combination fails any of these, the next-best one is tried instead —
+          the same way it would fall through if a product had quietly vanished from the catalog. Right
+          before the preview actually opens, everything is re-verified once more against live data
+          (the real products still exist, this exact pairing still isn't already a real product, the
+          ratios still add up), in case anything changed in the moments since it was generated.
+        </s-paragraph>
+        <s-paragraph>
+          Each product's share of the bottle is set by its role in the blend (main body, supporting
+          note, or base), with a hard cap so a single sweet/heavy component can never dominate — the
+          mix always adds up to exactly 100%. No real Shopify product is created at any point in this
+          process; that only happens later, when the customer explicitly clicks Save Build or Add to
+          Cart on the preview page. Generating and previewing a recommendation is entirely speculative
+          until then.
         </s-paragraph>
       </s-section>
 
