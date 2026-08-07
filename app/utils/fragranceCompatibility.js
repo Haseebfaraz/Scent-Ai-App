@@ -62,6 +62,21 @@ export const PREFERENCE_FAMILIES = {
   // powdery (or gourmand) in combination with other real notes — see classifyAlmondCharacter below,
   // which is the single place that contextual read is decided.
   powdery: ["powdery", "orris", "iris", "violet", "heliotrope", "powder"],
+  // Fix (sensory-direction words produced zero signal) — confirmed live: a customer whose ENTIRE
+  // stated likes were "dry, earthy, natural" matched no family and no literal note anywhere in this
+  // file, so their candidate pool fell back to pure regional popularity with zero input from what
+  // they actually said — the resulting recommendations leaned sweet/spicy/amber, the opposite of
+  // what they asked for. These three are genuine sensory DIRECTIONS, not single notes, so each
+  // draws from a cluster of real note words that together produce that impression, deliberately
+  // overlapping (vetiver/oakmoss/cedar/moss appear in more than one) rather than trying to force
+  // three mutually-exclusive buckets onto directions that are naturally related.
+  dry: ["dry", "vetiver", "oakmoss", "papyrus", "cedar", "dry wood", "black tea", "tobacco leaf", "birch", "mineral"],
+  earthy: ["earthy", "earth", "vetiver", "oakmoss", "patchouli", "moss", "soil", "cypriol", "nagarmotha", "papyrus", "galbanum", "angelica", "mushroom", "forest floor"],
+  // Fix (false positive) — confirmed live in testing: bare "tea" as a 3-letter substring matched
+  // inside plain unrelated words ("no-TEA-tall"), the exact same substring-collision risk this
+  // codebase already avoids elsewhere with word-boundary matching for literal terms — family-level
+  // matching stays substring-based by design, so the fix here is a longer, safer phrase instead.
+  natural: ["natural", "herb", "sage", "basil", "rosemary", "green tea", "black tea", "tea leaf", "sea salt", "moss", "vetiver", "green note", "fir", "cypress", "cedar", "botanical"],
 };
 
 // Fix (powdery family) — "almond" alone is a plain nutty note; it only reads as powdery or
@@ -134,6 +149,12 @@ export function textToPreferenceFamilies(strings) {
 const FAMILY_DESCRIPTOR_WORDS = new Set([
   "fruity", "sweet", "fresh", "spicy", "spice", "strong", "heavy", "woody", "musk", "musky", "powdery",
   "berr", "citrus", "aquatic", "marine", "green", "aromatic",
+  // Fix (dry/earthy/natural direction families) — same reasoning as above: these are sensory
+  // DIRECTIONS, not specific real notes, so they must never satisfy the literal-exact-note hard
+  // gate in scoreProposedCombination (which requires a combo to literally contain a named real
+  // note) — a customer saying "dry, earthy, natural" would otherwise reject every real combination
+  // outright, since no actual catalog note is literally spelled "dry"/"earthy"/etc.
+  "dry", "earthy", "natural", "earth", "soil", "herb", "mineral", "green note", "forest floor", "botanical", "dry wood",
 ]);
 
 function escapeRegex(text) {
@@ -169,6 +190,34 @@ export function literalNoteTermsFromLikes(strings) {
     }
   }
   return [...terms];
+}
+
+// Fix (exact-note dislike collapsed into whole-family dislike) — confirmed as a real gap: "I
+// dislike Sandalwood" used to convert straight into the `woody` FAMILY (via textToPreferenceFamilies
+// downstream), so a product loaded with Cedar/Vetiver/Patchouli — none of them Sandalwood — could
+// still accumulate enough matched notes to hit classifyDislikeConflict's "high" severity and be
+// hard-rejected, purely for sharing a family with the one note actually named. Splits each dislike
+// phrase by what it actually names, per-phrase (same clause-by-clause approach
+// deriveRefinementAdjustments already uses for refinement feedback): a genuine literal note goes to
+// `exactNoteDislikes` (handled by a direct whole-word hard-exclusion elsewhere, see
+// hasHardExcludedTerm in recommendationEngine.server.js — precise, never touches an un-named
+// family sibling); a bare style/family word like "Woody fragrances" or "fruity" goes to
+// `explicitFamilyDislikes` (keeps the existing broader, severity-scaled classifyDislikeConflict
+// treatment — the customer named the whole family on purpose, so treating every family member as
+// relevant there is correct, not a bug).
+export function splitDislikesByExactness(dislikes) {
+  const exactNoteDislikes = new Set();
+  const explicitFamilyDislikes = new Set();
+  for (const d of dislikes || []) {
+    if (!d) continue;
+    const literalTerms = literalNoteTermsFromLikes([d]);
+    if (literalTerms.length) {
+      literalTerms.forEach((t) => exactNoteDislikes.add(t));
+    } else {
+      textToPreferenceFamilies([d]).forEach((f) => explicitFamilyDislikes.add(f));
+    }
+  }
+  return { exactNoteDislikes: [...exactNoteDislikes], explicitFamilyDislikes: [...explicitFamilyDislikes] };
 }
 
 // Fix (refinement could only recognize notes already in the curated PREFERENCE_FAMILIES vocabulary)
@@ -287,6 +336,26 @@ function findDuplicatedDirection(products) {
   return duplicated ? duplicated[0] : null;
 }
 
+// Fix (single_family_concentration) — the largest pairwise real-note overlap between any two
+// products in the combo. A near-DUPLICATE pair (ratio > NEAR_DUPLICATE_OVERLAP_RATIO in
+// recommendationEngine.server.js, 0.5) is already hard-rejected long before a combo ever reaches
+// risk assessment, so this never sees that case — it exists to catch a MILDER but still notably
+// repetitive overlap that survives that harder gate, as its own real-problem signal.
+function maxPairwiseNoteOverlap(products) {
+  let max = 0;
+  for (let i = 0; i < products.length; i++) {
+    for (let j = i + 1; j < products.length; j++) {
+      const setA = new Set((products[i].notes || []).map((n) => String(n).toLowerCase()));
+      const setB = new Set((products[j].notes || []).map((n) => String(n).toLowerCase()));
+      if (!setA.size || !setB.size) continue;
+      const overlap = [...setA].filter((n) => setB.has(n)).length / Math.min(setA.size, setB.size);
+      if (overlap > max) max = overlap;
+    }
+  }
+  return max;
+}
+const NOTABLE_OVERLAP_RATIO = 0.35;
+
 // Phase 6 risk rules. Each takes the list of products in a proposed combination (each shaped as
 // { title, notes: string[] }) and returns a risk message, or null if that risk isn't present.
 // Detection is by literal note keywords only — never inferred from a product title or category.
@@ -295,6 +364,11 @@ function findDuplicatedDirection(products) {
 // flat "-10 per risk" penalty. None of the current rules are "critical" (hard reject) — that tier
 // exists for a genuinely disqualifying problem, which none of these 8 heuristics rise to; each is a
 // real but survivable aesthetic risk, appropriately a penalty rather than an outright rejection.
+//
+// A rule's check() may return either a bare message string (severity = the rule's own fixed
+// `severity` above) OR an object { id, severity, message } to override BOTH per-invocation — used
+// by single_family_concentration below, whose real severity depends on customer context, not a
+// fixed property of the rule itself.
 export const RISK_RULES = [
   {
     id: "excessive_gourmand_heat",
@@ -381,19 +455,84 @@ export const RISK_RULES = [
   },
   {
     id: "duplicate_direction",
-    // High — a combination with zero contrasting role anywhere is the most structurally broken of
-    // these 8 heuristics (the others flag "too much of one thing among several"; this one flags
-    // "there IS only one thing").
+    // High — a combination with zero contrasting role anywhere, in a direction the customer never
+    // asked for, is genuinely the most structurally broken of these heuristics. Fix (contextual
+    // severity) — confirmed live: this used to fire "high" for EVERY customer whose entire stated
+    // preference is one single family (e.g. "Fruity, Apple, Strawberry, Peach") — an extremely
+    // common, entirely ordinary customer type, not a real defect; of COURSE a combo built to match
+    // a single-family preference shares that one family. A direction the customer DID ask for is
+    // handled by single_family_concentration below instead, with severity that actually depends on
+    // whether it causes a real problem — this rule now only fires for a repeated direction that
+    // was NOT requested, which stays exactly as meaningful a risk as before.
     severity: "high",
-    check(products) {
+    check(products, context = {}) {
       const family = findDuplicatedDirection(products);
-      return family ? `Every product shares the same "${family}" direction with no contrasting role` : null;
+      if (!family) return null;
+      if ((context.likeFamilies || []).includes(family)) return null;
+      return `Every product shares the same "${family}" direction with no contrasting role`;
+    },
+  },
+  {
+    id: "single_family_concentration",
+    // Default/fallback only — check() below always returns its own explicit severity (advisory,
+    // low, medium, or high) once it fires at all, per the exact contextual criteria requested:
+    // advisory with real role diversity and no conflict, low with limited role diversity but
+    // nothing else wrong, medium/high only once the concentration causes an actual problem.
+    severity: "advisory",
+    check(products, context = {}) {
+      const family = findDuplicatedDirection(products);
+      if (!family) return null;
+      // The customer's OWN stated preference — duplicate_direction above already covers the
+      // not-requested case, unchanged, so this rule only ever evaluates the requested one.
+      if (!(context.likeFamilies || []).includes(family)) return null;
+
+      const roles = context.roledProducts?.length === products.length ? context.roledProducts : products;
+      const distinctRoles = new Set(roles.map((p) => p.role).filter(Boolean));
+      const hasRoleDiversity = distinctRoles.size >= 2;
+
+      const noteText = products.flatMap((p) => p.notes || []).join(" | ").toLowerCase();
+      const gourmandOverload = ["sugar", "caramel", "marshmallow", "honey"].filter((kw) => noteText.includes(kw)).length >= 2;
+      const heavyOverload = products.filter((p) => detectFamilies(p.notes, PREFERENCE_FAMILIES).includes("strongHeavy")).length >= 2;
+      const hotWeatherConflict = context.season === "Summer" && (gourmandOverload || heavyOverload);
+      const strengthConflict = context.strengthPreference === "light" && heavyOverload;
+      const notableOverlap = maxPairwiseNoteOverlap(products) >= NOTABLE_OVERLAP_RATIO;
+      const tooComplexForRoleDiversity = products.length >= 4 && !hasRoleDiversity;
+
+      const problems = [
+        hotWeatherConflict && "a hot-weather conflict",
+        strengthConflict && "more strength than your light-strength preference",
+        notableOverlap && "notably overlapping components",
+        tooComplexForRoleDiversity && "too much complexity for the role diversity present",
+        gourmandOverload && heavyOverload && "excessive sweetness stacked with excessive heaviness",
+      ].filter(Boolean);
+
+      if (problems.length) {
+        // High only for an actual hot-weather wearability conflict — confirmed live against the
+        // real catalog: many legitimately-different same-family products (e.g. fruity fragrances
+        // built on a shared common palette of mango/pineapple/guava) routinely land in the
+        // 0.35-0.5 overlap band (below the outright near-duplicate hard-reject at 0.5) purely as
+        // an ordinary catalog characteristic, not a real defect — so overlap alone must not
+        // escalate to high or it blocks auto-confirmation for ordinary customers routinely.
+        const severity = hotWeatherConflict ? "high" : "medium";
+        return { id: "excessive_direction_stacking", severity, message: `Repeated "${family}" direction (your own stated preference) compounds into a real problem: ${problems.join(", ")}` };
+      }
+      if (!hasRoleDiversity) {
+        return { id: "insufficient_role_diversity", severity: "low", message: `Every product leans "${family}" — your own stated preference — with limited role diversity, though nothing else conflicts` };
+      }
+      return { id: "single_family_concentration", severity: "advisory", message: `Every product shares your own stated "${family}" preference, with distinct roles and no real conflict` };
     },
   },
 ];
 
+// A rule's check() result is either a bare message string or a { id, severity, message } override
+// (see single_family_concentration's own comment) — this normalizes either shape to the message
+// text alone, for callers (like assessCombinationRisks) that only care about the text.
+function messageOf(result) {
+  return typeof result === "string" ? result : result?.message ?? null;
+}
+
 export function assessCombinationRisks(products, context = {}) {
-  return RISK_RULES.map((rule) => rule.check(products, context)).filter(Boolean);
+  return RISK_RULES.map((rule) => messageOf(rule.check(products, context))).filter(Boolean);
 }
 
 // Fix (flat risk-count penalty replaced with severity, correlated risks grouped) — a Tribrid/
@@ -405,7 +544,9 @@ export function assessCombinationRisks(products, context = {}) {
 // hit still appears in the returned breakdown (with `counted: false` for the suppressed duplicate)
 // so nothing is silently hidden.
 const RISK_SEVERITY_PENALTY = { advisory: -1, low: -2, medium: -5, high: -10, critical: -10 };
-const SEVERITY_RANK = { advisory: 0, low: 1, medium: 2, high: 3, critical: 4 };
+// Exported so callers outside this file (the auto-confirmation gate) can rank a candidate's own
+// counted risks by severity without duplicating this ordering.
+export const SEVERITY_RANK = { advisory: 0, low: 1, medium: 2, high: 3, critical: 4 };
 const FAMILY_SPECIFIC_RISK_FAMILY = {
   multiple_heavy_components: "strongHeavy",
   competing_fruits: "fruity",
@@ -448,17 +589,32 @@ export function groupAndPenalizeRisks(hits, correlationKeyFor = (hit) => hit.id)
 // Real-rule version of the pure function above — detects every RISK_RULES hit against a real
 // combination, then groups/penalizes them. `hasCritical: true` means the caller should hard-reject
 // the whole combination outright rather than use riskPenalty as a mere score deduction.
+const DUPLICATED_FAMILY_RISK_IDS = new Set([
+  "duplicate_direction", "single_family_concentration", "insufficient_role_diversity", "excessive_direction_stacking",
+]);
+
 export function assessCombinationRiskDetails(products, context = {}) {
   const hits = RISK_RULES
     .map((rule) => {
-      const message = rule.check(products, context);
-      return message ? { id: rule.id, message, severity: rule.severity } : null;
+      const result = rule.check(products, context);
+      if (!result) return null;
+      // Fix (single_family_concentration) — a rule's check() may override its own id/severity per
+      // invocation (see that rule's own comment); fall back to the rule's fixed declaration for a
+      // plain string result, exactly as before.
+      if (typeof result === "object") return { id: result.id || rule.id, message: result.message, severity: result.severity || rule.severity };
+      return { id: rule.id, message: result, severity: rule.severity };
     })
     .filter(Boolean);
 
   const duplicatedFamily = findDuplicatedDirection(products);
   const correlationKeyFor = (hit) => {
-    if (hit.id === "duplicate_direction") return duplicatedFamily ? `family:${duplicatedFamily}` : hit.id;
+    // Fix (single_family_concentration) — duplicate_direction and its three contextual-severity
+    // siblings are all fundamentally the SAME underlying observation ("one family dominates this
+    // combo"), just resolved to a different id/severity depending on whether it was requested and
+    // whether it causes a real problem — they must correlate together (and with the existing
+    // family-specific rules below) so a fruity-heavy combo doesn't get penalized twice for what is
+    // really one real fact about it.
+    if (DUPLICATED_FAMILY_RISK_IDS.has(hit.id)) return duplicatedFamily ? `family:${duplicatedFamily}` : hit.id;
     if (FAMILY_SPECIFIC_RISK_FAMILY[hit.id]) return `family:${FAMILY_SPECIFIC_RISK_FAMILY[hit.id]}`;
     return hit.id;
   };

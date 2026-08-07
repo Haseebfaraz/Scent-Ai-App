@@ -72,4 +72,19 @@ describe("assignNotePositions", () => {
     const withLiteral = assignNotePositions(notes, ["fruity"], ["peach"]);
     expect(withLiteral.middle).toContain("Peach");
   });
+
+  // Fix (preview prioritization used plain .includes(), not word-boundary matching) — confirmed as
+  // a real bug: a customer who literally named "Apple" would have "Pineapple" falsely rank as a
+  // literal match too (since the old code did "pineapple".includes("apple")), pulling Pineapple to
+  // the front of the 5-note cap ahead of same-family notes that arrived earlier in the real list —
+  // exactly the bug class Apple/Pineapple was already fixed for elsewhere (literalNoteMatchCount),
+  // just missed in this one preview-display code path. With no real "Apple" note anywhere in the
+  // input, telling the function the customer named "apple" must change NOTHING about the result —
+  // any difference at all means Pineapple (or another note) got an unearned literal-match boost.
+  it("produces an identical result whether or not the customer named 'apple', when no real Apple note is present", () => {
+    const notes = ["Mango", "Pear", "Blackcurrant", "Guava", "Apricot", "Pineapple"];
+    const withoutLiteralTerm = assignNotePositions(notes, ["fruity"]);
+    const withFalseLiteralTerm = assignNotePositions(notes, ["fruity"], ["apple"]);
+    expect(withFalseLiteralTerm).toEqual(withoutLiteralTerm);
+  });
 });

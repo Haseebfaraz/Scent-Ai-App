@@ -5,7 +5,7 @@
 import prisma from "../db.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
 import { classifyDislikeConflict } from "../utils/fragranceScoring.js";
-import { textToPreferenceFamilies } from "../utils/fragranceCompatibility.js";
+import { splitDislikesByExactness, literalNoteMatchCount } from "../utils/fragranceCompatibility.js";
 import { validateCombinationShape } from "./recommendationEngine.server.js";
 
 const COMPONENT_COUNT_BY_TYPE = { HYBRID: 2, TRIBRID: 3, QUADBRID: 4 };
@@ -28,6 +28,34 @@ export async function saveRecommendation({ conversationId, profile, combination 
     recommendedRatio: combination.recommendedRatio,
   });
 
+  // Fix (no deduplication) — confirmed as a real gap: nothing stopped the exact same component
+  // signature from being persisted twice for the same active conversation (e.g. two generation
+  // calls both scoring the same top candidate identically), each with its own id and its own
+  // randomly-seeded display name for what is really the same formula. Reuses the existing row
+  // instead of minting a duplicate whenever one is still valid — same expiry window
+  // confirmRecommendation itself already treats as current, so a genuinely old duplicate never
+  // blocks a fresh regeneration. Filtered in JS rather than via Prisma's JSON-path query (which
+  // errored — "A JSON path cannot be set without a scalar filter" — confirmed live): a
+  // conversation only ever has a handful of recommendations, so this stays cheap without needing
+  // a fragile JSON-path filter at all.
+  const recentForConversation = await prisma.fragranceRecommendation.findMany({
+    where: {
+      conversationId,
+      status: { in: ["pending", "confirmed"] },
+      createdAt: { gte: new Date(Date.now() - RECOMMENDATION_EXPIRY_MS) },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { id: true, evidenceJson: true },
+  });
+  // Guard against combination.canonicalKey itself being missing/falsy — without this, two
+  // genuinely different combinations that both lack one (confirmed live: a legacy/synthetic
+  // combination object with no canonicalKey set) would match each other via undefined === undefined
+  // and collapse into a single row.
+  const existing = combination.canonicalKey
+    ? recentForConversation.find((r) => r.evidenceJson?.canonicalKey === combination.canonicalKey)
+    : null;
+  if (existing) return existing.id;
+
   const record = await prisma.fragranceRecommendation.create({
     data: {
       conversationId,
@@ -48,14 +76,32 @@ export async function saveRecommendation({ conversationId, profile, combination 
         // Fix (final-batch preference coverage) — which of the customer's literally named notes
         // THIS specific recommendation covers vs. doesn't, persisted so a confirmed/previewed
         // recommendation can show it as debug/admin metadata without recomputing.
+        requestedExactNotes: combination.requestedExactNotes,
         matchedExactNotes: combination.matchedExactNotes,
         missingExactNotes: combination.missingExactNotes,
         exactNoteCoverageScore: combination.exactNoteCoverageScore,
+        // Fix (final-batch coverage metadata incomplete) — whether a fallback regeneration pass ran
+        // for this batch at all, and which specific terms it targeted — never assumed successful,
+        // just recorded as attempted (missingExactNotes above is the honest post-rerank truth).
+        fallbackUsed: combination.fallbackUsed,
+        fallbackTargetNotes: combination.fallbackTargetNotes,
         finalScore: combination.finalScore,
         confidence: combination.confidence,
         // Fix (multidimensional confidence) — persisted so a confirmed/previewed recommendation
         // still shows the same breakdown it was generated with, not just the blended overall value.
         confidenceBreakdown: combination.confidenceBreakdown,
+        customerFitScore: combination.customerFitScore,
+        // Fix (persist the auto-confirm gate's own reasoning) — every ranked recommendation now
+        // records not just whether it was eligible, but every raw value the gate actually checked
+        // (customerFitScore/customerFitThreshold above and compatibilityScore/confidenceBreakdown
+        // already persisted cover the score side; these cover the rest), so the decision can be
+        // audited or tested against the real persisted record, not just recomputed transiently.
+        autoConfirmEligible: combination.autoConfirmEligible,
+        autoConfirmReasons: combination.autoConfirmReasons,
+        customerFitThreshold: combination.customerFitThreshold,
+        highestCountedRiskSeverity: combination.highestCountedRiskSeverity,
+        hasHardDislikeConflict: combination.hasHardDislikeConflict,
+        shapeValid: combination.shapeValid,
       },
       evidenceJson: {
         historicalEvidence: combination.historicalEvidence,
@@ -162,10 +208,16 @@ export async function confirmRecommendation({ recommendationId, customerName, cu
   }
 
   // Recompute dislike-conflict severity against the CURRENT profile's dislikes — never trusts the
-  // generation-time snapshot for this safety check.
-  const dislikeFamilies = textToPreferenceFamilies(record.customerProfileJson?.dislikes || []);
+  // generation-time snapshot for this safety check. Fix (exact-note dislike collapsed into
+  // whole-family dislike) — same split used at generation time (see splitDislikesByExactness's own
+  // comment): a literal named note hard-rejects directly, a bare family word keeps the existing
+  // severity-scaled check.
+  const { exactNoteDislikes, explicitFamilyDislikes } = splitDislikesByExactness(record.customerProfileJson?.dislikes || []);
   for (const p of products) {
-    const conflict = classifyDislikeConflict(p.notes, dislikeFamilies);
+    if (literalNoteMatchCount(p.notes, exactNoteDislikes) > 0) {
+      return { ok: false, reason: `"${p.title}" contains a note the customer explicitly disliked — cannot confirm.` };
+    }
+    const conflict = classifyDislikeConflict(p.notes, explicitFamilyDislikes);
     if (conflict.severity === "high") {
       return { ok: false, reason: `"${p.title}" has a high-severity conflict with a disliked note/family — cannot confirm.` };
     }

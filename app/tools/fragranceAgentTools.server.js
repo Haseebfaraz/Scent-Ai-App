@@ -23,7 +23,7 @@ import {
   checkExactCombinationExists,
   findCombinationsUsingSimilarNotes,
 } from "../services/combinationAnalysis.server.js";
-import { generateNewProductCombinations } from "../services/recommendationEngine.server.js";
+import { generateNewProductCombinations, validateCombinationShape, CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
 import {
@@ -31,7 +31,10 @@ import {
   hasSeasonWeatherConflict, getCalendarSeason,
 } from "../utils/weatherSeason.js";
 import { parseRecommendationSelection } from "../utils/recommendationSelectionParser.js";
-import { textToPreferenceFamilies, literalNoteTermsFromLikes, matchedRealNotesInText } from "../utils/fragranceCompatibility.js";
+import {
+  textToPreferenceFamilies, literalNoteTermsFromLikes, matchedRealNotesInText,
+  splitDislikesByExactness, literalNoteMatchCount, SEVERITY_RANK,
+} from "../utils/fragranceCompatibility.js";
 import { buildPreviewUrl } from "../utils/previewUrl.server.js";
 import { correctPreferenceVocabulary, correctPreferenceVocabularyList } from "../utils/fragranceNormalization.js";
 
@@ -152,22 +155,93 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
   console.log(stage, JSON.stringify({ conversationId, recommendationId, previewId, eventType, previewUrl }));
 }
 
+// Fix (no confidence gate before auto-confirmation) — confirmed as a real gap: the highest-ranked
+// candidate got auto-confirmed regardless of confidence, so a "low" confidence combination could be
+// presented to the customer with exactly the same certainty as a "very high" one.
+//
+// Fix (blocking ALL "low" broke the core auto-preview flow) — confirmed live in testing: under the
+// existing confidence formula, "low" is the common outcome for an ordinary customer without deep
+// historical evidence (e.g. a fresh profile with just one stated like) — not a rare edge case. A
+// blanket block left the primary flow this whole engine is built around failing routinely with "not
+// confident enough" instead of ever opening a preview.
+//
+// Fix (never block on sparse evidence, only a genuinely bad formula) — data/historical/novelty
+// confidence are all "how much evidence backs this" — thin evidence alone isn't dangerous, just
+// less certain, so none of them (nor the blended `confidence` label, which mixes them in) gate
+// auto-confirmation. What DOES block: the formula is a poor match for this customer (customerFit
+// "low"), incompatible (compatibility "low" — 2+ real risks), or genuinely risky (a surviving
+// high/critical-severity risk).
+//
+// Fix (persist the gate's own reasoning) — the decision used to be made transiently inside the
+// confirm loop with no record of why; there was no way to audit or test a specific ranked
+// recommendation's eligibility after the fact. Computes and returns every raw value the gate
+// checks, so the caller can attach it to the recommendation before it's ever saved.
+//
+// hasHardDislikeConflict and shapeValid are independent re-checks, defense in depth exactly like
+// saveRecommendation/confirmRecommendation already apply for the same two things — generation-time
+// filtering (scoreProposedCombination/validateCombinationShape) already guarantees a ranked
+// candidate can't actually have either problem, but the gate never trusts that alone.
+function evaluateAutoConfirmEligibility(candidate, profile) {
+  const breakdown = candidate.confidenceBreakdown || {};
+  const customerFitConfidence = breakdown.customerFit?.value ?? null;
+  const compatibilityConfidence = breakdown.compatibility?.value ?? null;
+
+  const countedRisks = (candidate.riskBreakdown || []).filter((r) => r.counted);
+  const highestCountedRiskSeverity = countedRisks.reduce(
+    (worst, r) => (worst === null || SEVERITY_RANK[r.severity] > SEVERITY_RANK[worst] ? r.severity : worst),
+    null,
+  );
+  const hasHighSeverityRisk = highestCountedRiskSeverity === "high" || highestCountedRiskSeverity === "critical";
+
+  const { exactNoteDislikes } = splitDislikesByExactness(profile?.dislikes || []);
+  const allNotes = (candidate.internalProducts || []).flatMap((p) => p.notes || []);
+  const hasHardDislikeConflict = literalNoteMatchCount(allNotes, exactNoteDislikes) > 0;
+
+  let shapeValid = true;
+  try {
+    validateCombinationShape({ type: candidate.type, products: candidate.internalProducts, recommendedRatio: candidate.recommendedRatio });
+  } catch {
+    shapeValid = false;
+  }
+
+  const reasons = [];
+  // Hard dislike and invalid shape are checked first and block unconditionally, regardless of how
+  // high the final score or how strong the history is — neither is a matter of degree.
+  if (hasHardDislikeConflict) reasons.push("hard_dislike_conflict");
+  if (!shapeValid) reasons.push("invalid_shape");
+  if (hasHighSeverityRisk) reasons.push(`high_severity_risk:${highestCountedRiskSeverity}`);
+  if (customerFitConfidence === "low") reasons.push("customer_fit_low");
+  if (compatibilityConfidence === "low") reasons.push("compatibility_low");
+
+  return {
+    autoConfirmEligible: reasons.length === 0,
+    autoConfirmReasons: reasons,
+    customerFitThreshold: CUSTOMER_FIT_LOW_THRESHOLD,
+    highestCountedRiskSeverity,
+    hasHardDislikeConflict,
+    shapeValid,
+  };
+}
+
 // Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list
 // into an automatically-opened preview. Used by both generate_new_product_combinations AND
 // refine_combination_recommendations — a customer who says "make it sweeter" or "remove the dark
 // chocolate" after Recreate must land on an auto-opened preview exactly the same way a first-time
 // generation does, never back on a "pick one of N" list. `withIds` must already be rank-sorted
 // best-first (both generateNewProductCombinations call sites are). Walking it in order and
-// confirming the first one that actually re-verifies is "the highest-ranked VALID recommendation"
-// — a rare re-verification failure (e.g. a component vanished from the catalog microseconds after
-// generation) falls through to the next-best real candidate instead of silently failing the turn
-// or opening a broken preview.
+// confirming the first one that actually re-verifies AND clears the confidence gate above is "the
+// highest-ranked VALID, sufficiently-confident recommendation" — a rare re-verification failure
+// (e.g. a component vanished from the catalog microseconds after generation) or a too-low-confidence
+// candidate falls through to the next-best real candidate instead of silently failing the turn or
+// opening a preview the engine itself isn't confident in.
 async function autoSelectAndConfirmBest(withIds, conversationId, context) {
   logPreviewEvent("RECOMMENDATIONS_RANKED", {
     conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
   });
 
+  let anyConfidenceGated = false;
   for (const candidate of withIds) {
+    if (!candidate.autoConfirmEligible) { anyConfidenceGated = true; continue; }
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
       customerName: context.customerName,
@@ -192,6 +266,16 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
     };
   }
 
+  // Fix (no confidence gate before auto-confirmation) — every candidate that was otherwise valid
+  // got filtered out purely for being too low-confidence to present with certainty; tell the model
+  // the truth so it can ask for more detail or offer to try again, instead of a generic "technical
+  // issue" excuse that misdescribes what actually happened.
+  if (anyConfidenceGated) {
+    return {
+      ok: false,
+      modelContent: "every generated combination was too low-confidence to recommend with certainty (thin evidence, weak fit to what the customer said, or a real compatibility risk) — tell the customer honestly that nothing felt like a confident enough match yet, and ask a bit more about their preferences rather than presenting a weak guess as a solid recommendation.",
+    };
+  }
   // Every ranked candidate failed re-verification (rare) — never silently open a broken preview;
   // tell the model plainly instead so it can inform the customer honestly.
   return {
@@ -545,6 +629,14 @@ export function __deriveRefinementAdjustmentsForTesting(feedback, currentNotes) 
   return deriveRefinementAdjustments(feedback, currentNotes);
 }
 
+// Test-only escape hatch, same pattern as above — lets the regression suite check the
+// auto-confirmation gate's full decision (eligibility, reasons, and every raw value it used)
+// directly with a synthetic candidate/profile, without needing a real generation to happen to
+// produce one of each case.
+export function __evaluateAutoConfirmEligibilityForTesting(candidate, profile) {
+  return evaluateAutoConfirmEligibility(candidate, profile);
+}
+
 // ============================================================
 // Dispatch
 // ============================================================
@@ -830,6 +922,10 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           maximumResults: parsed.data.maximumResults,
           allowedTypes: parsed.data.allowedTypes,
         });
+        // Fix (persist the auto-confirm gate's own reasoning) — computed and attached before
+        // saveRecommendation so it's part of the immutable, persisted record for every ranked
+        // recommendation, not just recomputed transiently inside the confirm loop.
+        combinations.forEach((c) => Object.assign(c, evaluateAutoConfirmEligibility(c, queriedProfile)));
         // Persist every proposal now (not just the one the customer eventually confirms) so a
         // later confirm_product_combination call always has a real, immutable, re-verifiable
         // record to point at by ID — never a free-form model reconstruction.
@@ -908,6 +1004,7 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
           hardExcludeFamilies,
           hardExcludeTerms: adjustments.addDislikeTerms,
         });
+        combinations.forEach((c) => Object.assign(c, evaluateAutoConfirmEligibility(c, adjustedProfile)));
         const recommendationIds = await Promise.all(
           combinations.map((c) => saveRecommendation({ conversationId, profile: adjustedProfile, combination: c })),
         );
