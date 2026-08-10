@@ -5,7 +5,7 @@
 import { pingOdoo } from "../app/services/odooClient.server.js";
 
 async function main() {
-  const url = process.env.ODOO_PING_URL || "http://192.168.0.10:1800/api/v1/dua-ai/ping";
+  const url = process.env.ODOO_PING_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/v1/dua-ai/ping";
   console.log("ODOO_PING_STARTED", { url });
 
   const result = await pingOdoo();

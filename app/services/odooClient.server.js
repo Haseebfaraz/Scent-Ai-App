@@ -3,7 +3,7 @@
 // integration requirements brief; searchRead/batchRead/real inventory lookups are deliberately not
 // built yet — approved only up through proving connectivity.
 // Server-only (.server.js) — Odoo must never be reachable from the browser/theme JS.
-const ODOO_PING_URL = process.env.ODOO_PING_URL || "http://192.168.0.10:1800/api/v1/dua-ai/ping";
+const ODOO_PING_URL = process.env.ODOO_PING_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/v1/dua-ai/ping";
 
 export async function pingOdoo() {
   const startedAt = Date.now();

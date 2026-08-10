@@ -243,6 +243,16 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
   let anyConfidenceGated = false;
   for (const candidate of withIds) {
     if (!candidate.autoConfirmEligible) { anyConfidenceGated = true; continue; }
+
+    // Odoo connectivity test hook (approved: ping only, no real inventory lookup/filtering yet) —
+    // moved here from save_customer_profile_field per instruction: fires at the moment a
+    // combination is actually being picked as the best candidate, not on every chat answer.
+    // Fire-and-forget: never awaited, so a slow/unreachable Odoo ping can never delay or block
+    // the actual selection it rides on.
+    const candidateProductTitles = (candidate.internalProducts || []).map((p) => p.title);
+    console.log("ODOO_PING_REQUEST", { conversationId, recommendationId: candidate.recommendationId, products: candidateProductTitles });
+    pingOdoo().then((result) => console.log("ODOO_PING_RESPONSE", { conversationId, recommendationId: candidate.recommendationId, products: candidateProductTitles, ...result }));
+
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
       customerName: context.customerName,
@@ -735,13 +745,6 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         }
         const profile = await saveCustomerProfileFields(conversationId, fieldsToSave);
         const missing = getMissingRequiredFields(profile);
-
-        // Odoo connectivity test hook (approved: ping only, no inventory lookup/filtering yet) —
-        // fires on every real customer answer, so reproducing this is as simple as chatting with
-        // the bot and answering any question. Fire-and-forget: never awaited, so a slow or
-        // unreachable Odoo ping can never delay or fail the actual profile save it rides on.
-        console.log("ODOO_PING_REQUEST", { conversationId, field: parsed.data.field });
-        pingOdoo().then((result) => console.log("ODOO_PING_RESPONSE", { conversationId, field: parsed.data.field, ...result }));
 
         // Only discuss season when the customer volunteers a style — check for a genuine conflict
         // with the REAL weatherDirection right here, once, rather than leaving it to the model to
