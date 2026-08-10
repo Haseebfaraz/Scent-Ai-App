@@ -144,6 +144,26 @@ model FragranceProduct {
   @@index([collection])
 }
 
+// Odoo oil-inventory integration — explicit DUA product <-> Odoo fragrance-oil SKU mapping. SKU is
+// the approved production lookup key; display names are never used as production truth (fuzzy
+// name matching may only ever suggest a mapping for staff review, never decide it). Starts empty —
+// real mappings are added after this implementation lands, not backfilled by it.
+model OdooOilMapping {
+  id                 String    @id @default(cuid())
+  fragranceProductId String    @unique
+  odooSku            String    @unique
+  odooProductId      Int?
+  odooVariantId      Int?
+  odooName           String?
+  unitOfMeasure      String?
+  active             Boolean   @default(true)
+  lastVerifiedAt     DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([odooSku])
+}
+
 model ExistingCombination {
   id                    String   @id @default(cuid())
   title                 String
