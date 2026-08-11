@@ -244,13 +244,18 @@ function evaluateAutoConfirmEligibility(candidate, profile) {
 // inventoryValidated is false for ALL of those, and a lookup failure specifically is logged as
 // ODOO_INVENTORY_LOOKUP_FAILED, distinct from a real validated answer, never presented as if the
 // formula had actually been confirmed buildable against real stock.
-async function evaluateCandidateInventory(candidate) {
+async function evaluateCandidateInventory(candidate, candidateIndex = null) {
   const startedAt = Date.now();
   try {
     const formula = buildProductionFormula(
       (candidate.recommendedRatio || []).map((r) => ({ productTitle: r.productTitle, ratioPercent: r.ratioPercent })),
     );
     const titles = formula.components.map((c) => c.productTitle);
+
+    // Fix (make the real request/response ordering unmistakable in logs) — no Authorization
+    // header, Bearer token, or customer PII in either line; recommendationId only, never a
+    // customer name/email.
+    console.log("ODOO_INVENTORY_REQUEST", { recommendationId: candidate.recommendationId, candidateIndex, skuCount: titles.length });
     const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(titles);
 
     const components = formula.components.map((c) => {
@@ -274,15 +279,15 @@ async function evaluateCandidateInventory(candidate) {
     const knownComponents = components.filter((c) => c.mappingStatus === "CONNECTED");
     const confirmedInsufficient = knownComponents.length > 0 && !computeFeasibility(knownComponents).buildable;
     const inventoryValidated = knownComponents.length === components.length && components.length > 0;
+    const durationMs = Date.now() - startedAt;
 
-    return {
-      buildable: !confirmedInsufficient,
-      inventoryValidated,
-      components,
-      requestCount,
-      skusQueried,
-      durationMs: Date.now() - startedAt,
-    };
+    console.log("ODOO_INVENTORY_RESPONSE", {
+      recommendationId: candidate.recommendationId, candidateIndex,
+      status: lookupFailed.length ? "lookup_failed" : "ok",
+      inventoryValidated, durationMs,
+    });
+
+    return { buildable: !confirmedInsufficient, inventoryValidated, components, requestCount, skusQueried, durationMs };
   } catch {
     // Malformed ratios are already caught by shapeValid in evaluateAutoConfirmEligibility — never
     // let a formula-building error here reject a candidate for the wrong reason.
@@ -320,20 +325,19 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
   let odooDurationMs = 0;
   const skusQueriedSet = new Set();
 
-  for (const candidate of withIds) {
+  for (const [candidateIndex, candidate] of withIds.entries()) {
     if (!candidate.autoConfirmEligible) { anyConfidenceGated = true; continue; }
 
     candidatesInventoryChecked += 1;
-    const inventory = await evaluateCandidateInventory(candidate);
+    const inventory = await evaluateCandidateInventory(candidate, candidateIndex);
     odooRequestCount += inventory.requestCount;
     odooDurationMs += inventory.durationMs;
     inventory.skusQueried.forEach((sku) => skusQueriedSet.add(sku));
+    console.log("INVENTORY_CANDIDATE_RESULT", { conversationId, recommendationId: candidate.recommendationId, candidateIndex, buildable: inventory.buildable });
     if (!inventory.buildable) {
       anyInventoryRejected = true;
-      console.log("FORMULA_INVENTORY_REJECTED", { conversationId, recommendationId: candidate.recommendationId });
       continue;
     }
-    console.log("FORMULA_INVENTORY_BUILDABLE", { conversationId, recommendationId: candidate.recommendationId, inventoryValidated: inventory.inventoryValidated });
 
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
