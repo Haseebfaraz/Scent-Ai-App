@@ -7,6 +7,11 @@
 // file (or its callers) needs to change once real auth is turned on.
 const ODOO_API_BASE_URL = process.env.ODOO_API_BASE_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/v1/dua-ai";
 const ODOO_PING_URL = process.env.ODOO_PING_URL || `${ODOO_API_BASE_URL}/ping`;
+// Fix (real, measured latency) — a candidate combination is checked before it's known to be the
+// winner, and there's no cap on how long Odoo can take to answer. Confirmed live: an uncapped call
+// against a slow/misrouted endpoint let a single generation turn balloon past 30s. This bounds the
+// worst case per call — a slow/hung Odoo never blocks the chat turn indefinitely.
+const REQUEST_TIMEOUT_MS = 8000;
 
 function authHeaders() {
   const headers = { Accept: "application/json" };
@@ -19,7 +24,7 @@ function authHeaders() {
 async function getJson(url) {
   const startedAt = Date.now();
   try {
-    const response = await fetch(url, { method: "GET", headers: authHeaders() });
+    const response = await fetch(url, { method: "GET", headers: authHeaders(), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     const bodyText = await response.text();
     let json = null;
     try {
