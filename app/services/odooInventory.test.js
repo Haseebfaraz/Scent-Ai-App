@@ -1,8 +1,12 @@
 // Integration tests against the real dev database (OdooOilMapping) with global.fetch mocked for the
 // actual Odoo HTTP call — same convention as app/tools/fragranceAgentTools.season.test.js.
+// Mocked response shape matches the REAL confirmed endpoint (2026-08-11):
+//   { "success": true, "products": [{ "name": "...", "default_code": "SKU", "on_hand_qty": 0.0 }] }
+// No reserved/available split and no UoM field exist on the real API — see odooInventory.server.js's
+// module comment for how those two real limitations are handled.
 import { describe, it, expect, afterEach, vi } from "vitest";
 import prisma from "../db.server.js";
-import { getOilInventoryForProduct, classifyStockStatus } from "./odooInventory.server.js";
+import { getOilInventoryForProduct, getOilInventoryForProductTitles, classifyStockStatus, __clearOdooInventoryCacheForTesting } from "./odooInventory.server.js";
 
 const originalFetch = global.fetch;
 const createdMappingIds = [];
@@ -13,6 +17,7 @@ afterEach(async () => {
     createdMappingIds.length = 0;
   }
   global.fetch = originalFetch;
+  __clearOdooInventoryCacheForTesting();
 });
 
 async function createMapping(overrides = {}) {
@@ -28,8 +33,8 @@ async function createMapping(overrides = {}) {
   return row;
 }
 
-function mockOdooJson(json, status = 200) {
-  global.fetch = vi.fn().mockResolvedValue({ ok: status < 400, status, text: async () => JSON.stringify(json) });
+function mockOdooProducts(products, status = 200) {
+  global.fetch = vi.fn().mockResolvedValue({ ok: status < 400, status, text: async () => JSON.stringify({ success: true, products }) });
 }
 
 describe("getOilInventoryForProduct", () => {
@@ -45,9 +50,9 @@ describe("getOilInventoryForProduct", () => {
     expect(result.mappingStatus).toBe("MISSING");
   });
 
-  it("CONNECTED, with available (not raw on-hand) used as availableOilMl — reserved stock is never counted as available", async () => {
+  it("CONNECTED, using on_hand_qty as availableOilMl (the real API exposes no reserved/available split)", async () => {
     const mapping = await createMapping();
-    mockOdooJson({ ok: true, result: { sku: "OIL-VITEST-SKU", found: true, unit: "ml", onHand: 500, reserved: 100, available: 400, name: "Vitest Oil" } });
+    mockOdooProducts([{ name: "Vitest Oil", default_code: "OIL-VITEST-SKU", on_hand_qty: 400 }]);
 
     const result = await getOilInventoryForProduct(mapping.fragranceProductId);
     expect(result.mappingStatus).toBe("CONNECTED");
@@ -55,26 +60,11 @@ describe("getOilInventoryForProduct", () => {
     expect(result.odooSku).toBe("OIL-VITEST-SKU");
   });
 
-  it("converts liters to ml (1 L = 1000 ml)", async () => {
+  it("SKU_NOT_FOUND when the requested SKU isn't present in the returned products array", async () => {
     const mapping = await createMapping();
-    mockOdooJson({ result: { found: true, unit: "L", available: 0.4 } });
-    const result = await getOilInventoryForProduct(mapping.fragranceProductId);
-    expect(result.availableOilMl).toBe(400);
-  });
-
-  it("SKU_NOT_FOUND when Odoo reports the SKU doesn't exist", async () => {
-    const mapping = await createMapping();
-    mockOdooJson({ result: { sku: "OIL-VITEST-SKU", found: false } });
+    mockOdooProducts([{ name: "Some Other Oil", default_code: "OIL-SOMETHING-ELSE", on_hand_qty: 10 }]);
     const result = await getOilInventoryForProduct(mapping.fragranceProductId);
     expect(result.mappingStatus).toBe("SKU_NOT_FOUND");
-  });
-
-  it("UNSUPPORTED_UOM for an unrecognized/ambiguous unit — never guesses a conversion", async () => {
-    const mapping = await createMapping();
-    mockOdooJson({ result: { found: true, unit: "kg", available: 5 } });
-    const result = await getOilInventoryForProduct(mapping.fragranceProductId);
-    expect(result.mappingStatus).toBe("UNSUPPORTED_UOM");
-    expect(result.availableOilMl).toBe(null);
   });
 
   it("LOOKUP_FAILED when Odoo is unreachable or returns a non-JSON error page", async () => {
@@ -89,6 +79,64 @@ describe("getOilInventoryForProduct", () => {
     global.fetch = vi.fn().mockResolvedValue({ ok: false, status: 404, text: async () => "<html>Not Found</html>" });
     const result = await getOilInventoryForProduct(mapping.fragranceProductId);
     expect(result.mappingStatus).toBe("LOOKUP_FAILED");
+  });
+
+  it("LOOKUP_FAILED when the response is ok but success is not true", async () => {
+    const mapping = await createMapping();
+    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ success: false }) });
+    const result = await getOilInventoryForProduct(mapping.fragranceProductId);
+    expect(result.mappingStatus).toBe("LOOKUP_FAILED");
+  });
+});
+
+describe("getOilInventoryForProductTitles — real batching", () => {
+  // "The Opera" / "Water of Arabia" already carry real mappings from the catalog import — save and
+  // restore the original row (never a blind create/delete) so this test can never corrupt real
+  // seeded data. createMapping() above assumes a fresh synthetic id and would collide on the
+  // existing row's unique fragranceProductId constraint.
+  const savedOriginals = [];
+  afterEach(async () => {
+    for (const { fragranceProductId, original } of savedOriginals) {
+      if (original) {
+        await prisma.odooOilMapping.update({ where: { fragranceProductId }, data: { odooSku: original.odooSku, active: original.active } });
+      } else {
+        await prisma.odooOilMapping.deleteMany({ where: { fragranceProductId } });
+      }
+    }
+    savedOriginals.length = 0;
+  });
+  async function mapRealProductTemporarily(title, sku) {
+    const product = await prisma.fragranceProduct.findFirst({ where: { title }, select: { id: true } });
+    const original = await prisma.odooOilMapping.findUnique({ where: { fragranceProductId: product.id } });
+    savedOriginals.push({ fragranceProductId: product.id, original });
+    await prisma.odooOilMapping.upsert({
+      where: { fragranceProductId: product.id },
+      create: { fragranceProductId: product.id, odooSku: sku, active: true },
+      update: { odooSku: sku, active: true },
+    });
+    return product;
+  }
+
+  it("makes exactly one real Odoo request for multiple mapped components, matching each by default_code", async () => {
+    await mapRealProductTemporarily("The Opera", "OIL-VITEST-OPERA");
+    await mapRealProductTemporarily("Water of Arabia", "OIL-VITEST-WATER");
+    mockOdooProducts([
+      { name: "The Opera - Oil", default_code: "OIL-VITEST-OPERA", on_hand_qty: 1830 },
+      { name: "Water of Arabia - Oil", default_code: "OIL-VITEST-WATER", on_hand_qty: 0 },
+    ]);
+
+    const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(["The Opera", "Water of Arabia"]);
+    expect(requestCount).toBe(1);
+    expect(skusQueried.sort()).toEqual(["OIL-VITEST-OPERA", "OIL-VITEST-WATER"]);
+    expect(results.get("The Opera").availableOilMl).toBe(1830);
+    expect(results.get("Water of Arabia").availableOilMl).toBe(0);
+  });
+
+  it("makes zero requests when nothing needs a real lookup (all MISSING/cached)", async () => {
+    global.fetch = vi.fn(); // would fail the test if actually called
+    const { requestCount } = await getOilInventoryForProductTitles(["Definitely Not A Real Product " + Date.now()]);
+    expect(requestCount).toBe(0);
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });
 

@@ -1,8 +1,19 @@
 // Normalizes raw Odoo API responses into ml and a stock status, and resolves the DUA product ->
 // Odoo SKU mapping — hides both from recommendation logic, which should only ever see clean
 // { availableOilMl, stockStatus, ... } facts, never a raw HTTP/JSON shape or a bare mapping row.
+//
+// Real confirmed response shape (2026-08-11, GET /api/get-inventory?skus=A,B,C):
+//   { "success": true, "products": [{ "name": "...", "default_code": "SKU", "on_hand_qty": 0.0 }] }
+// Two real limitations this file works around rather than papers over:
+//   - No reserved/available split — only on_hand_qty. Treated directly as the usable quantity;
+//     there is currently no way to exclude reserved stock because Odoo doesn't expose it here.
+//   - No unit of measure field — ASSUMED to already be ml (the doc's stated production unit for
+//     fragrance oil). Flagged in mappingStatus reasoning below; confirm with the Odoo coworker
+//     before trusting this at scale.
+// A requested SKU absent from the returned `products` array is SKU_NOT_FOUND, matched by
+// `default_code` (Odoo's field name for what this app calls a SKU).
 import prisma from "../db.server.js";
-import { getInventoryBySku } from "./odooClient.server.js";
+import { getInventoryBySkus } from "./odooClient.server.js";
 import { normalizeProductName } from "../utils/fragranceNormalization.js";
 
 // Buildable-bottle-count thresholds, not arbitrary raw ml — a status is only meaningful relative to
@@ -15,17 +26,6 @@ export function classifyStockStatus(maximumBuildableBottles) {
   if (maximumBuildableBottles >= STOCK_STATUS_THRESHOLDS.LOW_STOCK) return "LOW_STOCK";
   if (maximumBuildableBottles >= STOCK_STATUS_THRESHOLDS.CRITICAL) return "CRITICAL";
   return "OUT_OF_STOCK";
-}
-
-// 1 L = 1000 ml is the only unit conversion this ever performs automatically. Mass units (g/kg)
-// are never converted to volume without an approved density rule — unsupported/ambiguous units
-// become UNKNOWN and must be rejected in STRICT mode by the caller, never guessed.
-const SUPPORTED_UNITS = new Set(["ml", "l"]);
-function toMl(quantity, unit) {
-  const normalizedUnit = String(unit || "").trim().toLowerCase();
-  if (normalizedUnit === "ml") return quantity;
-  if (normalizedUnit === "l") return quantity * 1000;
-  return null;
 }
 
 // Fix (real, measured redundancy) — the same anchor/support product recurs across many ranked
@@ -45,36 +45,45 @@ function setCached(key, result) {
   inventoryCache.set(key, { expiresAt: Date.now() + CACHE_TTL_MS, result });
 }
 
-// Given an already-resolved, active mapping row, calls Odoo and normalizes the answer. The ONLY
-// function in this file that actually performs a network call — isolated here so request-counting
-// (getOilInventoryForProductTitles) and the single-product path (getOilInventoryForProduct) share
-// one implementation instead of two copies that could drift.
-async function resolveMappingToInventory(fragranceProductId, mapping, checkedAt) {
-  const response = await getInventoryBySku(mapping.odooSku);
-  if (!response.ok || !response.json) {
-    return {
-      fragranceProductId, odooSku: mapping.odooSku, found: false, availableOilMl: null, unit: null,
-      mappingStatus: "LOOKUP_FAILED", checkedAt, raw: response,
-    };
+// Given a Map of fragranceProductId -> active mapping row, makes ONE real Odoo call for all of
+// their SKUs at once (the endpoint genuinely supports this — confirmed via a real multi-SKU curl
+// request) and returns a Map of fragranceProductId -> normalized inventory result.
+async function resolveMappingsToInventory(mappingsByFragranceProductId) {
+  const checkedAt = new Date().toISOString();
+  const mappingEntries = [...mappingsByFragranceProductId.entries()];
+  const skus = mappingEntries.map(([, mapping]) => mapping.odooSku);
+  const response = await getInventoryBySkus(skus);
+  const resultsByFragranceProductId = new Map();
+
+  if (!response.ok || !response.json?.success) {
+    for (const [fragranceProductId, mapping] of mappingEntries) {
+      resultsByFragranceProductId.set(fragranceProductId, {
+        fragranceProductId, odooSku: mapping.odooSku, found: false, availableOilMl: null, unit: null,
+        mappingStatus: "LOOKUP_FAILED", checkedAt, raw: response,
+      });
+    }
+    return resultsByFragranceProductId;
   }
 
-  const result = response.json.result || response.json;
-  if (!result || result.found === false) {
-    return { fragranceProductId, odooSku: mapping.odooSku, found: false, availableOilMl: null, unit: null, mappingStatus: "SKU_NOT_FOUND", checkedAt, raw: result };
+  const productsBySku = new Map((response.json.products || []).map((p) => [p.default_code, p]));
+  for (const [fragranceProductId, mapping] of mappingEntries) {
+    const product = productsBySku.get(mapping.odooSku);
+    if (!product) {
+      resultsByFragranceProductId.set(fragranceProductId, {
+        fragranceProductId, odooSku: mapping.odooSku, found: false, availableOilMl: null, unit: null,
+        mappingStatus: "SKU_NOT_FOUND", checkedAt, raw: null,
+      });
+      continue;
+    }
+    resultsByFragranceProductId.set(fragranceProductId, {
+      fragranceProductId, odooSku: mapping.odooSku, found: true,
+      availableOilMl: typeof product.on_hand_qty === "number" ? product.on_hand_qty : null,
+      unit: "ml", // assumed — the real API returns no UoM field, see module comment
+      odooProductId: null, name: product.name ?? null,
+      mappingStatus: "CONNECTED", checkedAt, raw: product,
+    });
   }
-
-  // available/free-to-use only — reserved stock is never treated as available, per spec.
-  const rawAvailable = typeof result.available === "number" ? result.available : (result.onHand || 0) - (result.reserved || 0);
-  const availableOilMl = toMl(rawAvailable, result.unit);
-  if (availableOilMl == null) {
-    return { fragranceProductId, odooSku: mapping.odooSku, found: true, availableOilMl: null, unit: result.unit ?? null, mappingStatus: "UNSUPPORTED_UOM", checkedAt, raw: result };
-  }
-
-  return {
-    fragranceProductId, odooSku: mapping.odooSku, found: true, availableOilMl, unit: result.unit,
-    odooProductId: result.odooProductId ?? null, name: result.name ?? null,
-    mappingStatus: "CONNECTED", checkedAt, raw: result,
-  };
+  return resultsByFragranceProductId;
 }
 
 /**
@@ -83,7 +92,6 @@ async function resolveMappingToInventory(fragranceProductId, mapping, checkedAt)
  * reported as such, not guessed around. Bypasses the cache — intended for a deliberate single fresh
  * check (e.g. Save Build/Add to Cart, once wired), not for ranking many candidates.
  * @param {string} fragranceProductId
- * @returns {Promise<{fragranceProductId: string, odooSku: string|null, found: boolean, availableOilMl: number|null, unit: string|null, mappingStatus: "MISSING"|"CONNECTED"|"SKU_NOT_FOUND"|"UNSUPPORTED_UOM"|"LOOKUP_FAILED", checkedAt: string, raw?: object}>}
  */
 export async function getOilInventoryForProduct(fragranceProductId) {
   const checkedAt = new Date().toISOString();
@@ -91,7 +99,8 @@ export async function getOilInventoryForProduct(fragranceProductId) {
   if (!mapping || !mapping.active) {
     return { fragranceProductId, odooSku: null, found: false, availableOilMl: null, unit: null, mappingStatus: "MISSING", checkedAt };
   }
-  return resolveMappingToInventory(fragranceProductId, mapping, checkedAt);
+  const resolved = await resolveMappingsToInventory(new Map([[fragranceProductId, mapping]]));
+  return resolved.get(fragranceProductId);
 }
 
 // The recommendation engine's candidates/combinations carry a real product TITLE, never a
@@ -99,41 +108,29 @@ export async function getOilInventoryForProduct(fragranceProductId) {
 // resolves a real catalog row. Never fuzzy — exact normalizedTitle match only, same discipline as
 // the SKU import script. Cached (see above).
 export async function getOilInventoryForProductTitle(productTitle) {
-  const key = normalizeProductName(productTitle);
-  const cached = getCached(key);
-  if (cached) return cached;
-
-  const checkedAt = new Date().toISOString();
-  const product = await prisma.fragranceProduct.findFirst({ where: { normalizedTitle: key }, select: { id: true } });
-  const result = product
-    ? await getOilInventoryForProduct(product.id)
-    : { fragranceProductId: null, odooSku: null, found: false, availableOilMl: null, unit: null, mappingStatus: "MISSING", checkedAt };
-
-  setCached(key, result);
-  return result;
+  const results = await getOilInventoryForProductTitles([productTitle]);
+  return results.results.get(productTitle);
 }
 
 /**
  * Batch-shaped entry point for checking one candidate's 2-4 real components at once — the ONE
- * function recommendation logic should call. Today this fans out with Promise.all against the
- * confirmed GET /inventory?sku= contract (each call still individually capped by odooClient's own
- * request timeout); if the Odoo side later adds POST /inventory/batch, only this function's
- * internals change — no caller needs to know or care. Deduplicates repeated titles within one
- * candidate and reports exactly how many real (non-cached, mapped) Odoo requests this call made, so
- * the caller can measure and report real request counts.
+ * function recommendation logic should call. Confirmed against the real endpoint: this makes AT
+ * MOST one genuine Odoo HTTP request total (all uncached, mapped SKUs joined into one call) —
+ * never one request per component. Deduplicates repeated titles within one candidate and reports
+ * exactly how many real (non-cached, mapped) Odoo requests this call made, so the caller can
+ * measure and report real request counts.
  * @param {string[]} productTitles
  * @returns {Promise<{results: Map<string, object>, requestCount: number, skusQueried: string[]}>}
  */
 export async function getOilInventoryForProductTitles(productTitles) {
   const uniqueTitles = [...new Set(productTitles)];
   const results = new Map();
-  const skusQueried = [];
-  let requestCount = 0;
+  const needsLookup = []; // { title, key, fragranceProductId, mapping }
 
-  await Promise.all(uniqueTitles.map(async (title) => {
+  for (const title of uniqueTitles) {
     const key = normalizeProductName(title);
     const cached = getCached(key);
-    if (cached) { results.set(title, cached); return; }
+    if (cached) { results.set(title, cached); continue; }
 
     const checkedAt = new Date().toISOString();
     const product = await prisma.fragranceProduct.findFirst({ where: { normalizedTitle: key }, select: { id: true } });
@@ -141,7 +138,7 @@ export async function getOilInventoryForProductTitles(productTitles) {
       const result = { fragranceProductId: null, odooSku: null, found: false, availableOilMl: null, unit: null, mappingStatus: "MISSING", checkedAt };
       setCached(key, result);
       results.set(title, result);
-      return;
+      continue;
     }
 
     const mapping = await prisma.odooOilMapping.findUnique({ where: { fragranceProductId: product.id } });
@@ -149,17 +146,24 @@ export async function getOilInventoryForProductTitles(productTitles) {
       const result = { fragranceProductId: product.id, odooSku: null, found: false, availableOilMl: null, unit: null, mappingStatus: "MISSING", checkedAt };
       setCached(key, result);
       results.set(title, result);
-      return;
+      continue;
     }
 
-    requestCount += 1;
-    skusQueried.push(mapping.odooSku);
-    const result = await resolveMappingToInventory(product.id, mapping, checkedAt);
-    setCached(key, result);
-    results.set(title, result);
-  }));
+    needsLookup.push({ title, key, fragranceProductId: product.id, mapping });
+  }
 
-  return { results, requestCount, skusQueried };
+  const skusQueried = needsLookup.map((n) => n.mapping.odooSku);
+  if (needsLookup.length) {
+    const mappingsByFragranceProductId = new Map(needsLookup.map((n) => [n.fragranceProductId, n.mapping]));
+    const resolved = await resolveMappingsToInventory(mappingsByFragranceProductId); // ONE real call
+    for (const n of needsLookup) {
+      const result = resolved.get(n.fragranceProductId);
+      setCached(n.key, result);
+      results.set(n.title, result);
+    }
+  }
+
+  return { results, requestCount: needsLookup.length ? 1 : 0, skusQueried };
 }
 
 // Test-only escape hatch — without this, two tests checking the same real product title within the
@@ -167,5 +171,3 @@ export async function getOilInventoryForProductTitles(productTitles) {
 export function __clearOdooInventoryCacheForTesting() {
   inventoryCache.clear();
 }
-
-export { SUPPORTED_UNITS };

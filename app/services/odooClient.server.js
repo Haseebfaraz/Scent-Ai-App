@@ -1,12 +1,11 @@
 // Low-level HTTP wrapper around the custom Odoo REST API — read-only. No Prisma, no Shopify calls,
 // no recommendation logic (that lives in odooInventory.server.js / fragranceFormula.server.js).
 // Server-only (.server.js) — Odoo must never be reachable from the browser/theme JS.
-//
-// During current local/sandbox development, no Authorization header is required. When
-// ODOO_INVENTORY_API_KEY is set, it's sent as a Bearer token automatically — nothing else in this
-// file (or its callers) needs to change once real auth is turned on.
-const ODOO_API_BASE_URL = process.env.ODOO_API_BASE_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/v1/dua-ai";
-const ODOO_PING_URL = process.env.ODOO_PING_URL || `${ODOO_API_BASE_URL}/ping`;
+const ODOO_PING_URL = process.env.ODOO_PING_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/v1/dua-ai/ping";
+// Confirmed real endpoint (2026-08-11) — a different path/host structure than the ping endpoint,
+// not nested under /api/v1/dua-ai. Takes a comma-separated `skus` query param and returns ALL of
+// them in one response — genuinely batched, not simulated with parallel single-SKU calls.
+const ODOO_INVENTORY_URL = process.env.ODOO_INVENTORY_URL || "https://the-dua-brand-sandbox-5aug-35949002.dev.odoo.com/api/get-inventory";
 // Fix (real, measured latency) — a candidate combination is checked before it's known to be the
 // winner, and there's no cap on how long Odoo can take to answer. Confirmed live: an uncapped call
 // against a slow/misrouted endpoint let a single generation turn balloon past 30s. This bounds the
@@ -44,12 +43,13 @@ export async function pingOdoo() {
 
 /**
  * Inventory lookup by SKU / Internal Reference — the primary, approved production lookup key
- * (never fuzzy product-name matching). Returns the raw HTTP/JSON result; normalization into ml and
- * a stock status happens in odooInventory.server.js, not here.
- * @param {string} sku
+ * (never fuzzy product-name matching). Genuinely batched: multiple SKUs go in ONE request via a
+ * comma-separated `skus` param, confirmed against the real endpoint. Returns the raw HTTP/JSON
+ * result; normalization into ml and a stock status happens in odooInventory.server.js, not here.
+ * @param {string[]} skus
  */
-export async function getInventoryBySku(sku) {
-  if (!sku) return { ok: false, status: null, durationMs: 0, error: "sku is required." };
-  const url = `${ODOO_API_BASE_URL}/inventory?sku=${encodeURIComponent(sku)}`;
+export async function getInventoryBySkus(skus) {
+  if (!skus?.length) return { ok: false, status: null, durationMs: 0, error: "at least one sku is required." };
+  const url = `${ODOO_INVENTORY_URL}?skus=${encodeURIComponent(skus.join(","))}`;
   return getJson(url);
 }

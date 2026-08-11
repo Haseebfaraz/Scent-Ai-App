@@ -178,8 +178,20 @@ describe("evaluateCandidateInventory (Odoo manufacturing feasibility gate)", () 
     return product;
   }
 
-  function mockOdooAvailable(availableMl) {
-    global.fetch = vi.fn().mockResolvedValue({ ok: true, status: 200, text: async () => JSON.stringify({ result: { found: true, unit: "ml", available: availableMl } }) });
+  // Real confirmed response shape (2026-08-11): { success, products: [{ name, default_code,
+  // on_hand_qty }] } — one entry per SKU this describe block's tests actually map, so whichever
+  // subset a given test's one real batched call requests, it finds a matching default_code.
+  function mockOdooAvailable(onHandQty) {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        success: true,
+        products: [
+          { name: "The Opera - Oil", default_code: "OIL-VITEST-OPERA", on_hand_qty: onHandQty },
+          { name: "Water of Arabia - Oil", default_code: "OIL-VITEST-WATERARABIA", on_hand_qty: onHandQty },
+        ],
+      }),
+    });
   }
 
   it("a candidate with no real catalog match for its component titles never rejects on inventory (unknown is not insufficient)", async () => {
