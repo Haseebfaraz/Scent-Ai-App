@@ -26,7 +26,8 @@ import {
 import { generateNewProductCombinations, validateCombinationShape, CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
-import { pingOdoo } from "../services/odooClient.server.js";
+import { getOilInventoryForProductTitles } from "../services/odooInventory.server.js";
+import { buildProductionFormula, computeFeasibility } from "../services/fragranceFormula.server.js";
 import {
   describeWeatherSimple, deriveWeatherDirection, weatherDirectionToQuerySeason,
   hasSeasonWeatherConflict, getCalendarSeason,
@@ -182,6 +183,13 @@ function logPreviewEvent(stage, { conversationId, recommendationId, previewId, e
 // saveRecommendation/confirmRecommendation already apply for the same two things — generation-time
 // filtering (scoreProposedCombination/validateCombinationShape) already guarantees a ranked
 // candidate can't actually have either problem, but the gate never trusts that alone.
+// Deterministic — no network call. Odoo manufacturing feasibility is a SEPARATE, later gate
+// (evaluateCandidateInventory below), checked only for the candidate currently being considered in
+// autoSelectAndConfirmBest's ranked walk, not for every candidate up front. Confirmed live: checking
+// every candidate's inventory eagerly here repeated the same Odoo lookups across most of them
+// (the same anchor/support product recurs in many candidates) and pushed one generation turn past
+// 30s — ranking must finish on real preference/compatibility/risk signals alone, exactly like it did
+// before Odoo existed, and only the ranked-but-not-yet-selected winner ever waits on a network call.
 function evaluateAutoConfirmEligibility(candidate, profile) {
   const breakdown = candidate.confidenceBreakdown || {};
   const customerFitConfidence = breakdown.customerFit?.value ?? null;
@@ -224,6 +232,64 @@ function evaluateAutoConfirmEligibility(candidate, profile) {
   };
 }
 
+// Odoo manufacturing feasibility gate — the FINAL check, only for the one ranked candidate
+// currently being considered. Batches this candidate's 2-4 real components into one
+// getOilInventoryForProductTitles call (Promise.all under the hood today; swappable for a real
+// POST /inventory/batch later without any change here) rather than sequential per-SKU calls.
+//
+// Fallback/WARN semantics (endpoint not yet verified) — matches the spec's explicit "do not enable
+// STRICT until at least one real SKU lookup succeeds": only a CONFIRMED "not enough" answer
+// (mappingStatus "CONNECTED" and availableOilMl < requiredOilMl) makes buildable=false. Missing
+// mapping / SKU not found / unsupported UoM / lookup failure never reject in this mode — but
+// inventoryValidated is false for ALL of those, and a lookup failure specifically is logged as
+// ODOO_INVENTORY_LOOKUP_FAILED, distinct from a real validated answer, never presented as if the
+// formula had actually been confirmed buildable against real stock.
+async function evaluateCandidateInventory(candidate) {
+  const startedAt = Date.now();
+  try {
+    const formula = buildProductionFormula(
+      (candidate.recommendedRatio || []).map((r) => ({ productTitle: r.productTitle, ratioPercent: r.ratioPercent })),
+    );
+    const titles = formula.components.map((c) => c.productTitle);
+    const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(titles);
+
+    const components = formula.components.map((c) => {
+      const inventory = results.get(c.productTitle) || { mappingStatus: "MISSING" };
+      return {
+        productTitle: c.productTitle,
+        requiredOilMl: c.requiredOilMl,
+        mappingStatus: inventory.mappingStatus,
+        availableOilMl: inventory.mappingStatus === "CONNECTED" ? inventory.availableOilMl : null,
+      };
+    });
+
+    const lookupFailed = components.filter((c) => c.mappingStatus === "LOOKUP_FAILED");
+    if (lookupFailed.length) {
+      console.log("ODOO_INVENTORY_LOOKUP_FAILED", {
+        recommendationId: candidate.recommendationId,
+        components: lookupFailed.map((c) => ({ productTitle: c.productTitle })),
+      });
+    }
+
+    const knownComponents = components.filter((c) => c.mappingStatus === "CONNECTED");
+    const confirmedInsufficient = knownComponents.length > 0 && !computeFeasibility(knownComponents).buildable;
+    const inventoryValidated = knownComponents.length === components.length && components.length > 0;
+
+    return {
+      buildable: !confirmedInsufficient,
+      inventoryValidated,
+      components,
+      requestCount,
+      skusQueried,
+      durationMs: Date.now() - startedAt,
+    };
+  } catch {
+    // Malformed ratios are already caught by shapeValid in evaluateAutoConfirmEligibility — never
+    // let a formula-building error here reject a candidate for the wrong reason.
+    return { buildable: true, inventoryValidated: false, components: [], requestCount: 0, skusQueried: [], durationMs: Date.now() - startedAt };
+  }
+}
+
 // Fix (auto-preview flow) — the ONE place that turns a freshly generated/refined combination list
 // into an automatically-opened preview. Used by both generate_new_product_combinations AND
 // refine_combination_recommendations — a customer who says "make it sweeter" or "remove the dark
@@ -236,22 +302,38 @@ function evaluateAutoConfirmEligibility(candidate, profile) {
 // candidate falls through to the next-best real candidate instead of silently failing the turn or
 // opening a preview the engine itself isn't confident in.
 async function autoSelectAndConfirmBest(withIds, conversationId, context) {
+  const turnStartedAt = Date.now();
   logPreviewEvent("RECOMMENDATIONS_RANKED", {
     conversationId, recommendationId: null, previewId: null, eventType: "generate_new_product_combinations", previewUrl: null,
   });
 
+  // Fix (30s+ generation turns) — Odoo used to be checked for EVERY ranked candidate before this
+  // loop even started; the same anchor/support product recurs across most candidates, so that
+  // repeated the identical lookup many times over. Odoo is now the FINAL gate, checked only for the
+  // one candidate currently under consideration, and only once the cheap deterministic checks
+  // (customer fit/risk/shape/dislike — already computed synchronously on every candidate) pass —
+  // ranking itself never waits on a network call, exactly as it didn't before Odoo existed.
   let anyConfidenceGated = false;
+  let anyInventoryRejected = false;
+  let candidatesInventoryChecked = 0;
+  let odooRequestCount = 0;
+  let odooDurationMs = 0;
+  const skusQueriedSet = new Set();
+
   for (const candidate of withIds) {
     if (!candidate.autoConfirmEligible) { anyConfidenceGated = true; continue; }
 
-    // Odoo connectivity test hook (approved: ping only, no real inventory lookup/filtering yet) —
-    // moved here from save_customer_profile_field per instruction: fires at the moment a
-    // combination is actually being picked as the best candidate, not on every chat answer.
-    // Fire-and-forget: never awaited, so a slow/unreachable Odoo ping can never delay or block
-    // the actual selection it rides on.
-    const candidateProductTitles = (candidate.internalProducts || []).map((p) => p.title);
-    console.log("ODOO_PING_REQUEST", { conversationId, recommendationId: candidate.recommendationId, products: candidateProductTitles });
-    pingOdoo().then((result) => console.log("ODOO_PING_RESPONSE", { conversationId, recommendationId: candidate.recommendationId, products: candidateProductTitles, ...result }));
+    candidatesInventoryChecked += 1;
+    const inventory = await evaluateCandidateInventory(candidate);
+    odooRequestCount += inventory.requestCount;
+    odooDurationMs += inventory.durationMs;
+    inventory.skusQueried.forEach((sku) => skusQueriedSet.add(sku));
+    if (!inventory.buildable) {
+      anyInventoryRejected = true;
+      console.log("FORMULA_INVENTORY_REJECTED", { conversationId, recommendationId: candidate.recommendationId });
+      continue;
+    }
+    console.log("FORMULA_INVENTORY_BUILDABLE", { conversationId, recommendationId: candidate.recommendationId, inventoryValidated: inventory.inventoryValidated });
 
     const confirmResult = await confirmRecommendation({
       recommendationId: candidate.recommendationId,
@@ -270,12 +352,21 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
       conversationId, recommendationId: candidate.recommendationId, previewId: candidate.recommendationId,
       eventType: "preview_ready", previewUrl,
     });
+    console.log("BEST_BUILDABLE_RECOMMENDATION_SELECTED", {
+      rankedCandidateCount: withIds.length, candidatesChecked: candidatesInventoryChecked,
+      odooRequestCount, skusQueriedCount: skusQueriedSet.size, odooDurationMs, totalDurationMs: Date.now() - turnStartedAt,
+    });
     return {
       ok: true,
       modelContent: `The best recommendation (recommendationId ${candidate.recommendationId}) was selected and confirmed automatically. The preview page is opening on its own right now — do NOT list any combinations, do NOT ask the customer to pick one, do NOT ask "how do these sound", and do NOT say anything further about this turn.`,
       sseEvent: { type: "preview_ready", recommendationId: candidate.recommendationId, previewId: candidate.recommendationId, previewUrl },
     };
   }
+
+  console.log("ODOO_INVENTORY_PERFORMANCE_SUMMARY", {
+    rankedCandidateCount: withIds.length, candidatesChecked: candidatesInventoryChecked,
+    odooRequestCount, skusQueriedCount: skusQueriedSet.size, odooDurationMs, totalDurationMs: Date.now() - turnStartedAt,
+  });
 
   // Fix (no confidence gate before auto-confirmation) — every candidate that was otherwise valid
   // got filtered out purely for being too low-confidence to present with certainty; tell the model
@@ -285,6 +376,12 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
     return {
       ok: false,
       modelContent: "every generated combination was too low-confidence to recommend with certainty (thin evidence, weak fit to what the customer said, or a real compatibility risk) — tell the customer honestly that nothing felt like a confident enough match yet, and ask a bit more about their preferences rather than presenting a weak guess as a solid recommendation.",
+    };
+  }
+  if (anyInventoryRejected) {
+    return {
+      ok: false,
+      modelContent: "every generated combination that otherwise fit the customer well couldn't be confirmed as buildable from current inventory — tell the customer honestly that we need a moment to find an available option, and offer to try again shortly.",
     };
   }
   // Every ranked candidate failed re-verification (rare) — never silently open a broken preview;
@@ -646,6 +743,13 @@ export function __deriveRefinementAdjustmentsForTesting(feedback, currentNotes) 
 // produce one of each case.
 export function __evaluateAutoConfirmEligibilityForTesting(candidate, profile) {
   return evaluateAutoConfirmEligibility(candidate, profile);
+}
+
+// Test-only escape hatch — lets the regression suite check the Odoo manufacturing feasibility gate
+// (the final, separate check) directly with a synthetic candidate, without needing a real
+// generation/ranking pass first.
+export function __evaluateCandidateInventoryForTesting(candidate) {
+  return evaluateCandidateInventory(candidate);
 }
 
 // ============================================================

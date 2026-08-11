@@ -7,9 +7,19 @@
 // the ONE function that decides and explains auto-confirmation; these tests exercise it directly
 // with synthetic candidates/profiles, no real generation needed. A hard-dislike conflict needs a
 // profile (independent of the candidate's own scoring), so the test hook now takes both.
-import { describe, it, expect } from "vitest";
-import { __evaluateAutoConfirmEligibilityForTesting as evaluate } from "./fragranceAgentTools.server.js";
+//
+// Fix (30s+ generation turns) — Odoo manufacturing feasibility is a SEPARATE, later gate
+// (evaluateCandidateInventory, its own describe block below) checked only for the one ranked
+// candidate under consideration in autoSelectAndConfirmBest, never for every candidate up front.
+// evaluateAutoConfirmEligibility itself stays fully deterministic/synchronous — no network call.
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import {
+  __evaluateAutoConfirmEligibilityForTesting as evaluate,
+  __evaluateCandidateInventoryForTesting as evaluateInventory,
+} from "./fragranceAgentTools.server.js";
 import { CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
+import { __clearOdooInventoryCacheForTesting } from "../services/odooInventory.server.js";
+import prisma from "../db.server.js";
 
 function candidate(overrides = {}) {
   return {
@@ -28,7 +38,7 @@ function candidate(overrides = {}) {
   };
 }
 
-describe("evaluateAutoConfirmEligibility", () => {
+describe("evaluateAutoConfirmEligibility (deterministic — no network call)", () => {
   it("auto-confirms strong customer fit with zero history (sparse evidence never blocks)", () => {
     const c = candidate({ confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" }, historical: { value: "low" } } });
     const result = evaluate(c, { dislikes: [] });
@@ -127,5 +137,115 @@ describe("evaluateAutoConfirmEligibility", () => {
     const result = evaluate(c, { dislikes: [] });
     expect(result.highestCountedRiskSeverity).toBe("medium");
     expect(result.autoConfirmEligible).toBe(true); // medium never blocks on its own, only high/critical
+  });
+});
+
+// Odoo manufacturing feasibility — the FINAL, separate gate. Real OdooOilMapping row + mocked
+// fetch, same convention as app/services/odooInventory.test.js. Uses a real FragranceProduct so
+// getOilInventoryForProductTitles (title -> normalizedTitle -> FragranceProduct -> mapping) can
+// actually resolve.
+describe("evaluateCandidateInventory (Odoo manufacturing feasibility gate)", () => {
+  const originalFetch = global.fetch;
+  // "The Opera" / "Water of Arabia" already carry real mappings from the catalog import — save
+  // and restore the original row (rather than blindly create/delete) so this test never corrupts
+  // real seeded data, whether or not the product already had a mapping before the test ran.
+  const savedOriginals = []; // { fragranceProductId, original: row|null }
+
+  beforeEach(() => __clearOdooInventoryCacheForTesting());
+  afterEach(async () => {
+    for (const { fragranceProductId, original } of savedOriginals) {
+      if (original) {
+        await prisma.odooOilMapping.update({ where: { fragranceProductId }, data: { odooSku: original.odooSku, active: original.active } });
+      } else {
+        await prisma.odooOilMapping.deleteMany({ where: { fragranceProductId } });
+      }
+    }
+    savedOriginals.length = 0;
+    global.fetch = originalFetch;
+    __clearOdooInventoryCacheForTesting();
+  });
+
+  async function mapRealProduct(title, sku) {
+    const product = await prisma.fragranceProduct.findFirst({ where: { title }, select: { id: true } });
+    if (!product) throw new Error(`Test fixture assumes "${title}" exists in the real catalog.`);
+    const original = await prisma.odooOilMapping.findUnique({ where: { fragranceProductId: product.id } });
+    savedOriginals.push({ fragranceProductId: product.id, original });
+    await prisma.odooOilMapping.upsert({
+      where: { fragranceProductId: product.id },
+      create: { fragranceProductId: product.id, odooSku: sku, active: true },
+      update: { odooSku: sku, active: true },
+    });
+    return product;
+  }
+
+  // Real confirmed response shape (2026-08-11): { success, products: [{ name, default_code,
+  // on_hand_qty }] } — one entry per SKU this describe block's tests actually map, so whichever
+  // subset a given test's one real batched call requests, it finds a matching default_code.
+  function mockOdooAvailable(onHandQty) {
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, status: 200,
+      text: async () => JSON.stringify({
+        success: true,
+        products: [
+          { name: "The Opera - Oil", default_code: "OIL-VITEST-OPERA", on_hand_qty: onHandQty },
+          { name: "Water of Arabia - Oil", default_code: "OIL-VITEST-WATERARABIA", on_hand_qty: onHandQty },
+        ],
+      }),
+    });
+  }
+
+  it("a candidate with no real catalog match for its component titles never rejects on inventory (unknown is not insufficient)", async () => {
+    const result = await evaluateInventory(candidate());
+    expect(result.buildable).toBe(true);
+    expect(result.inventoryValidated).toBe(false);
+    expect(result.components.every((c) => c.mappingStatus === "MISSING")).toBe(true);
+  });
+
+  it("rejects on a CONFIRMED insufficient oil answer from Odoo (the caller's existing fall-through then tries the next candidate)", async () => {
+    await mapRealProduct("The Opera", "OIL-VITEST-OPERA");
+    mockOdooAvailable(1); // 13ml default oil * 50% = 6.5ml required, only 1ml available
+
+    const c = candidate({
+      recommendedRatio: [{ productTitle: "The Opera", ratioPercent: 50 }, { productTitle: "Water of Arabia", ratioPercent: 50 }],
+    });
+    const result = await evaluateInventory(c);
+    expect(result.buildable).toBe(false);
+  });
+
+  it("is buildable when Odoo confirms enough oil for every mapped component, and reports inventoryValidated=true", async () => {
+    await mapRealProduct("The Opera", "OIL-VITEST-OPERA");
+    await mapRealProduct("Water of Arabia", "OIL-VITEST-WATERARABIA");
+    mockOdooAvailable(500);
+
+    const c = candidate({
+      recommendedRatio: [{ productTitle: "The Opera", ratioPercent: 50 }, { productTitle: "Water of Arabia", ratioPercent: 50 }],
+    });
+    const result = await evaluateInventory(c);
+    expect(result.buildable).toBe(true);
+    expect(result.inventoryValidated).toBe(true);
+  });
+
+  it("does NOT reject when Odoo is unreachable — a lookup failure is unknown, not confirmed insufficient — and inventoryValidated is false, not true", async () => {
+    await mapRealProduct("The Opera", "OIL-VITEST-OPERA");
+    global.fetch = vi.fn().mockRejectedValue(new Error("ECONNREFUSED"));
+
+    const c = candidate({
+      recommendedRatio: [{ productTitle: "The Opera", ratioPercent: 50 }, { productTitle: "B", ratioPercent: 50 }],
+    });
+    const result = await evaluateInventory(c);
+    expect(result.buildable).toBe(true);
+    expect(result.inventoryValidated).toBe(false);
+    expect(result.components.find((ic) => ic.productTitle === "The Opera").mappingStatus).toBe("LOOKUP_FAILED");
+  });
+
+  it("batches one candidate's components into a single getOilInventoryForProductTitles call (request count reflects mapped components only)", async () => {
+    await mapRealProduct("The Opera", "OIL-VITEST-OPERA");
+    mockOdooAvailable(500);
+
+    // "B" has no mapping (MISSING, no network call) — only "The Opera" should count as a request.
+    const c = candidate({ recommendedRatio: [{ productTitle: "The Opera", ratioPercent: 50 }, { productTitle: "B", ratioPercent: 50 }] });
+    const result = await evaluateInventory(c);
+    expect(result.requestCount).toBe(1);
+    expect(result.skusQueried).toEqual(["OIL-VITEST-OPERA"]);
   });
 });

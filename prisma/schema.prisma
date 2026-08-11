@@ -144,6 +144,29 @@ model FragranceProduct {
   @@index([collection])
 }
 
+// Odoo oil-inventory integration — explicit DUA product <-> Odoo fragrance-oil SKU mapping. SKU is
+// the approved production lookup key; display names are never used as production truth (fuzzy
+// name matching may only ever suggest a mapping for staff review, never decide it).
+// odooSku is intentionally NOT unique — confirmed against the real catalog data: multiple DUA
+// products (e.g. "Black Widow" / "Black Widow Special Edition", "Matrix" / "Matrix Recoded
+// Edition") are legitimately different marketed editions of the exact same physical fragrance oil,
+// so more than one FragranceProduct can genuinely map to one Odoo SKU.
+model OdooOilMapping {
+  id                 String    @id @default(cuid())
+  fragranceProductId String    @unique
+  odooSku            String
+  odooProductId      Int?
+  odooVariantId      Int?
+  odooName           String?
+  unitOfMeasure      String?
+  active             Boolean   @default(true)
+  lastVerifiedAt     DateTime?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  @@index([odooSku])
+}
+
 model ExistingCombination {
   id                    String   @id @default(cuid())
   title                 String
