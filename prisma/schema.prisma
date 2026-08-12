@@ -222,8 +222,62 @@ model FragranceRecommendation {
   draftExcludedNotes    Json?
   draftRatiosJson       Json?
 
+  inventorySnapshot     RecommendationInventorySnapshot?
+
   @@index([conversationId])
   @@index([status])
+}
+
+// Historical evidence of the Odoo manufacturing-feasibility check at the moment a candidate was
+// actually walked by autoSelectAndConfirmBest — one snapshot per checked recommendation (never per
+// candidate that was never reached; a candidate whose deterministic gate rejected it before Odoo was
+// ever consulted gets no row here at all). Deliberately never updated after creation: if Odoo stock
+// changes later, this row still reflects exactly what the system knew at selection time. A future
+// Save Build/Add to Cart fresh check is a SEPARATE, later lookup — never backfilled into this row.
+model RecommendationInventorySnapshot {
+  id                  String   @id @default(cuid())
+  recommendationId    String   @unique
+  recommendation      FragranceRecommendation @relation(fields: [recommendationId], references: [id], onDelete: Cascade)
+  inventoryValidated  Boolean
+  buildable           Boolean
+  checkedAt           DateTime
+  oilTotalMl          Float
+  alcoholMl           Float
+  maxBuildableBottles Int?
+  limitingSku         String?
+  // "ok" | "lookup_failed" — the real HTTP/contract outcome, distinct from inventoryValidated
+  // (which is false for ANY unresolved component, not just an outright request failure).
+  requestStatus       String
+  createdAt           DateTime @default(now())
+
+  components RecommendationInventoryComponent[]
+
+  @@index([recommendationId])
+}
+
+model RecommendationInventoryComponent {
+  id                              String   @id @default(cuid())
+  snapshotId                      String
+  snapshot                        RecommendationInventorySnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  // Nullable — a component whose title never matched a real catalog row at all still gets a row
+  // here (sufficient: null, mappingStatus MISSING) so the admin table always shows every real
+  // component the combination actually has, not just the ones that resolved.
+  fragranceProductId              String?
+  productTitle                    String
+  odooSku                         String?
+  ratioPercent                    Float
+  requiredOilMl                   Float
+  onHandQty                       Float?
+  // MISSING | CONNECTED | SKU_NOT_FOUND | LOOKUP_FAILED — mirrors odooInventory.server.js's
+  // mappingStatus exactly, so the admin UI can distinguish "no mapping yet" from "Odoo said no"
+  // from "we couldn't reach Odoo" instead of collapsing them all into one generic failure.
+  mappingStatus                   String
+  // null when onHandQty is unknown (never a false "insufficient") — only true/false once Odoo
+  // actually answered for this component.
+  sufficient                      Boolean?
+  maxBuildableBottlesForComponent Int?
+
+  @@index([snapshotId])
 }
 
 // Precomputed per Phase 12's performance requirement: a live groupBy of OrderHistory (936k rows)
