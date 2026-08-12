@@ -113,6 +113,27 @@ export async function getOilInventoryForProductTitle(productTitle) {
 }
 
 /**
+ * Mapping resolution only — no Odoo call, no cache read/write. Exists so a caller can log which
+ * real SKUs are ABOUT to be checked before the actual request fires (getOilInventoryForProductTitles
+ * only knows the SKUs once its own — separate — resolution completes). A cheap, indexed lookup, so
+ * resolving the same row twice (once here, once inside the real call below) is an acceptable trade
+ * for being able to log real SKUs alongside the request itself, not only after the fact.
+ * @param {string[]} productTitles
+ * @returns {Promise<Map<string, {fragranceProductId: string, odooSku: string}|null>>}
+ */
+export async function resolveOdooSkusForTitles(productTitles) {
+  const uniqueTitles = [...new Set(productTitles)];
+  const result = new Map();
+  for (const title of uniqueTitles) {
+    const product = await prisma.fragranceProduct.findFirst({ where: { normalizedTitle: normalizeProductName(title) }, select: { id: true } });
+    if (!product) { result.set(title, null); continue; }
+    const mapping = await prisma.odooOilMapping.findUnique({ where: { fragranceProductId: product.id } });
+    result.set(title, mapping && mapping.active ? { fragranceProductId: product.id, odooSku: mapping.odooSku } : null);
+  }
+  return result;
+}
+
+/**
  * Batch-shaped entry point for checking one candidate's 2-4 real components at once — the ONE
  * function recommendation logic should call. Confirmed against the real endpoint: this makes AT
  * MOST one genuine Odoo HTTP request total (all uncached, mapped SKUs joined into one call) —

@@ -26,8 +26,9 @@ import {
 import { generateNewProductCombinations, validateCombinationShape, CUSTOMER_FIT_LOW_THRESHOLD } from "../services/recommendationEngine.server.js";
 import { saveRecommendation, confirmRecommendation } from "../services/recommendationConfirmation.server.js";
 import { verifyCity, fetchCurrentWeather } from "../services/locationVerification.server.js";
-import { getOilInventoryForProductTitles } from "../services/odooInventory.server.js";
-import { buildProductionFormula, computeFeasibility } from "../services/fragranceFormula.server.js";
+import { getOilInventoryForProductTitles, resolveOdooSkusForTitles } from "../services/odooInventory.server.js";
+import { buildProductionFormula, computeFeasibility, computeComponentCapacity } from "../services/fragranceFormula.server.js";
+import { saveInventorySnapshot } from "../services/recommendationInventorySnapshot.server.js";
 import {
   describeWeatherSimple, deriveWeatherDirection, weatherDirectionToQuerySeason,
   hasSeasonWeatherConflict, getCalendarSeason,
@@ -252,19 +253,37 @@ async function evaluateCandidateInventory(candidate, candidateIndex = null) {
     );
     const titles = formula.components.map((c) => c.productTitle);
 
-    // Fix (make the real request/response ordering unmistakable in logs) — no Authorization
-    // header, Bearer token, or customer PII in either line; recommendationId only, never a
-    // customer name/email.
-    console.log("ODOO_INVENTORY_REQUEST", { recommendationId: candidate.recommendationId, candidateIndex, skuCount: titles.length });
+    // Fix (observability) — real SKUs are useful, explicitly approved for logging; only the
+    // Authorization header/Bearer token/API key/cookies/raw HTML are excluded, never in either
+    // line. recommendationId only, never a customer name/email/other PII.
+    const skuMap = await resolveOdooSkusForTitles(titles);
+    console.log("ODOO_INVENTORY_REQUEST", {
+      recommendationId: candidate.recommendationId,
+      candidateIndex,
+      components: formula.components.map((c) => ({
+        productTitle: c.productTitle,
+        sku: skuMap.get(c.productTitle)?.odooSku ?? null,
+        ratioPercent: c.ratioPercent,
+        requiredOilMl: c.requiredOilMl,
+      })),
+      skuCount: titles.length,
+    });
+
     const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(titles);
 
     const components = formula.components.map((c) => {
-      const inventory = results.get(c.productTitle) || { mappingStatus: "MISSING" };
+      const inventory = results.get(c.productTitle) || { mappingStatus: "MISSING", odooSku: null, fragranceProductId: null };
+      const onHandQty = inventory.mappingStatus === "CONNECTED" ? inventory.availableOilMl : null;
       return {
+        fragranceProductId: inventory.fragranceProductId ?? null,
         productTitle: c.productTitle,
+        odooSku: inventory.odooSku ?? null,
+        ratioPercent: c.ratioPercent,
         requiredOilMl: c.requiredOilMl,
+        onHandQty,
         mappingStatus: inventory.mappingStatus,
-        availableOilMl: inventory.mappingStatus === "CONNECTED" ? inventory.availableOilMl : null,
+        sufficient: onHandQty != null ? onHandQty >= c.requiredOilMl : null,
+        maxBuildableBottlesForComponent: onHandQty != null ? computeComponentCapacity(onHandQty, c.requiredOilMl) : null,
       };
     });
 
@@ -272,26 +291,55 @@ async function evaluateCandidateInventory(candidate, candidateIndex = null) {
     if (lookupFailed.length) {
       console.log("ODOO_INVENTORY_LOOKUP_FAILED", {
         recommendationId: candidate.recommendationId,
-        components: lookupFailed.map((c) => ({ productTitle: c.productTitle })),
+        components: lookupFailed.map((c) => ({ productTitle: c.productTitle, sku: c.odooSku })),
       });
     }
 
     const knownComponents = components.filter((c) => c.mappingStatus === "CONNECTED");
-    const confirmedInsufficient = knownComponents.length > 0 && !computeFeasibility(knownComponents).buildable;
+    const confirmedInsufficient = knownComponents.length > 0 && !computeFeasibility(
+      knownComponents.map((c) => ({ productTitle: c.productTitle, requiredOilMl: c.requiredOilMl, availableOilMl: c.onHandQty })),
+    ).buildable;
     const inventoryValidated = knownComponents.length === components.length && components.length > 0;
     const durationMs = Date.now() - startedAt;
+    const status = lookupFailed.length ? "lookup_failed" : "ok";
 
     console.log("ODOO_INVENTORY_RESPONSE", {
-      recommendationId: candidate.recommendationId, candidateIndex,
-      status: lookupFailed.length ? "lookup_failed" : "ok",
-      inventoryValidated, durationMs,
+      recommendationId: candidate.recommendationId, candidateIndex, status, inventoryValidated, durationMs,
+      products: components.map((c) => ({ sku: c.odooSku, onHandQty: c.onHandQty, requiredOilMl: c.requiredOilMl, sufficient: c.sufficient })),
     });
 
-    return { buildable: !confirmedInsufficient, inventoryValidated, components, requestCount, skusQueried, durationMs };
+    // Computed once here (not gated by the overall buildable flag) so a rejected candidate still
+    // reports its real limiting oil and capacity — "0 bottles, limited by X" is more useful than a
+    // bare rejection. Only ever meaningful among CONNECTED components; an unresolved one has no real
+    // capacity number to compare. The persisted snapshot (recommendationInventorySnapshot.server.js)
+    // stores these exact same numbers verbatim — computed once, here, never recomputed at
+    // persistence time, so the log and the DB row can never drift apart.
+    const limiting = knownComponents.reduce(
+      (worst, c) => (worst === null || c.maxBuildableBottlesForComponent < worst.maxBuildableBottlesForComponent ? c : worst),
+      null,
+    );
+
+    return {
+      buildable: !confirmedInsufficient,
+      inventoryValidated,
+      components,
+      requestCount,
+      skusQueried,
+      durationMs,
+      status,
+      oilTotalMl: formula.oilTotalMl,
+      alcoholMl: formula.alcoholMl,
+      maxBuildableBottles: limiting?.maxBuildableBottlesForComponent ?? null,
+      limitingSku: limiting?.odooSku ?? null,
+    };
   } catch {
     // Malformed ratios are already caught by shapeValid in evaluateAutoConfirmEligibility — never
     // let a formula-building error here reject a candidate for the wrong reason.
-    return { buildable: true, inventoryValidated: false, components: [], requestCount: 0, skusQueried: [], durationMs: Date.now() - startedAt };
+    return {
+      buildable: true, inventoryValidated: false, components: [], requestCount: 0, skusQueried: [],
+      durationMs: Date.now() - startedAt, status: "ok", oilTotalMl: null, alcoholMl: null,
+      maxBuildableBottles: null, limitingSku: null,
+    };
   }
 }
 
@@ -333,7 +381,34 @@ async function autoSelectAndConfirmBest(withIds, conversationId, context) {
     odooRequestCount += inventory.requestCount;
     odooDurationMs += inventory.durationMs;
     inventory.skusQueried.forEach((sku) => skusQueriedSet.add(sku));
-    console.log("INVENTORY_CANDIDATE_RESULT", { conversationId, recommendationId: candidate.recommendationId, candidateIndex, buildable: inventory.buildable });
+    console.log("INVENTORY_CANDIDATE_RESULT", {
+      conversationId, recommendationId: candidate.recommendationId, candidateIndex,
+      inventoryValidated: inventory.inventoryValidated, buildable: inventory.buildable,
+      limitingSku: inventory.limitingSku, maxBuildableBottles: inventory.maxBuildableBottles,
+    });
+
+    // Fix (persist inventory evidence) — historical evidence, written once per checked candidate
+    // (buildable or not, per the admin "why was #0 skipped" requirement) and never updated again —
+    // a later Save Build/Add to Cart fresh check is a separate, later lookup, never backfilled here.
+    // A write failure must never break the actual selection/preview it's just recording evidence
+    // for.
+    try {
+      await saveInventorySnapshot({
+        recommendationId: candidate.recommendationId,
+        inventoryValidated: inventory.inventoryValidated,
+        buildable: inventory.buildable,
+        checkedAt: new Date().toISOString(),
+        oilTotalMl: inventory.oilTotalMl,
+        alcoholMl: inventory.alcoholMl,
+        requestStatus: inventory.status,
+        maxBuildableBottles: inventory.maxBuildableBottles,
+        limitingSku: inventory.limitingSku,
+        components: inventory.components,
+      });
+    } catch (err) {
+      console.error("Failed to save inventory snapshot:", err.message || err);
+    }
+
     if (!inventory.buildable) {
       anyInventoryRejected = true;
       continue;

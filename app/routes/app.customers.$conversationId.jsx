@@ -16,9 +16,14 @@ export async function loader({ request, params }) {
   }
   const profile = { ...emptyProfile(), ...profileRow.profileJson };
 
+  // Fix (inventory observability) — the persisted snapshot + component rows, joined in this same
+  // query so opening this page never triggers a fresh Odoo call just to show historical evidence
+  // (point 12 of the spec) — the admin UI only ever reads what was already recorded at
+  // selection/rejection time.
   const recommendations = await prisma.fragranceRecommendation.findMany({
     where: { conversationId },
     orderBy: { createdAt: "desc" },
+    include: { inventorySnapshot: { include: { components: true } } },
   });
 
   return {
@@ -47,6 +52,31 @@ export async function loader({ request, params }) {
       exactNoteCoverageScore: r.scoreJson?.exactNoteCoverageScore ?? null,
       ratios: Array.isArray(r.ratiosJson) ? r.ratiosJson : [],
       components: Array.isArray(r.productsJson) ? r.productsJson : [],
+      // null when this candidate never reached Odoo at all (rejected by the deterministic gate
+      // first) — the admin card renders no inventory section at all in that case, rather than
+      // fabricating a state for a check that never happened.
+      inventory: r.inventorySnapshot
+        ? {
+            inventoryValidated: r.inventorySnapshot.inventoryValidated,
+            buildable: r.inventorySnapshot.buildable,
+            checkedAt: r.inventorySnapshot.checkedAt,
+            oilTotalMl: r.inventorySnapshot.oilTotalMl,
+            alcoholMl: r.inventorySnapshot.alcoholMl,
+            maxBuildableBottles: r.inventorySnapshot.maxBuildableBottles,
+            limitingSku: r.inventorySnapshot.limitingSku,
+            requestStatus: r.inventorySnapshot.requestStatus,
+            components: r.inventorySnapshot.components.map((c) => ({
+              productTitle: c.productTitle,
+              odooSku: c.odooSku,
+              ratioPercent: c.ratioPercent,
+              requiredOilMl: c.requiredOilMl,
+              onHandQty: c.onHandQty,
+              mappingStatus: c.mappingStatus,
+              sufficient: c.sufficient,
+              maxBuildableBottlesForComponent: c.maxBuildableBottlesForComponent,
+            })),
+          }
+        : null,
     })),
   };
 }
@@ -74,6 +104,86 @@ function formatComponents(components) {
         .map((p) => `${p.title}${p.contribution ? ` (${p.contribution})` : ""} — ${(p.notes || []).join(", ")}`)
         .join("; ")
     : "—";
+}
+
+// Three distinct states, never collapsed into one another (point 7 of the spec) — a WARN-mode
+// lookup failure/unresolved component must never read as a green BUILDABLE badge just because the
+// recommendation flow itself was allowed to continue.
+function inventoryStatusBadge(inventory) {
+  if (!inventory.inventoryValidated) return { tone: "warning", label: "⚠ NOT VALIDATED" };
+  return inventory.buildable ? { tone: "success", label: "✅ BUILDABLE" } : { tone: "critical", label: "❌ NOT BUILDABLE" };
+}
+
+// Odoo returns no UoM field; onHandQty is already normalized to ml upstream in
+// odooInventory.server.js (unit: "ml" assumption documented there) — this is the one place the
+// admin UI attaches the "ml" label, so changing the assumption never means hunting through JSX.
+const ML = (n) => (typeof n === "number" ? `${n.toFixed(2)} ml` : "—");
+const TH_STYLE = { textAlign: "left", padding: "4px 8px", borderBottom: "1px solid #c9cccf", fontWeight: 600 };
+const TD_STYLE = { padding: "4px 8px", borderBottom: "1px solid #e1e3e5" };
+
+function InventorySection({ inventory }) {
+  if (!inventory) return null;
+  const badge = inventoryStatusBadge(inventory);
+  const insufficientComponents = inventory.components.filter((c) => c.sufficient === false);
+  const limitingComponent = inventory.components.find((c) => c.odooSku === inventory.limitingSku);
+
+  return (
+    <s-stack direction="block" gap="tight">
+      <s-stack direction="inline" gap="tight" alignItems="center">
+        <s-text type="strong">Inventory</s-text>
+        <s-badge tone={badge.tone}>{badge.label}</s-badge>
+        {inventory.inventoryValidated ? <s-text color="subdued">Odoo validated</s-text> : null}
+      </s-stack>
+      <s-text color="subdued">Checked {new Date(inventory.checkedAt).toLocaleString()}</s-text>
+      {!inventory.inventoryValidated ? (
+        <s-text color="subdued">Odoo inventory could not be confirmed when this recommendation was generated.</s-text>
+      ) : null}
+
+      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "13px" }}>
+        <thead>
+          <tr>
+            <th style={TH_STYLE}>Component</th>
+            <th style={TH_STYLE}>Oil SKU</th>
+            <th style={TH_STYLE}>Ratio</th>
+            <th style={TH_STYLE}>Required</th>
+            <th style={TH_STYLE}>Odoo Stock</th>
+            <th style={TH_STYLE}>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {inventory.components.map((c, i) => (
+            <tr key={i}>
+              <td style={TD_STYLE}>{c.productTitle}</td>
+              <td style={TD_STYLE}>{c.odooSku || "—"}</td>
+              <td style={TD_STYLE}>{Math.round(c.ratioPercent)}%</td>
+              <td style={TD_STYLE}>{ML(c.requiredOilMl)}</td>
+              <td style={TD_STYLE}>{ML(c.onHandQty)}</td>
+              <td style={TD_STYLE}>{c.sufficient == null ? "? Unknown" : c.sufficient ? "✓ Enough" : "✕ Insufficient"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+
+      <s-text color="subdued">
+        Total fragrance oil: {ML(inventory.oilTotalMl)} · Alcohol: {ML(inventory.alcoholMl)} · Finished bottle:{" "}
+        {ML(inventory.oilTotalMl != null && inventory.alcoholMl != null ? inventory.oilTotalMl + inventory.alcoholMl : null)}
+      </s-text>
+      {inventory.maxBuildableBottles != null ? (
+        <s-text color="subdued">Max buildable bottles: {inventory.maxBuildableBottles}</s-text>
+      ) : null}
+      {inventory.limitingSku ? (
+        <s-text color="subdued">
+          Limiting oil: {limitingComponent?.productTitle || "—"} — {inventory.limitingSku}
+        </s-text>
+      ) : null}
+      {!inventory.buildable && inventory.inventoryValidated ? (
+        <s-text color="subdued">
+          Reason: Insufficient oil inventory for {insufficientComponents.map((c) => `${c.productTitle} / ${c.odooSku}`).join(", ")}.
+          This candidate was skipped and the recommendation engine evaluated the next ranked candidate.
+        </s-text>
+      ) : null}
+    </s-stack>
+  );
 }
 
 export default function CustomerDetail() {
@@ -121,10 +231,18 @@ export default function CustomerDetail() {
                           <s-badge tone="neutral">confidence: {r.confidence} (why?)</s-badge>
                         </s-clickable>
                       ) : null}
+                      {r.status === "confirmed" && r.inventory?.inventoryValidated && r.inventory?.buildable ? (
+                        <>
+                          <s-badge tone="success">Confirmed</s-badge>
+                          <s-badge tone="success">Inventory Verified</s-badge>
+                          <s-badge tone="success">Buildable</s-badge>
+                        </>
+                      ) : null}
                     </s-stack>
                     <s-text color="subdued">Created {new Date(r.createdAt).toLocaleString()}</s-text>
                     <s-text>Ratio: {formatRatios(r.ratios)}</s-text>
                     <s-text>Real components: {formatComponents(r.components)}</s-text>
+                    <InventorySection inventory={r.inventory} />
                     {r.whySuits ? <s-text>Why this suits them: {r.whySuits}</s-text> : null}
                     {r.bestUse ? <s-text>Best use: {r.bestUse}</s-text> : null}
                     {r.shopifyProductId ? <s-text color="subdued">Shopify product created</s-text> : null}
