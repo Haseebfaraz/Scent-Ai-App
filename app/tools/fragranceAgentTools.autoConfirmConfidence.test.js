@@ -82,6 +82,21 @@ describe("evaluateAutoConfirmEligibility (deterministic — no network call)", (
     expect(criticalResult.autoConfirmReasons).toContain("high_severity_risk:critical");
   });
 
+  // Fix (duplicate_direction downgraded HIGH -> MEDIUM) — the gate's own severity-based logic is
+  // untouched by that change (it only ever reads the severity string, never the rule id), but this
+  // proves the practical consequence end to end: a candidate whose ONLY risk is duplicate_direction
+  // (now medium) is no longer eliminated by that risk alone, while a genuinely unrelated
+  // high-severity risk still blocks exactly as before.
+  it("a duplicate_direction-shaped medium risk alone does not block, but an unrelated high-severity risk still does", () => {
+    const mediumOnly = candidate({ riskBreakdown: [{ counted: true, severity: "medium", id: "duplicate_direction" }] });
+    const mediumResult = evaluate(mediumOnly, { dislikes: [] });
+    expect(mediumResult.autoConfirmEligible).toBe(true);
+
+    const unrelatedHigh = candidate({ riskBreakdown: [{ counted: true, severity: "high", id: "excessive_direction_stacking" }] });
+    const highResult = evaluate(unrelatedHigh, { dislikes: [] });
+    expect(highResult.autoConfirmEligible).toBe(false);
+  });
+
   it("ignores a high-severity risk that was correlation-deduplicated out (counted: false)", () => {
     const c = candidate({ riskBreakdown: [{ counted: false, severity: "high" }] });
     const result = evaluate(c, { dislikes: [] });
