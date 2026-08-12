@@ -117,6 +117,33 @@ describe("analyzeCustomerProductCandidates", () => {
     }
   });
 
+  // Floral preference audit, Phase 5/13 — exact same regression as "Fruity" above, for "Floral"
+  // specifically. Before the fix this returned [] unconditionally (textToPreferenceFamilies(["Floral"])
+  // was [], so topProductsByLikeMatch's own `if (!likeFamilies.length) return [];` short-circuited
+  // before ever querying the catalogue) — confirmed live during the audit. A real Floral-dominant
+  // catalog product (verified present via a live query: "Wicked! Femme", "Rosa's Sincerity", "A Rose
+  // Dance", "That's Amore", "Powder Of Iris" all score >0 here) can now enter the candidate pool
+  // purely on Floral content, with zero city/state/country/season history at all. Fixtures only —
+  // never hard-coded into production candidate-selection logic.
+  it("finds real Floral candidates from likes alone, even with zero region/season/history signal at all", async () => {
+    const candidates = await analyzeCustomerProductCandidates({
+      city: "Nonexistent Fake City",
+      stateRegion: "Nowhere",
+      country: "Nonexistent Fake Country",
+      season: "NotARealSeason",
+      likes: ["Floral"],
+      dislikes: [],
+    });
+    expect(candidates.length).toBeGreaterThan(0);
+    for (const c of candidates) {
+      expect(c.sameCityOrders).toBe(0);
+      expect(c.sameStateOrders).toBe(0);
+      expect(c.sameCountryOrders).toBe(0);
+      expect(c.sameSeasonOrders).toBe(0);
+      expect(c.preferenceMatches).toContain("floral");
+    }
+  });
+
   it("completes well within the old ~44-60s live-aggregation time (ProductRegionSummary precompute)", async () => {
     const start = Date.now();
     await analyzeCustomerProductCandidates(ACCEPTANCE_PROFILE);

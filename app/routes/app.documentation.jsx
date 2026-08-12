@@ -133,12 +133,44 @@ export default function Documentation() {
         </s-paragraph>
       </s-section>
 
+      <s-section heading="7. Checking real inventory before confirming (Odoo)">
+        <s-paragraph>
+          Once the engine has picked the best-fitting candidate for a customer, there's one more real
+          check before it's ever confirmed: does the company actually have enough fragrance oil on
+          hand, right now, to build it? That answer comes from Odoo — the company's real inventory
+          system — never guessed or assumed.
+        </s-paragraph>
+        <s-stack direction="block" gap="tight">
+          <Bullet>This is the FINAL gate, not an eager check on every ranked candidate — only the one candidate currently being considered is ever checked, so a normal turn never waits on more network calls than it needs.</Bullet>
+          <Bullet>Every finished bottle is 34ml: 12–14ml (13ml by default) is fragrance oil, the rest is alcohol. A component's stated ratio percentage applies only to the oil portion — never to the whole bottle.</Bullet>
+          <Bullet>All of a candidate's real components are checked in one real request, not one call per component, and a short-lived cache avoids repeating the same lookup for a product that recurs across several candidates.</Bullet>
+          <Bullet>Only a clearly CONFIRMED "not enough oil" answer disqualifies a candidate. A missing SKU mapping or a temporary lookup failure never wrongly approves or wrongly rejects a recommendation — it's honestly recorded as "not validated" instead.</Bullet>
+          <Bullet>If the top candidate turns out not buildable, the engine automatically moves on to the next-best real candidate — the same fallback behavior used everywhere else in this process.</Bullet>
+        </s-stack>
+        <s-paragraph>
+          Whatever Odoo actually said at that exact moment — buildable or not, validated or not, and
+          the real stock number behind each component — is saved permanently as historical evidence on
+          that recommendation. It is never silently rewritten later just because Odoo's live stock
+          changes; a fresh check only ever happens again at Save Build or Add to Cart, separately.
+        </s-paragraph>
+        <s-paragraph>
+          Staff can see this on the customer detail page as an Inventory section on each recommendation
+          card, in one of three honest states: <s-text type="strong">✅ Buildable</s-text> (with each
+          real component's oil SKU, required ml, and current stock), <s-text type="strong">❌ Not
+          buildable</s-text> (naming exactly which real component fell short), or{" "}
+          <s-text type="strong">⚠ Not validated</s-text> (Odoo's answer wasn't confirmed either way —
+          never shown as if it were a green light). Opening that page never triggers a new Odoo call;
+          it only ever reads back what was already recorded.
+        </s-paragraph>
+      </s-section>
+
       <s-section heading="What this doesn't do">
         <s-stack direction="block" gap="tight">
           <Bullet>It never recommends a combination that already exists as a real Hybrid/Tribrid/Quadbrid.</Bullet>
           <Bullet>It never fabricates a note, product, score, or piece of order-history evidence that isn't real.</Bullet>
           <Bullet>Customer-facing copy can only mention a specifically-named note when that note actually appears in the selected products — never claims one that isn't really there.</Bullet>
           <Bullet>It can't guarantee a combination covering every single note a customer names if the real catalog simply doesn't have a product/pairing that contains all of them together — it always favors a real, honest result over an invented one.</Bullet>
+          <Bullet>Real Odoo stock quantities and internal oil SKUs are for staff visibility only — the customer-facing preview never shows them.</Bullet>
         </s-stack>
       </s-section>
     </s-page>

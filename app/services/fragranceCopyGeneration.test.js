@@ -98,6 +98,50 @@ describe("applyCustomerFacingCopy — exact-note-mismatch rejection", () => {
   });
 });
 
+// Floral preference audit, Phase 10/13 — same protection as the exact-note guard above, at the
+// FAMILY level: the customer's real stated likes may name a family ("Floral") this SPECIFIC combo
+// doesn't actually have. Confirmed live in the real transcript: a customer who said "Likes: Floral"
+// got copy claiming "designed around your preference for fresh scents" — the wrong family, but
+// still proves the model can name a family; this guard additionally stops it naming the CORRECT
+// (customer-stated) family when this combo genuinely doesn't have it.
+describe("applyCustomerFacingCopy — unmatched-preference-family rejection", () => {
+  it("rejects a response claiming a family the customer named but this combo didn't match, then accepts a clean retry (retryable, unlike the exact-note guard)", async () => {
+    let callCount = 0;
+    global.fetch = vi.fn(async (url, opts) => {
+      callCount++;
+      const body = JSON.parse(opts.body);
+      const isRetry = body.messages[0].content.includes("RETRY");
+      if (!isRetry) {
+        return mockOkResponse({ description: "A floral-forward blend", whySuits: "Designed around your preference for floral scents." });
+      }
+      return mockOkResponse({ description: "Bright and crisp", whySuits: "Matches your love of fresh scents." });
+    });
+    const item = makeItem({ matchedPreferenceFamilies: ["fresh"], missingPreferenceFamilies: ["floral"] });
+    await applyCustomerFacingCopy([item], { likes: ["Fresh", "Floral"], dislikes: [] }, []);
+
+    expect(callCount).toBe(2); // initial rejected, one retry attempted (missingFamilies is given to the retry prompt)
+    expect(item.proposal.customerFacingWhySuits).toBe("Matches your love of fresh scents.");
+  });
+
+  it("falls back to the caller's existing values if the retry ALSO claims the missing family", async () => {
+    global.fetch = vi.fn(async () =>
+      mockOkResponse({ description: "A floral-forward blend", whySuits: "Designed around your preference for floral scents." }),
+    );
+    const item = makeItem({ matchedPreferenceFamilies: [], missingPreferenceFamilies: ["floral"] });
+    await applyCustomerFacingCopy([item], { likes: ["Floral"], dislikes: [] }, []);
+
+    expect(item.proposal.customerFacingDescription).toBe("FALLBACK_DESC");
+    expect(item.proposal.customerFacingWhySuits).toBe("FALLBACK_WHY");
+  });
+
+  it("never flags legitimate copy that only references a family the combo actually matched", async () => {
+    global.fetch = vi.fn(async () => mockOkResponse({ description: "Bright citrus lift", whySuits: "Matches your love of fresh scents." }));
+    const item = makeItem({ matchedPreferenceFamilies: ["fresh"], missingPreferenceFamilies: ["floral"] });
+    await applyCustomerFacingCopy([item], { likes: ["Fresh", "Floral"], dislikes: [] }, []);
+    expect(item.proposal.customerFacingWhySuits).toBe("Matches your love of fresh scents.");
+  });
+});
+
 describe("applyCustomerFacingCopy — 'never start with This' deterministic check", () => {
   it("detects a 'This ...' opener (checked in code, not left to the prompt), retries once, and accepts a clean retry", async () => {
     let callCount = 0;

@@ -80,6 +80,15 @@ export async function saveRecommendation({ conversationId, profile, combination 
         matchedExactNotes: combination.matchedExactNotes,
         missingExactNotes: combination.missingExactNotes,
         exactNoteCoverageScore: combination.exactNoteCoverageScore,
+        // Fix (Floral preference audit, Phase 7/10) — same pattern as requested/matched/missing
+        // exact notes above, but at the FAMILY level (e.g. "floral", not "Jasmine") — persisted so a
+        // confirmed/previewed recommendation can show exactly which stated preference families it
+        // did/didn't cover, and so evaluateAutoConfirmEligibility's preference-coverage safeguard can
+        // read the real persisted values rather than recomputing them.
+        requestedPreferenceFamilies: combination.requestedPreferenceFamilies,
+        matchedPreferenceFamilies: combination.matchedPreferenceFamilies,
+        missingPreferenceFamilies: combination.missingPreferenceFamilies,
+        floralRoleStrength: combination.floralRoleStrength,
         // Fix (final-batch coverage metadata incomplete) — whether a fallback regeneration pass ran
         // for this batch at all, and which specific terms it targeted — never assumed successful,
         // just recorded as attempted (missingExactNotes above is the honest post-rerank truth).

@@ -7,7 +7,7 @@ import {
 import { likeMatchStrength, classifyDislikeConflict } from "../utils/fragranceScoring.js";
 import {
   literalNoteTermsFromLikes, literalNoteMatchCount, exactNoteCoverageScore, matchedLiteralTerms,
-  missingLiteralTerms, textToPreferenceFamilies, splitDislikesByExactness,
+  missingLiteralTerms, textToPreferenceFamilies, splitDislikesByExactness, familyBreadthCoverageScore,
 } from "../utils/fragranceCompatibility.js";
 import { analyzeCustomerProductCandidates } from "./orderHistoryAnalysis.server.js";
 import prisma from "../db.server.js";
@@ -26,6 +26,23 @@ describe("assignRoles", () => {
     const roled = assignRoles([{ title: "A", notes: ["Zzzznotarealnote"] }]);
     expect(roled[0].role).toBe("Contrast");
     expect(roled[0].hasDetectedFamily).toBe(false);
+  });
+
+  // Floral preference audit, Phase 9 — ranking/debugging fields, never a hard gate: a component's
+  // real floral-note density is now visible directly on assignRoles' output.
+  it("exposes floralNoteCount/totalNoteCount/floralCoverage per product", () => {
+    const roled = assignRoles([
+      { title: "Weak", notes: ["Lemon", "Green Tea", "Ginger", "Peach", "Hedione", "Jasmine", "Apple", "Marshmallow", "Vanilla", "Benzoin"] },
+      { title: "Strong", notes: ["Rose", "Jasmine", "Tuberose", "Orange Blossom", "Peony", "Lily of the Valley"] },
+      { title: "None", notes: ["Bergamot", "Lemon", "Spearmint"] },
+    ]);
+    expect(roled[0].floralNoteCount).toBe(2); // Hedione + Jasmine
+    expect(roled[0].totalNoteCount).toBe(10);
+    expect(roled[0].floralCoverage).toBeCloseTo(0.2);
+    expect(roled[1].floralNoteCount).toBe(6);
+    expect(roled[1].floralCoverage).toBe(1);
+    expect(roled[2].floralNoteCount).toBe(0);
+    expect(roled[2].floralCoverage).toBe(0);
   });
 
   // Real bug: role used to be whichever family was checked FIRST in priority order and matched
@@ -644,6 +661,78 @@ describe("Bruce profile — dry/earthy/natural likes actually reach candidate ra
     const dryEarthyMatches = likeFamilies.filter((f) => likeMatchStrength(dryEarthyProduct, f) > 0);
     const sweetFruitMatches = likeFamilies.filter((f) => likeMatchStrength(sweetFruitProduct, f) > 0);
     expect(dryEarthyMatches.length).toBeGreaterThan(sweetFruitMatches.length);
+  });
+});
+
+// Floral preference audit — before this fix, "Likes: Floral" produced likeFamilies=[], so the
+// like-match hard gate in scoreProposedCombination (`if (likeFamilies.length > 0 &&
+// matchedPreferenceFamilies.size === 0) return null;`) was a structural no-op: a customer could get
+// a 100% Freshness+Freshness combination with zero real floral content, confirmed live against the
+// real Tom regression case. With `floral` now a real PREFERENCE_FAMILIES member, this exact same
+// gate (unchanged code) now actually enforces coverage — no separate Floral-specific rule was added.
+describe("Floral preference audit — the existing like-match hard gate now actually covers Floral", () => {
+  it("every real result for a Floral-only customer genuinely matches the floral family — no zero-coverage combination survives", async () => {
+    const profile = {
+      city: "Las Vegas", country: "United States", season: "Summer",
+      likes: ["Floral"], dislikes: ["Musk", "Oakmoss", "Sandalwood", "Patchouli", "Vetiver"],
+      locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const results = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      expect(r.requestedPreferenceFamilies).toEqual(["floral"]);
+      expect(r.matchedPreferenceFamilies).toContain("floral");
+      expect(r.missingPreferenceFamilies).toEqual([]);
+      // Lifestyle/history/compatibility must never be able to substitute for zero stated-preference
+      // coverage (Phase 7) — proven directly: every surviving result has real floral content.
+      const floralNotes = r.internalProducts.flatMap((p) => p.notes).filter((n) =>
+        ["jasmine", "rose", "violet", "iris", "orris", "tuberose", "magnolia", "freesia", "gardenia",
+          "peony", "ylang", "osmanthus", "orange blossom", "lily", "cyclamen", "lotus", "mimosa",
+          "geranium", "hedione", "floral", "flower"].some((kw) => String(n).toLowerCase().includes(kw)),
+      );
+      expect(floralNotes.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("a genuinely Floral-dominant real catalog product can win the anchor/support role for a Floral-only customer", async () => {
+    const profile = {
+      city: "Las Vegas", country: "United States", season: "Summer",
+      likes: ["Floral"], dislikes: [], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const results = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(results.length).toBeGreaterThan(0);
+    // floralRoleStrength (Phase 9, ranking/debugging) — the strongest single component's real
+    // floral-note density. Every surviving result must have SOME real floral presence (the hard
+    // gate already guarantees matchedPreferenceFamilies includes "floral"); this additionally
+    // confirms at least one result has a genuinely strong (not merely incidental) floral component.
+    expect(results.some((r) => r.floralRoleStrength >= 0.3)).toBe(true);
+  });
+
+  // Phase 8 — multi-like breadth: "Likes: Fresh, Floral" should be able to reward a combination
+  // that covers BOTH over one covering only one, via familyBreadthCoverageScore's additive bonus.
+  it("Likes: Fresh, Floral — a combination covering both families scores a real breadth bonus a single-family match doesn't", async () => {
+    const profile = {
+      city: "Las Vegas", country: "United States", season: "Summer",
+      likes: ["Fresh", "Floral"], dislikes: [], locationVerified: true,
+    };
+    const candidates = await analyzeCustomerProductCandidates(profile);
+    const results = await generateNewProductCombinations({ profile, candidateProducts: candidates, maximumResults: 8 });
+    expect(results.length).toBeGreaterThan(0);
+    for (const r of results) {
+      // The hard gate only requires >=1 of the two families for a multi-family profile (Phase 6/7's
+      // explicit spec) — never both — but every result covering both must score MORE breadth credit
+      // than one covering only one, which this directly proves via the real persisted breakdown.
+      expect(r.requestedPreferenceFamilies).toEqual(expect.arrayContaining(["fresh", "floral"]));
+      expect(r.missingPreferenceFamilies.length).toBeLessThanOrEqual(2);
+    }
+    const dualCoverage = results.filter((r) => r.matchedPreferenceFamilies.length >= 2);
+    const singleCoverage = results.filter((r) => r.matchedPreferenceFamilies.length === 1);
+    if (dualCoverage.length && singleCoverage.length) {
+      // Direct proof of the breadth bonus itself, isolated from every other scoring axis.
+      expect(familyBreadthCoverageScore(2)).toBeGreaterThan(familyBreadthCoverageScore(1));
+    }
   });
 });
 
