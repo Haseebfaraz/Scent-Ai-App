@@ -42,6 +42,18 @@ function mentionsUnearnedExactNote(text, missingExactNotes) {
   return matchedLiteralTerms([text], missingExactNotes).length > 0;
 }
 
+// Fix (Floral preference audit, Phase 10) — exact same guard, at the FAMILY level: the model is
+// told the customer's real stated likes (e.g. "Floral") but is now also told, and separately
+// checked against, which of those families this SPECIFIC combination actually matched
+// (`matchedPreferenceFamilies`/`missingPreferenceFamilies`, computed once by
+// scoreProposedCombination and set on the proposal before this module runs — never recomputed
+// here). Reuses matchedLiteralTerms' word-boundary matching, so "floral" only catches the whole
+// word, never a coincidental substring.
+function mentionsUnmatchedFamily(text, missingPreferenceFamilies) {
+  if (!text || !missingPreferenceFamilies?.length) return false;
+  return matchedLiteralTerms([text], missingPreferenceFamilies).length > 0;
+}
+
 const OPENING_ANGLES = [
   "open by naming the blend's own standout quality as the subject of the sentence",
   "open by addressing the customer directly — start with \"Your\" or \"You\"",
@@ -62,6 +74,7 @@ const BASE_RULES = `Rules:
 - NEVER name a real product, SKU, product ID, internal handle, or any brand other than DUA. Describe only the blend's own character and notes.
 - NEVER make any claim about regional, seasonal, or historical popularity (e.g. "popular in your area," "trending this season") — that is handled by a separate field elsewhere and phrased under its own strict rules. If you reference evidence at all, follow this exact constraint: ${EVIDENCE_SCOPE_RULE}
 - Never contradict a stated dislike. Never invent a note, preference, or occasion beyond what's given below.
+- The customer's stated "likes" may name a preference family (e.g. "Floral") that THIS SPECIFIC blend doesn't actually contain — "matchedFamilies" below is the subset that's actually real for this blend; "missingFamilies" is the subset that isn't. NEVER claim, imply, or reference a family listed in "missingFamilies" (e.g. never say "designed around your preference for floral scents" if "floral" is in missingFamilies) — describe what the blend actually is instead.
 - Keep both fields brief and conversational — similar in length to "airy and bright" / "Designed around your preference for fresh scents." — not a paragraph.`;
 
 function firstWordOf(text) { return text.trim().split(/\s+/)[0].toLowerCase().replace(/[^a-z]/g, ""); }
@@ -74,7 +87,7 @@ function textLeaks(text, catalogTitlesLowercase) {
   return catalogTitlesLowercase.some((title) => lower.includes(title));
 }
 
-function buildPromptInitial({ notesByRole, likes, dislikes, preferredStyle, occasion, confidence, evidenceScope, position, total }) {
+function buildPromptInitial({ notesByRole, likes, dislikes, preferredStyle, occasion, matchedFamilies, missingFamilies, confidence, evidenceScope, position, total }) {
   const angleHint = OPENING_ANGLES[position % OPENING_ANGLES.length];
   const system = `You write short, appealing customer-facing copy for a single custom DUA fragrance blend. You are given only the blend's real notes (grouped by the role each plays in the blend) and the customer's own stated preferences — nothing else about how the blend was built. This is recommendation ${position + 1} of ${total} being shown to the same customer in one reply — other recommendations are being written independently, so pick a genuinely distinct angle. Respond with a JSON object with exactly two string fields: "description" and "whySuits".
 
@@ -83,12 +96,13 @@ ${BASE_RULES}
   const payload = {
     notesByRole, likes: likes || [], dislikes: dislikes || [],
     preferredStyle: preferredStyle || null, occasion: occasion || null,
+    matchedFamilies: matchedFamilies || [], missingFamilies: missingFamilies || [],
     confidence, evidenceScope,
   };
   return [{ role: "system", content: system }, { role: "user", content: JSON.stringify(payload) }];
 }
 
-function buildPromptRetry({ notesByRole, likes, dislikes, preferredStyle, occasion, confidence, evidenceScope, position, total, avoidOpenings, avoidFirstWords, retryAngleIndex }) {
+function buildPromptRetry({ notesByRole, likes, dislikes, preferredStyle, occasion, matchedFamilies, missingFamilies, confidence, evidenceScope, position, total, avoidOpenings, avoidFirstWords, retryAngleIndex }) {
   // Fix (Option 2, confirmed in testing) — angle is keyed by this item's index WITHIN the retry
   // wave, not its original batch position, so two items retrying together get distinct angles
   // from EACH OTHER, not just a shared "avoid wave 1" instruction that leaves them free to
@@ -102,6 +116,7 @@ ${BASE_RULES}
   const payload = {
     notesByRole, likes: likes || [], dislikes: dislikes || [],
     preferredStyle: preferredStyle || null, occasion: occasion || null,
+    matchedFamilies: matchedFamilies || [], missingFamilies: missingFamilies || [],
     confidence, evidenceScope,
   };
   return [{ role: "system", content: system }, { role: "user", content: JSON.stringify(payload) }];
@@ -177,6 +192,7 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
   const initial = await Promise.all(items.map(async ({ proposal, notesByRole }, position) => {
     const result = await callCopyModel(buildPromptInitial({
       notesByRole, ...profileFields,
+      matchedFamilies: proposal.matchedPreferenceFamilies, missingFamilies: proposal.missingPreferenceFamilies,
       confidence: proposal.confidence, evidenceScope: proposal.evidenceScope,
       position, total,
     }));
@@ -195,6 +211,14 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
     }
     if (mentionsUnearnedExactNote(item.result.description, item.proposal.missingExactNotes) || mentionsUnearnedExactNote(item.result.whySuits, item.proposal.missingExactNotes)) {
       item.reason = "exact-note-mismatch-no-retry";
+      needsRetry.push(item);
+      continue;
+    }
+    // Fix (Floral preference audit, Phase 10) — unlike the exact-note check above, this one CAN be
+    // retried: missingFamilies is included in buildPromptRetry's own payload (see below), so the
+    // retry attempt has the exact information it needs to avoid repeating the same false claim.
+    if (mentionsUnmatchedFamily(item.result.description, item.proposal.missingPreferenceFamilies) || mentionsUnmatchedFamily(item.result.whySuits, item.proposal.missingPreferenceFamilies)) {
+      item.reason = "family-mismatch";
       needsRetry.push(item);
       continue;
     }
@@ -229,12 +253,16 @@ export async function applyCustomerFacingCopy(items, profileFields, catalogTitle
 
     const retryResult = await callCopyModel(buildPromptRetry({
       notesByRole: item.notesByRole, ...profileFields,
+      matchedFamilies: item.proposal.matchedPreferenceFamilies, missingFamilies: item.proposal.missingPreferenceFamilies,
       confidence: item.proposal.confidence, evidenceScope: item.proposal.evidenceScope,
       position: item.position, total, avoidOpenings, avoidFirstWords, retryAngleIndex,
     }));
     if (!retryResult) return;
     if (textLeaks(retryResult.description, catalogTitlesLowercase) || textLeaks(retryResult.whySuits, catalogTitlesLowercase)) return;
     if (mentionsUnearnedExactNote(retryResult.description, item.proposal.missingExactNotes) || mentionsUnearnedExactNote(retryResult.whySuits, item.proposal.missingExactNotes)) return;
+    // Fix (Floral preference audit, Phase 10) — if the retry STILL claims a missing family, give up
+    // and keep the existing deterministic fallback rather than accepting a second false claim.
+    if (mentionsUnmatchedFamily(retryResult.description, item.proposal.missingPreferenceFamilies) || mentionsUnmatchedFamily(retryResult.whySuits, item.proposal.missingPreferenceFamilies)) return;
 
     const fwDesc = firstWordOf(retryResult.description);
     const fwWhy = firstWordOf(retryResult.whySuits);
