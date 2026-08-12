@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { classifyDislikeConflict } from "./fragranceScoring.js";
 import {
   PREFERENCE_FAMILIES,
   COMPATIBILITY_TAGS,
@@ -313,20 +314,24 @@ describe("assessCombinationRiskDetails (severity-weighted, correlation-grouped)"
     expect(result.hasCritical).toBe(false);
   });
 
-  it("weights the high-severity duplicate_direction risk at -10", () => {
+  // Fix (absence-of-like is neutral, not a customer conflict) — duplicate_direction's severity
+  // dropped from a fixed HIGH to MEDIUM: it's a real structural weakness (zero directional
+  // contrast) regardless of what the customer said, but "not explicitly liked" is not the same as
+  // "disliked," so it no longer carries hard-reject-strength severity on its own.
+  it("weights the medium-severity duplicate_direction risk at -5", () => {
     const products = [
       { title: "A", notes: ["Mango"] },
       { title: "B", notes: ["Pineapple"] },
     ];
     const result = assessCombinationRiskDetails(products);
     expect(result.breakdown).toEqual([
-      expect.objectContaining({ id: "duplicate_direction", severity: "high", counted: true, penalty: -10 }),
+      expect.objectContaining({ id: "duplicate_direction", severity: "medium", counted: true, penalty: -5 }),
     ]);
-    expect(result.riskPenalty).toBe(-10);
+    expect(result.riskPenalty).toBe(-5);
   });
 
   // Correlated-risk deduplication: three all-fruity products trip BOTH competing_fruits (low, -2)
-  // AND duplicate_direction (high, -10) for the exact same underlying problem (nothing but fruity
+  // AND duplicate_direction (medium, -5) for the exact same underlying problem (nothing but fruity
   // anywhere) — only the higher-severity hit should count toward the total, once.
   it("groups competing_fruits and duplicate_direction for the same family, counting only the higher severity once", () => {
     const products = [
@@ -338,10 +343,10 @@ describe("assessCombinationRiskDetails (severity-weighted, correlation-grouped)"
     expect(result.breakdown).toHaveLength(2);
     const duplicate = result.breakdown.find((r) => r.id === "duplicate_direction");
     const competing = result.breakdown.find((r) => r.id === "competing_fruits");
-    expect(duplicate).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+    expect(duplicate).toMatchObject({ severity: "medium", counted: true, penalty: -5 });
     expect(competing).toMatchObject({ severity: "low", counted: false, penalty: 0 });
-    // Not -10 + -2 = -12 — the same real problem, counted once.
-    expect(result.riskPenalty).toBe(-10);
+    // Not -5 + -2 = -7 — the same real problem, counted once.
+    expect(result.riskPenalty).toBe(-5);
   });
 });
 
@@ -401,15 +406,68 @@ describe("single_family_concentration (contextual severity for a customer's OWN 
     expect(["medium", "high"]).toContain(hit.severity);
   });
 
-  it("a repeated direction the customer did NOT ask for remains a meaningful, unchanged high-severity risk", () => {
+  // Fix (absence-of-like is neutral, not a customer conflict) — a direction the customer didn't ask
+  // for is still a real, meaningful structural risk (it never gets silently exempted), but it's no
+  // longer HIGH on its own — only an actual dislike (the dislike pipeline's own job, not this
+  // rule's) should carry that weight.
+  it("a repeated direction the customer did NOT ask for remains a meaningful MEDIUM structural risk, not exempted", () => {
     const products = [
       { title: "A", notes: ["Mango"] },
       { title: "B", notes: ["Pineapple"] },
     ];
     const result = assessCombinationRiskDetails(products, { likeFamilies: ["woody"] }); // likes woody, not fruity
     const hit = result.breakdown.find((r) => r.id === "duplicate_direction");
-    expect(hit).toMatchObject({ severity: "high", counted: true, penalty: -10 });
+    expect(hit).toMatchObject({ severity: "medium", counted: true, penalty: -5 });
     expect(result.breakdown.some((r) => r.id === "single_family_concentration")).toBe(false);
+  });
+});
+
+// duplicate_direction represents a structural composition concern (zero directional contrast),
+// not a customer-conflict detector — it has no way to distinguish "customer said nothing" from
+// "customer disliked this," so it must never try to. That distinction belongs entirely to the
+// existing, separate dislike pipeline (splitDislikesByExactness/classifyDislikeConflict,
+// scoreProposedCombination) — these cases prove neither one silently absorbed the other's job.
+describe("duplicate_direction vs the dislike pipeline — absence of a like is neutral, not a conflict", () => {
+  const freshProducts = [
+    { title: "A", notes: ["Bergamot", "Citrus"] },
+    { title: "B", notes: ["Lemon", "Mint"] },
+  ];
+
+  it("A. likes=[\"fresh\"] — duplicate_direction does not fire at all (fully exempted, unchanged)", () => {
+    const result = assessCombinationRiskDetails(freshProducts, { likeFamilies: textToPreferenceFamilies(["fresh"]) });
+    expect(result.breakdown.some((r) => r.id === "duplicate_direction")).toBe(false);
+  });
+
+  it("B. likes=[], preferredStyle=\"smooth, clean, and professional\" — fires, but MEDIUM not HIGH", () => {
+    // preferredStyle is deliberately NOT merged into likeFamilies (out of scope for this fix) —
+    // this profile shape has an empty likeFamilies exactly like a customer who said nothing at all.
+    const result = assessCombinationRiskDetails(freshProducts, { likeFamilies: [] });
+    const hit = result.breakdown.find((r) => r.id === "duplicate_direction");
+    expect(hit).toMatchObject({ severity: "medium" });
+  });
+
+  it("C. likes=[], preferredStyle=\"professional and sophisticated\" — MEDIUM, not HIGH", () => {
+    const result = assessCombinationRiskDetails(freshProducts, { likeFamilies: [] });
+    const hit = result.breakdown.find((r) => r.id === "duplicate_direction");
+    expect(hit).toMatchObject({ severity: "medium" });
+  });
+
+  it("D. dislikes=[\"fresh\"] — the EXISTING dislike pipeline (not duplicate_direction) still catches the negative evidence", () => {
+    const { explicitFamilyDislikes } = splitDislikesByExactness(["fresh"]);
+    expect(explicitFamilyDislikes).toContain("fresh");
+    // Both real components are pure "fresh" notes — classifyDislikeConflict (the actual, dedicated
+    // dislike mechanism scoreProposedCombination runs upstream) must flag a real conflict here,
+    // completely independent of whatever severity duplicate_direction itself carries.
+    const conflictA = classifyDislikeConflict(freshProducts[0].notes, explicitFamilyDislikes);
+    const conflictB = classifyDislikeConflict(freshProducts[1].notes, explicitFamilyDislikes);
+    expect(conflictA.severity).not.toBe("none");
+    expect(conflictB.severity).not.toBe("none");
+  });
+
+  it("E. likes=[\"woody\"] (unrelated to the duplicated family) — MEDIUM, not HIGH", () => {
+    const result = assessCombinationRiskDetails(freshProducts, { likeFamilies: textToPreferenceFamilies(["woody"]) });
+    const hit = result.breakdown.find((r) => r.id === "duplicate_direction");
+    expect(hit).toMatchObject({ severity: "medium" });
   });
 });
 

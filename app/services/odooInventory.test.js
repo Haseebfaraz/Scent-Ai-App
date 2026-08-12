@@ -117,19 +117,23 @@ describe("getOilInventoryForProductTitles — real batching", () => {
     return product;
   }
 
+  // Fix (cross-file test race) — confirmed live: fragranceAgentTools.autoConfirmConfidence.test.js
+  // ALSO temporarily remaps "The Opera"/"Water of Arabia", and vitest runs test files concurrently,
+  // so that file's afterEach restore landed mid-test here and clobbered this test's own value.
+  // Deliberately different real products from every other file that does this same pattern.
   it("makes exactly one real Odoo request for multiple mapped components, matching each by default_code", async () => {
-    await mapRealProductTemporarily("The Opera", "OIL-VITEST-OPERA");
-    await mapRealProductTemporarily("Water of Arabia", "OIL-VITEST-WATER");
+    await mapRealProductTemporarily("Arabian Amber Nuit", "OIL-VITEST-AMBER");
+    await mapRealProductTemporarily("Iris Cafe", "OIL-VITEST-IRISCAFE");
     mockOdooProducts([
-      { name: "The Opera - Oil", default_code: "OIL-VITEST-OPERA", on_hand_qty: 1830 },
-      { name: "Water of Arabia - Oil", default_code: "OIL-VITEST-WATER", on_hand_qty: 0 },
+      { name: "Arabian Amber Nuit - Oil", default_code: "OIL-VITEST-AMBER", on_hand_qty: 1830 },
+      { name: "Iris Cafe - Oil", default_code: "OIL-VITEST-IRISCAFE", on_hand_qty: 0 },
     ]);
 
-    const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(["The Opera", "Water of Arabia"]);
+    const { results, requestCount, skusQueried } = await getOilInventoryForProductTitles(["Arabian Amber Nuit", "Iris Cafe"]);
     expect(requestCount).toBe(1);
-    expect(skusQueried.sort()).toEqual(["OIL-VITEST-OPERA", "OIL-VITEST-WATER"]);
-    expect(results.get("The Opera").availableOilMl).toBe(1830);
-    expect(results.get("Water of Arabia").availableOilMl).toBe(0);
+    expect(skusQueried.sort()).toEqual(["OIL-VITEST-AMBER", "OIL-VITEST-IRISCAFE"]);
+    expect(results.get("Arabian Amber Nuit").availableOilMl).toBe(1830);
+    expect(results.get("Iris Cafe").availableOilMl).toBe(0);
   });
 
   it("makes zero requests when nothing needs a real lookup (all MISSING/cached)", async () => {

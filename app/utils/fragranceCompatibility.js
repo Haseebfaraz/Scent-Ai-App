@@ -455,16 +455,31 @@ export const RISK_RULES = [
   },
   {
     id: "duplicate_direction",
-    // High — a combination with zero contrasting role anywhere, in a direction the customer never
-    // asked for, is genuinely the most structurally broken of these heuristics. Fix (contextual
-    // severity) — confirmed live: this used to fire "high" for EVERY customer whose entire stated
+    // Structural composition concern, not a customer-conflict detector — every component
+    // independently sharing one family means the combo has little/no directional contrast. That
+    // alone is a real (medium) structural weakness, but it is NOT equivalent to "the customer
+    // doesn't want this" — this rule has no way to know that either way; it only ever sees
+    // `likeFamilies` (positive evidence). A genuine dislike/hard-exclusion is a completely separate
+    // concern already owned upstream (splitDislikesByExactness/classifyDislikeConflict in
+    // scoreProposedCombination, which can reject a combo before it ever reaches risk assessment at
+    // all) — this rule must never compete with that as a second, weaker dislike interpretation.
+    //
+    // Fix (absence-of-like was being treated as equivalent to a dislike) — confirmed live: with an
+    // empty likeFamilies (e.g. a customer whose profile was completed via preferredStyle rather
+    // than likes — an explicitly supported, ordinary profile shape), this rule fired HIGH for every
+    // single candidate regardless of whether the customer disliked the duplicated family, liked
+    // something unrelated, or said nothing about it at all — three states that are not equivalent
+    // and should not collapse to the same severity. "Not explicitly liked" is neutral, not
+    // negative, so it now costs a real but non-blocking MEDIUM penalty instead of a hard HIGH one;
+    // an actual dislike still gets caught by the dislike pipeline exactly as before, unchanged.
+    //
+    // Fix (contextual severity, earlier) — this used to fire for EVERY customer whose entire stated
     // preference is one single family (e.g. "Fruity, Apple, Strawberry, Peach") — an extremely
     // common, entirely ordinary customer type, not a real defect; of COURSE a combo built to match
-    // a single-family preference shares that one family. A direction the customer DID ask for is
-    // handled by single_family_concentration below instead, with severity that actually depends on
-    // whether it causes a real problem — this rule now only fires for a repeated direction that
-    // was NOT requested, which stays exactly as meaningful a risk as before.
-    severity: "high",
+    // a single-family preference shares that one family. A direction the customer explicitly DID
+    // ask for is still fully exempted below (unchanged) — handled instead by
+    // single_family_concentration, whose severity depends on whether it actually causes a problem.
+    severity: "medium",
     check(products, context = {}) {
       const family = findDuplicatedDirection(products);
       if (!family) return null;
