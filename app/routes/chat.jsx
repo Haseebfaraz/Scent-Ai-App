@@ -536,6 +536,19 @@ export async function action({ request }) {
     const userMessage = body.message || "";
     const { id: conversationId, history } = await getConversation(body.conversation_id);
 
+    // Fix (static frontend greeting invisible to the backend) — the widget shows a configurable
+    // static welcome message before the customer ever sends anything; that text was never part of
+    // the history the model sees, so it had no idea a greeting (often asking about their day) had
+    // already happened — it would either ask it again or misread the customer's very first reply
+    // as answering something else entirely (e.g. treating it as their name). Seeded here as a real
+    // prior assistant turn, but only for a genuinely brand-new conversation (history.length === 0)
+    // — a returning conversation already has its own real first turn and must never have this
+    // spliced in again.
+    const greetingText = history.length === 0 && typeof body.greeting === "string" ? body.greeting.trim() : "";
+    if (greetingText) {
+      history.push({ role: "assistant", content: greetingText });
+    }
+
     history.push({ role: "user", content: userMessage });
 
     // Provided by the storefront widget from the customer's real, logged-in Shopify account —
@@ -573,6 +586,9 @@ export async function action({ request }) {
     // customer's actual reply.
     try {
       await createOrUpdateConversation(conversationId, knownCustomerEmail, knownCustomerName);
+      if (greetingText) {
+        await saveMessage(conversationId, "assistant", greetingText);
+      }
       await saveMessage(conversationId, "user", userMessage);
       await saveMessage(conversationId, "assistant", replyText);
     } catch (persistErr) {
