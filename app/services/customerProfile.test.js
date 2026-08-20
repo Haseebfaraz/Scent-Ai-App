@@ -8,6 +8,7 @@ import {
   getCustomerProfile,
   saveCustomerProfileField,
   getMissingRequiredFields,
+  getConversationSignals,
   isProfileReadyForAnalysis,
 } from "./customerProfile.server.js";
 
@@ -24,11 +25,9 @@ afterEach(async () => {
 });
 
 describe("getMissingRequiredFields / isProfileReadyForAnalysis", () => {
-  it("requires city, country, likes-or-preferredStyle, dislikesAsked, and occasionAsked (season is never required — it's automatic)", () => {
+  it("requires city, country, and likes-or-preferredStyle (season is never required — it's automatic)", () => {
     expect(getMissingRequiredFields(emptyProfile())).toEqual([
       "city", "country", "likes or preferredStyle",
-      "dislikesAsked (ask about dislikes, even if the real answer is none)",
-      "occasionAsked (ask about occasion, even if the real answer is just everyday)",
     ]);
     expect(isProfileReadyForAnalysis(emptyProfile())).toBe(false);
   });
@@ -58,18 +57,15 @@ describe("getMissingRequiredFields / isProfileReadyForAnalysis", () => {
     expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
-  // Fix (ask about dislikes/occasion before analysis) — an empty dislikes/occasion value never
-  // blocked readiness before, and still doesn't — but not having ASKED yet now does, since an
-  // empty value is ambiguous between "never asked" and "asked, real answer was none".
-  it("blocks readiness until dislikesAsked and occasionAsked are both true, even with everything else present", () => {
+  // Fix (refactor: "feel human") — dislikesAsked/occasionAsked are deliberately no longer
+  // hard-blocking (see getConversationSignals instead, which surfaces them informationally to the
+  // model without forcing two more scripted questions regardless of conversational context).
+  it("is ready as soon as city, country, and a like/style signal are present, even if dislikes/occasion were never asked", () => {
     const profile = {
       ...emptyProfile(), city: "Los Angeles", country: "United States", likes: ["Fruity"], locationVerified: true,
     };
-    expect(getMissingRequiredFields(profile)).toEqual([
-      "dislikesAsked (ask about dislikes, even if the real answer is none)",
-      "occasionAsked (ask about occasion, even if the real answer is just everyday)",
-    ]);
-    expect(isProfileReadyForAnalysis(profile)).toBe(false);
+    expect(getMissingRequiredFields(profile)).toEqual([]);
+    expect(isProfileReadyForAnalysis(profile)).toBe(true);
   });
 
   // Fix 8 — a city string alone (however plausible, e.g. a fictional "Vice City") must never
@@ -81,6 +77,14 @@ describe("getMissingRequiredFields / isProfileReadyForAnalysis", () => {
     };
     expect(getMissingRequiredFields(profile)).toEqual(["city"]);
     expect(isProfileReadyForAnalysis(profile)).toBe(false);
+  });
+});
+
+describe("getConversationSignals", () => {
+  it("reports dislikesAsked/occasionAsked informationally, never as a blocker", () => {
+    expect(getConversationSignals(emptyProfile())).toEqual({ dislikesAsked: false, occasionAsked: false });
+    expect(getConversationSignals({ ...emptyProfile(), dislikesAsked: true, occasionAsked: true }))
+      .toEqual({ dislikesAsked: true, occasionAsked: true });
   });
 });
 
