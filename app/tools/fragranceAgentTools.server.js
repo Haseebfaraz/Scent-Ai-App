@@ -12,7 +12,6 @@ import {
   saveCustomerProfileField,
   saveCustomerProfileFields,
   getMissingRequiredFields,
-  getConversationSignals,
   isProfileReadyForAnalysis,
   VALID_SEASONS,
   VALID_STRENGTH_PREFERENCES,
@@ -1077,16 +1076,14 @@ export async function executeFragranceTool(toolName, rawArgsJson, context) {
         }
         const candidateProducts = await analyzeCustomerProductCandidates({ ...profile, season: effectiveQuerySeason(profile) });
         getScratch(conversationId, profile).candidateProducts = candidateProducts;
-        const signals = getConversationSignals(profile);
-        const signalsNote = `Conversation signals (informational, not blocking — use your own judgment on whether it's still worth asking): dislikesAsked=${signals.dislikesAsked}, occasionAsked=${signals.occasionAsked}.`;
         if (!candidateProducts.length) {
-          return ok(`No real product candidates found for this profile yet — there may be limited historical data for this exact region/season combination. ${signalsNote}`, {
+          return ok("No real product candidates found for this profile yet — there may be limited historical data for this exact region/season combination.", {
             type: "analysis_progress",
             candidateProducts: [],
           });
         }
         return ok(
-          `Real product candidates (highest relevance first): ${JSON.stringify(candidateProducts)}\n${signalsNote}`,
+          `Real product candidates (highest relevance first): ${JSON.stringify(candidateProducts)}`,
           { type: "candidate_products", candidateProducts },
         );
       }
