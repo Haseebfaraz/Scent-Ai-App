@@ -158,27 +158,17 @@ export async function saveCustomerProfileFields(conversationId, fields) {
 // it were real. Season is intentionally NOT a required field here: weatherDirection is populated
 // automatically the moment the city is verified (see verify_customer_location), so there is never
 // a real gap to block on — requestedSeasonStyle, when present, only refines the direction further.
-// Fix (refactor: "feel human") — dislikesAsked/occasionAsked are deliberately no longer hard-blocking
-// here, per the client's explicit request to let the model judge when a conversation has said enough
-// rather than forcing two more scripted questions every time regardless of what's already been
-// said. Both flags are still tracked and surfaced (see getConversationSignals below) so the model's
-// own judgment has real visibility into what it hasn't asked yet, without a second rule layer
-// forcing it.
+// Fix (ask about dislikes/occasion before analysis) — dislikes/occasion having an EMPTY value never
+// blocks readiness (that's still true, per the spec quote above) — but not having ASKED about them
+// yet now does. These two are deliberately separate from the VALUE checks above.
 export function getMissingRequiredFields(profile) {
   const missing = [];
   if (!profile.city || !profile.locationVerified) missing.push("city");
   if (!profile.country) missing.push("country");
   if (!(profile.likes?.length > 0) && !profile.preferredStyle && !profile.inferredStyle) missing.push("likes or preferredStyle");
+  if (!profile.dislikesAsked) missing.push("dislikesAsked (ask about dislikes, even if the real answer is none)");
+  if (!profile.occasionAsked) missing.push("occasionAsked (ask about occasion, even if the real answer is just everyday)");
   return missing;
-}
-
-// Informational only — never gates analyze_customer_product_candidates, surfaced in its response
-// so the model can judge for itself whether dislikes/occasion are still worth asking about.
-export function getConversationSignals(profile) {
-  return {
-    dislikesAsked: !!profile.dislikesAsked,
-    occasionAsked: !!profile.occasionAsked,
-  };
 }
 
 export function isProfileReadyForAnalysis(profile) {
