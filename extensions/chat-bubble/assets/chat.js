@@ -390,6 +390,15 @@
         const userMessage = chatInput.value.trim();
         const conversationId = sessionStorage.getItem('shopAiConversationId');
 
+        // Fix (static frontend greeting invisible to the backend) — the welcome message shown
+        // before the customer's first reply is purely client-side and was never part of what the
+        // model sees, so it had no idea a greeting (possibly asking about their day) already
+        // happened — it would either ask it again or misread the customer's first reply as
+        // answering something else. Sent once, only on a brand-new conversation, then cleared so
+        // it's never resent on a later turn (see the matching fix in chat.jsx's action()).
+        const pendingGreeting = !conversationId ? sessionStorage.getItem('shopAiPendingGreeting') : null;
+        sessionStorage.removeItem('shopAiPendingGreeting');
+
         // Add user message to chat
         this.add(userMessage, 'user', messagesContainer);
 
@@ -400,7 +409,7 @@
         ShopAIChat.UI.showTypingIndicator();
 
         try {
-          ShopAIChat.API.streamResponse(userMessage, conversationId, messagesContainer);
+          ShopAIChat.API.streamResponse(userMessage, conversationId, messagesContainer, pendingGreeting);
         } catch (error) {
           console.error('Error communicating with Claude API:', error);
           ShopAIChat.UI.removeTypingIndicator();
@@ -617,7 +626,7 @@
        * @param {string} conversationId - Conversation ID for context
        * @param {HTMLElement} messagesContainer - The messages container
        */
-      streamResponse: async function(userMessage, conversationId, messagesContainer) {
+      streamResponse: async function(userMessage, conversationId, messagesContainer, greeting) {
         let currentMessageElement = null;
 
         try {
@@ -628,7 +637,8 @@
             prompt_type: promptType,
             shop_domain: window.shopDomain,
             customer_email: ShopAIChat.customerEmail || null,
-            customer_name: ShopAIChat.customerName || null
+            customer_name: ShopAIChat.customerName || null,
+            greeting: greeting || null
           });
 
           const streamUrl = (window.appBaseUrl || 'https://localhost:3458') + '/chat';
@@ -871,6 +881,11 @@
 // greeting avoids that mismatch — the backend's own first real question (name, then day) starts
 // fresh once the customer actually replies.
 const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
+            // Fix (static frontend greeting invisible to the backend) — remembered here so the
+            // very first real message sent can pass it along to the backend (see Message.send),
+            // letting the model know this greeting already happened instead of having no memory
+            // of it at all.
+            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
             ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
             return;
           }
@@ -908,6 +923,11 @@ const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋"
 // greeting avoids that mismatch — the backend's own first real question (name, then day) starts
 // fresh once the customer actually replies.
 const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
+            // Fix (static frontend greeting invisible to the backend) — remembered here so the
+            // very first real message sent can pass it along to the backend (see Message.send),
+            // letting the model know this greeting already happened instead of having no memory
+            // of it at all.
+            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
           ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
 
           // Clear the conversation ID since we couldn't fetch this conversation
@@ -1245,6 +1265,11 @@ const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋"
 // greeting avoids that mismatch — the backend's own first real question (name, then day) starts
 // fresh once the customer actually replies.
 const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
+            // Fix (static frontend greeting invisible to the backend) — remembered here so the
+            // very first real message sent can pass it along to the backend (see Message.send),
+            // letting the model know this greeting already happened instead of having no memory
+            // of it at all.
+            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
         this.Message.add(welcomeMessage, 'assistant', this.UI.elements.messagesContainer);
       }
     }
