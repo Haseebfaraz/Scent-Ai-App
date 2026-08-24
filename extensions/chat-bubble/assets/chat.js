@@ -8,6 +8,16 @@
   'use strict';
 
   /**
+   * Single source of truth for the backend origin every fetch() targets. Strips trailing
+   * slashes so a theme-setting value saved as ".../onrender.com/" doesn't produce
+   * ".../onrender.com//chat" (the double slash 404s on the backend).
+   * @returns {string}
+   */
+  function getApiBaseUrl() {
+    return String(window.appBaseUrl || 'https://localhost:3458').replace(/\/+$/, '');
+  }
+
+  /**
    * Application namespace to prevent global scope pollution
    */
   const ShopAIChat = {
@@ -641,7 +651,7 @@
             greeting: greeting || null
           });
 
-          const streamUrl = (window.appBaseUrl || 'https://localhost:3458') + '/chat';
+          const streamUrl = getApiBaseUrl() + '/chat';
           const shopId = window.shopId;
 
           const response = await fetch(streamUrl, {
@@ -850,7 +860,7 @@
           messagesContainer.appendChild(loadingMessage);
 
           // Fetch history from the server
-          const historyUrl = `${window.appBaseUrl || 'https://localhost:3458'}/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
+          const historyUrl = `${getApiBaseUrl()}/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
           console.log('Fetching history from:', historyUrl);
 
           const response = await fetch(historyUrl, {
