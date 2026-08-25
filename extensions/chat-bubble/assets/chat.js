@@ -59,7 +59,8 @@
           closeButton: container.querySelector('.shop-ai-chat-close'),
           chatInput: container.querySelector('.shop-ai-chat-input input'),
           sendButton: container.querySelector('.shop-ai-chat-send'),
-          messagesContainer: container.querySelector('.shop-ai-chat-messages')
+          messagesContainer: container.querySelector('.shop-ai-chat-messages'),
+          emptyState: container.querySelector('.shop-ai-empty-state')
         };
 
         // Detect mobile device
@@ -163,6 +164,17 @@
           chatInput.blur();
           document.body.classList.remove('shop-ai-chat-open');
         }
+      },
+
+      /**
+       * Removes the "Start a conversation" empty-state hint -- called the moment either a real
+       * message (persisted history or the customer's own first send) is about to appear, so it
+       * never sits alongside actual chat content. Purely a UI hint: never rendered as a message
+       * bubble, never stored, never sent to Python.
+       */
+      hideEmptyState: function() {
+        const { emptyState } = this.elements;
+        if (emptyState) emptyState.remove();
       },
 
       /**
@@ -400,14 +412,10 @@
         const userMessage = chatInput.value.trim();
         const conversationId = sessionStorage.getItem('shopAiConversationId');
 
-        // Fix (static frontend greeting invisible to the backend) — the welcome message shown
-        // before the customer's first reply is purely client-side and was never part of what the
-        // model sees, so it had no idea a greeting (possibly asking about their day) already
-        // happened — it would either ask it again or misread the customer's first reply as
-        // answering something else. Sent once, only on a brand-new conversation, then cleared so
-        // it's never resent on a later turn (see the matching fix in chat.jsx's action()).
-        const pendingGreeting = !conversationId ? sessionStorage.getItem('shopAiPendingGreeting') : null;
-        sessionStorage.removeItem('shopAiPendingGreeting');
+        // The first real message always hides the "Start a conversation" hint -- there is no
+        // client-side greeting to track or forward to Python anymore; the backend's own first
+        // response is the only greeting that ever exists.
+        ShopAIChat.UI.hideEmptyState();
 
         // Add user message to chat
         this.add(userMessage, 'user', messagesContainer);
@@ -419,7 +427,7 @@
         ShopAIChat.UI.showTypingIndicator();
 
         try {
-          ShopAIChat.API.streamResponse(userMessage, conversationId, messagesContainer, pendingGreeting);
+          ShopAIChat.API.streamResponse(userMessage, conversationId, messagesContainer);
         } catch (error) {
           console.error('Error communicating with Claude API:', error);
           ShopAIChat.UI.removeTypingIndicator();
@@ -636,7 +644,7 @@
        * @param {string} conversationId - Conversation ID for context
        * @param {HTMLElement} messagesContainer - The messages container
        */
-      streamResponse: async function(userMessage, conversationId, messagesContainer, greeting) {
+      streamResponse: async function(userMessage, conversationId, messagesContainer) {
         let currentMessageElement = null;
 
         try {
@@ -647,8 +655,7 @@
             prompt_type: promptType,
             shop_domain: window.shopDomain,
             customer_email: ShopAIChat.customerEmail || null,
-            customer_name: ShopAIChat.customerName || null,
-            greeting: greeting || null
+            customer_name: ShopAIChat.customerName || null
           });
 
           const streamUrl = getApiBaseUrl() + '/chat';
@@ -883,22 +890,15 @@
           // Remove loading message
           messagesContainer.removeChild(loadingMessage);
 
-          // No messages, show welcome message
+          // No persisted messages for this conversation id -- functionally the same as a
+          // brand-new conversation. The empty-state hint is already showing (default markup,
+          // nothing hid it yet); no fake message to inject.
           if (!data.messages || data.messages.length === 0) {
-            // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
-// and is never sent to the backend as history, so the AI has no memory that a question was asked
-// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
-// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
-// fresh once the customer actually replies.
-const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
-            // Fix (static frontend greeting invisible to the backend) — remembered here so the
-            // very first real message sent can pass it along to the backend (see Message.send),
-            // letting the model know this greeting already happened instead of having no memory
-            // of it at all.
-            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
-            ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
             return;
           }
+
+          // Real persisted history exists -- the empty-state hint must never show alongside it.
+          ShopAIChat.UI.hideEmptyState();
 
           // Add messages to the UI - filter out tool results
           data.messages.forEach(message => {
@@ -926,21 +926,8 @@ const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋"
             messagesContainer.removeChild(loadingMessage);
           }
 
-          // Show error and welcome message
-          // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
-// and is never sent to the backend as history, so the AI has no memory that a question was asked
-// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
-// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
-// fresh once the customer actually replies.
-const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
-            // Fix (static frontend greeting invisible to the backend) — remembered here so the
-            // very first real message sent can pass it along to the backend (see Message.send),
-            // letting the model know this greeting already happened instead of having no memory
-            // of it at all.
-            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
-          ShopAIChat.Message.add(welcomeMessage, 'assistant', messagesContainer);
-
-          // Clear the conversation ID since we couldn't fetch this conversation
+          // History couldn't be fetched -- treat this the same as no conversation: clear the
+          // stale id and leave the empty-state hint showing (default markup), no fake message.
           sessionStorage.removeItem('shopAiConversationId');
         }
       }
@@ -1262,26 +1249,10 @@ const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋"
       if (conversationId) {
         // Fetch conversation history
         this.API.fetchChatHistory(conversationId, this.UI.elements.messagesContainer);
-      } else {
-        // No previous conversation — show the date divider once, then the welcome message
-        const divider = document.createElement('div');
-        divider.className = 'shop-ai-date-divider';
-        divider.textContent = 'Today';
-        this.UI.elements.messagesContainer.appendChild(divider);
-
-        // Fix (static greeting asked a question the backend never sees) — this text is purely client-side
-// and is never sent to the backend as history, so the AI has no memory that a question was asked
-// here; the customer's reply was being treated as a cold, context-free answer to nothing. A plain
-// greeting avoids that mismatch — the backend's own first real question (name, then day) starts
-// fresh once the customer actually replies.
-const welcomeMessage = window.shopChatConfig?.welcomeMessage || "Hi there! 👋";
-            // Fix (static frontend greeting invisible to the backend) — remembered here so the
-            // very first real message sent can pass it along to the backend (see Message.send),
-            // letting the model know this greeting already happened instead of having no memory
-            // of it at all.
-            sessionStorage.setItem('shopAiPendingGreeting', welcomeMessage);
-        this.Message.add(welcomeMessage, 'assistant', this.UI.elements.messagesContainer);
       }
+      // No previous conversation -- the empty-state hint ("Start a conversation...") is already
+      // showing by default in the static markup. No fake assistant message is ever injected: the
+      // backend writes the real first response once the customer actually sends something.
     }
   };
 
