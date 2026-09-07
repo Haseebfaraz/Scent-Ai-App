@@ -19,7 +19,7 @@ export async function loader({ request }) {
 
   const url = new URL(request.url);
   const email = url.searchParams.get("email");
-  const shopDomain = url.searchParams.get("shop_domain") || "test-3d-products.myshopify.com";
+  const shopDomain = url.searchParams.get("shop_domain") || "scent-ai-js.myshopify.com";
 
   if (!email) {
     return new Response(JSON.stringify({ builds: [] }), {
