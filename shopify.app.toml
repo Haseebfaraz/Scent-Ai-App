@@ -24,9 +24,10 @@ redirect_urls = [
 
 # Enable App Proxy when using storefront widget calls — url ends in "/apps/scent-library" (not
 # "/api") so the proxied fragrance-preview route's internal path matches its public path exactly;
-# see apps.scent-library.fragrance-preview.jsx for why that's required for client hydration.
+# see dua-scent-ai-python/app/api/preview.py, which now owns this route (the old Node
+# apps.scent-library.fragrance-preview.jsx route is no longer the target for this proxy).
 [app_proxy]
-url = "https://scent-ai-app.onrender.com/apps/scent-library"
+url = "https://dua-scent-ai-python-staging.onrender.com/apps/scent-library"
 subpath = "scent-library"
 prefix = "apps"
 

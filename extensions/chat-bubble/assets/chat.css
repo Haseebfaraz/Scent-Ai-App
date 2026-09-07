@@ -246,17 +246,31 @@ span.scent-pill {
   -webkit-overflow-scrolling: touch;
 }
 
-/* Date divider ("Today") shown once at the start of a fresh conversation */
-.shop-ai-date-divider {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
+/* Empty-state onboarding hint -- shown only when there is no real conversation content yet
+   (brand-new conversation, or persisted history that turned out empty). Deliberately NOT styled
+   like a message bubble (no background, no border, no avatar) so it reads as a UI hint rather
+   than something the assistant already said. `margin: auto` centers it both axes within the
+   flex column messages container as long as it's the only child -- chat.js removes this element
+   entirely the moment real content exists, so it never has to coexist with message bubbles. */
+.shop-ai-empty-state {
+  margin: auto;
+  max-width: 260px;
+  text-align: center;
+  padding: 0 20px;
+}
+
+.shop-ai-empty-state-title {
+  font-size: 17px;
+  font-weight: 500;
+  color: var(--scent-text);
+  margin-bottom: 8px;
+}
+
+.shop-ai-empty-state-subtitle {
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--scent-muted);
-  margin: 4px 0;
+  margin: 0;
 }
 
 /* Message Node Bubble Adaptations */

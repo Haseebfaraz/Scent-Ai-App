@@ -112,7 +112,7 @@ export async function action({ request }) {
 
   try {
     const originHeader = request.headers.get("Origin") || "";
-    const shopDomain = originHeader.replace(/^https?:\/\//, "").split("/")[0] || "test-3d-products.myshopify.com";
+    const shopDomain = originHeader.replace(/^https?:\/\//, "").split("/")[0] || "scent-ai-js.myshopify.com";
 
     const { admin } = await unauthenticated.admin(shopDomain);
 

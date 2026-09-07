@@ -9,7 +9,7 @@
 // authenticate.public.appProxy.)
 import prisma from "../db.server.js";
 
-const DEFAULT_SHOP_DOMAIN = "test-3d-products.myshopify.com";
+const DEFAULT_SHOP_DOMAIN = "scent-ai-js.myshopify.com";
 
 export async function resolveShopDomain() {
   const session = await prisma.session.findFirst({ where: { isOnline: false }, orderBy: { id: "desc" } });
