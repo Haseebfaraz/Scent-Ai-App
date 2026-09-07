@@ -54,7 +54,15 @@
             <button class="shop-ai-chat-close" style="display: none !important;">✕</button>
           </div>
 
-          <div class="shop-ai-chat-messages"></div>
+          <div class="shop-ai-chat-messages">
+            <!-- UI-only onboarding hint: never a chat bubble, never persisted, never sent to
+                 Python. Removed by chat.js the instant real content exists (persisted history,
+                 or the customer's own first message) -- see UI.hideEmptyState(). -->
+            <div class="shop-ai-empty-state">
+              <div class="shop-ai-empty-state-title">Start a conversation</div>
+              <p class="shop-ai-empty-state-subtitle">Say hello, ask me anything, or tell me when you&rsquo;re ready to create your fragrance.</p>
+            </div>
+          </div>
 
           <div class="shop-ai-chat-input">
             <input type="text" placeholder="{{ 'chat.inputPlaceholder' | t }}">
@@ -72,8 +80,7 @@
       <script src="{{ 'chat.js' | asset_url }}" defer></script>
       <script>
         window.shopChatConfig = {
-          promptType: {{ block.settings.system_prompt | json }},
-          welcomeMessage: {{ block.settings.welcome_message | json }}
+          promptType: {{ block.settings.system_prompt | json }}
         };
         window.shopId = {{ shop.id }};
         window.shopDomain = {{ shop.permanent_domain | json }};
@@ -138,12 +145,6 @@
       "id": "chat_bubble_color",
       "label": "Chat Bubble Color",
       "default": "#ab9372"
-    },
-    {
-      "type": "text",
-      "id": "welcome_message",
-      "label": "Welcome Message",
-      "default": "Hi there! How's your day going so far?"
     },
     {
       "type": "select",
