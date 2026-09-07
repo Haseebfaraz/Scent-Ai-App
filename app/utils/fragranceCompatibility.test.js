@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { classifyDislikeConflict, matchedLikes, likeMatchStrength } from "./fragranceScoring.js";
+import { classifyDislikeConflict } from "./fragranceScoring.js";
 import {
   PREFERENCE_FAMILIES,
   COMPATIBILITY_TAGS,
@@ -19,7 +19,6 @@ import {
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
   exactNoteCoverageScore,
-  familyBreadthCoverageScore,
   matchedLiteralTerms,
   missingLiteralTerms,
   matchedRealNotesInText,
@@ -623,141 +622,6 @@ describe("powdery family and almond context", () => {
   it("a pure-almond-only product never counts toward powdery family detection on its own", () => {
     // Confirms the family keyword list deliberately excludes "almond" — see fragranceCompatibility.js.
     expect(detectFamilies(["Almond"], PREFERENCE_FAMILIES)).not.toContain("powdery");
-  });
-});
-
-// Floral preference audit — `floral` used to live only in COMPATIBILITY_TAGS (role assignment/pair
-// compatibility only, never customer-preference matching), so "Likes: Floral" produced zero
-// signal anywhere: textToPreferenceFamilies(["Floral"]) === [], matchedLikes/likeMatchStrength
-// couldn't score it, topProductsByLikeMatch never searched for it, and the like-match hard gate in
-// scoreProposedCombination silently no-opped. Moved into PREFERENCE_FAMILIES so Floral now goes
-// through the exact same graded machinery as fresh/fruity/spicy/sweet/woody/musk/powdery/dry/
-// earthy/natural — see this file's own module comment and the `floral` entry's comment for the
-// full reasoning and the explicit overlap decisions tested below.
-describe("floral family (Floral preference audit)", () => {
-  it("PREFERENCE_FAMILIES now has a floral key", () => {
-    expect(Object.prototype.hasOwnProperty.call(PREFERENCE_FAMILIES, "floral")).toBe(true);
-  });
-
-  it("textToPreferenceFamilies(['Floral']) resolves to the floral family, not an empty array", () => {
-    expect(textToPreferenceFamilies(["Floral"])).toEqual(["floral"]);
-  });
-
-  it("literalNoteTermsFromLikes(['Floral']) does NOT treat the bare word 'Floral' as a literal named note", () => {
-    expect(literalNoteTermsFromLikes(["Floral"])).toEqual([]);
-  });
-
-  it("recognizes real catalog catch-all note text ('White Flowers', 'Floral Undertones')", () => {
-    expect(detectFamilies(["White Flowers"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Floral Undertones (Violet)"], PREFERENCE_FAMILIES)).toContain("floral");
-  });
-
-  it("maps real floral notes named in the audit to the floral family", () => {
-    expect(detectFamilies(["Jasmine"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Rose"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Hedione"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Tuberose"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Peony"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Orange Blossom"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Magnolia"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Freesia"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Gardenia"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Ylang-Ylang"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Osmanthus"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Cyclamen"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Lotus"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Mimosa"], PREFERENCE_FAMILIES)).toContain("floral");
-  });
-
-  it("maps 'Lily of the Valley' (both phrasings) and bare 'Lily' to floral — confirmed missing before this fix", () => {
-    expect(detectFamilies(["Lily of the Valley"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Lily-of-the-Valley"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Lily"], PREFERENCE_FAMILIES)).toContain("floral");
-  });
-
-  it("catalogue-reviewed additions not in the spec's minimum list, confirmed present in real notesJson", () => {
-    expect(detectFamilies(["Orchid"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Carnation"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Lilac"], PREFERENCE_FAMILIES)).toContain("floral");
-    expect(detectFamilies(["Narcissus"], PREFERENCE_FAMILIES)).toContain("floral");
-  });
-
-  // Phase 3 overlap decisions — explicit, documented, tested (never silent).
-  describe("overlap decisions", () => {
-    it("Iris, Violet, Orris → BOTH floral AND powdery (dual character, deliberate)", () => {
-      for (const note of ["Iris", "Violet", "Orris"]) {
-        const families = detectFamilies([note], PREFERENCE_FAMILIES);
-        expect(families).toContain("floral");
-        expect(families).toContain("powdery");
-      }
-    });
-
-    it("Geranium and Hedione → floral only (no prior mapping existed anywhere to preserve)", () => {
-      for (const note of ["Geranium", "Hedione"]) {
-        const families = detectFamilies([note], PREFERENCE_FAMILIES);
-        expect(families).toContain("floral");
-        expect(families).not.toContain("powdery");
-        expect(families).not.toContain("fresh");
-      }
-    });
-
-    it("Neroli deliberately stays fresh-only, not dual-mapped to floral", () => {
-      expect(detectFamilies(["Neroli"], PREFERENCE_FAMILIES)).toEqual(["fresh"]);
-    });
-
-    it("Lavender deliberately stays in COMPATIBILITY_TAGS.aromatic only, never PREFERENCE_FAMILIES.floral", () => {
-      expect(detectFamilies(["Lavender"], PREFERENCE_FAMILIES)).not.toContain("floral");
-      expect(detectFamilies(["Lavender"], COMPATIBILITY_TAGS)).toContain("aromatic");
-    });
-  });
-
-  // Phase 4 — reuses the exact same graded matchedLikes/likeMatchStrength machinery every other
-  // family already has; no separate Floral scoring system.
-  describe("graded matching via the existing matchedLikes/likeMatchStrength machinery", () => {
-    it("a product with a couple of incidental floral notes among many scores far weaker than a floral-dominant one", () => {
-      // Real Princeless Princess notes — Hedione + Jasmine both now count as floral (Phase 3: both
-      // map to floral only), giving 2/10, still far below a genuinely floral-dominant product.
-      const weak = ["Lemon", "Green Tea", "Ginger", "Peach", "Hedione", "Jasmine", "Apple", "Marshmallow", "Vanilla", "Benzoin"];
-      const strong = ["Rose", "Jasmine", "Tuberose", "Orange Blossom", "Peony", "Lily of the Valley"];
-      expect(likeMatchStrength(weak, "floral")).toBeCloseTo(2 / 10);
-      expect(likeMatchStrength(strong, "floral")).toBe(1);
-      expect(likeMatchStrength(strong, "floral")).toBeGreaterThan(likeMatchStrength(weak, "floral"));
-    });
-
-    it("a product with zero floral notes gets zero floral credit — not a false Boolean match", () => {
-      const notes = ["Bergamot", "Lemon", "Spearmint", "Peppermint", "Apple", "Pineapple", "Vanilla"]; // no floral keyword present
-      expect(likeMatchStrength(notes, "floral")).toBe(0);
-      expect(matchedLikes(notes, ["floral"])).toEqual([]);
-    });
-
-    it("matchedLikes recognizes floral exactly like every other family, given a real floral product", () => {
-      expect(matchedLikes(["Rose", "Jasmine", "Musk"], ["floral"])).toEqual(["floral"]);
-    });
-  });
-
-  // Documented, accepted limitation (Phase 2's own comment) — bare "rose" also matches inside
-  // "Rosemary" via this file's substring-based-by-design detectFamilies. Kept explicit and tested
-  // (not silently accepted) — see the `floral` entry's own comment for the real catalog cost/
-  // benefit analysis (648 real rose-only products would lose credit vs. 70 rosemary-only false
-  // positives) that justified keeping bare "rose" despite this.
-  it("known limitation: a Rosemary-only (non-floral) product is still weakly substring-matched as floral", () => {
-    expect(detectFamilies(["Rosemary Oil", "Cedar Leaf"], PREFERENCE_FAMILIES)).toContain("floral");
-  });
-});
-
-// Phase 8 — multi-like family breadth: an additive bonus for DISTINCT families covered, so
-// "Likes: Fresh, Floral" can be rewarded for covering both, not just for repeating one family
-// across components. Never triggers for a single-family profile (Likes: Floral alone).
-describe("familyBreadthCoverageScore (Phase 8: multi-like family breadth bonus)", () => {
-  it("awards nothing for zero or one distinct family — a single-family profile is unaffected", () => {
-    expect(familyBreadthCoverageScore(0)).toBe(0);
-    expect(familyBreadthCoverageScore(1)).toBe(0);
-  });
-
-  it("awards a meaningful bonus for the 2nd distinct family, a smaller one for the 3rd+", () => {
-    expect(familyBreadthCoverageScore(2)).toBe(6);
-    expect(familyBreadthCoverageScore(3)).toBe(6 + 3);
-    expect(familyBreadthCoverageScore(4)).toBe(6 + 3 + 3);
   });
 });
 

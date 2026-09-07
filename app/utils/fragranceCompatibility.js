@@ -1,25 +1,13 @@
 // Fragrance family/note-compatibility config — the deterministic "controlled note and family
 // mappings" the product spec requires to live in code, not in the system prompt. Two tiers:
 //
-// 1. PREFERENCE_FAMILIES — the families used to match a customer's stated likes/dislikes against a
-//    product's real notes (textToPreferenceFamilies/matchedLikes/likeMatchStrength/
-//    topProductsByLikeMatch/the like-match hard gate in scoreProposedCombination all key off this
-//    map only, never COMPATIBILITY_TAGS below).
-// 2. COMPATIBILITY_TAGS — additional descriptors used only for pair-compatibility scoring
-//    (COMPATIBLE_PAIRS) and a couple of risk rules (musk, woody, amber, aquatic, aromatic, smoky,
-//    citrus). The spec never lists concrete notes for these (they're industry shorthand, not
-//    literal note text), so each is grounded in real note words actually present in the imported
-//    FragranceProduct catalog (confirmed via a live query during Stage A verification) rather than
-//    invented.
-//
-// Fix (Floral preference audit) — `floral` used to live ONLY in COMPATIBILITY_TAGS, so a customer
-// who said "Likes: Floral" got zero preference-matching signal anywhere: textToPreferenceFamilies
-// couldn't resolve it to a family, topProductsByLikeMatch never searched the catalogue for it, and
-// the like-match hard gate in scoreProposedCombination silently no-opped. Moved into
-// PREFERENCE_FAMILIES (and removed from COMPATIBILITY_TAGS, so there is exactly one floral keyword
-// list, not two that could drift apart — role assignment/pair-compatibility still see it via
-// `ALL_FAMILIES = {...PREFERENCE_FAMILIES, ...COMPATIBILITY_TAGS}` in recommendationEngine.server.js,
-// unchanged) so Floral now goes through the exact same graded machinery as every other family.
+// 1. PREFERENCE_FAMILIES — the five families the spec explicitly names in Phase 3, used to match
+//    a customer's stated likes/dislikes against a product's real notes.
+// 2. COMPATIBILITY_TAGS — the additional descriptors Phase 6's "note compatibility guidance" and
+//    risk rules reference (floral, musk, woody, amber, aquatic, aromatic, smoky, citrus). The spec
+//    never lists concrete notes for these (they're industry shorthand, not literal note text), so
+//    each is grounded in real note words actually present in the imported FragranceProduct catalog
+//    (confirmed via a live query during Stage A verification) rather than invented.
 //
 // Every keyword list is matched as a case-insensitive substring against a product's real notes —
 // never used to infer notes a product doesn't actually have.
@@ -74,57 +62,6 @@ export const PREFERENCE_FAMILIES = {
   // powdery (or gourmand) in combination with other real notes — see classifyAlmondCharacter below,
   // which is the single place that contextual read is decided.
   powdery: ["powdery", "orris", "iris", "violet", "heliotrope", "powder"],
-  // Fix (Floral preference audit) — this family used to live ONLY in COMPATIBILITY_TAGS (role
-  // assignment/pair-compatibility only, never customer-preference matching), so "Likes: Floral"
-  // could never resolve to a family, never searched the catalogue, and never scored — see the
-  // module comment above. Reuses the exact same graded machinery every other family already has
-  // (textToPreferenceFamilies/matchedLikes/likeMatchStrength/topProductsByLikeMatch/the like-match
-  // hard gate); no separate Floral scoring system.
-  //
-  // "floral"/"flower" are the family's own self-referential catch-all words — same pattern as
-  // "fresh"/"sweet"/"spicy"/"fruity" each including their own plain-English name — needed so a bare
-  // customer word ("Floral") resolves via textToPreferenceFamilies, and so real catalog catch-all
-  // note text ("White Flowers", "Floral Undertones", confirmed present in the real catalog) is
-  // recognized too.
-  //
-  // Overlap decisions (explicit, not silent — Phase 3 of the Floral audit):
-  //   - Iris, Violet, Orris → BOTH floral AND powdery. Real perfumery treats all three as
-  //     genuinely dual-character (a powdery, cosmetic facet alongside a true floral one); `powdery`
-  //     above already lists Iris/Violet, so this is now consistent rather than one-sided.
-  //   - Geranium, Hedione → floral only. Neither had ANY existing family mapping anywhere in this
-  //     file before this fix (confirmed via a live audit) — no prior classification to preserve or
-  //     conflict with.
-  //   - Neroli → deliberately NOT added here. It stays exclusively in `fresh` above (explicit
-  //     keyword since before this fix). Neroli is real orange-blossom distillate and arguably has a
-  //     genuine floral character, but this catalog and this file already treat it as a fresh-citrus
-  //     top note; dual-mapping it risks changing scoring for every existing fresh-citrus product
-  //     that lists Neroli, which is out of scope for a Floral-specific fix. Documented, not silent.
-  //   - Lavender → deliberately NOT added here. It stays exclusively in COMPATIBILITY_TAGS.aromatic.
-  //     Classic perfumery convention treats Lavender as aromatic/herbaceous, not floral. Documented,
-  //     not silent.
-  //
-  // Catalogue review (Phase 2) — every keyword below besides the spec's own minimum list was
-  // confirmed present in real FragranceProduct.notesJson via a live query before being added:
-  // lily/orchid/carnation/lilac/narcissus/wisteria/hyacinth/jonquil/frangipani/plumeria/champaca/
-  // muguet/camellia/azalea. None were added speculatively.
-  //
-  // Known, accepted limitation (substring matching, same class of risk this file already tolerates
-  // elsewhere — e.g. "tea" briefly discussed above): bare "rose" also matches inside "Rosemary".
-  // Excluding bare "rose" was tried and rejected — a live catalog check found 648 real products
-  // whose only rose content is an unmodified "Rose" note (e.g. "In The Club For Her": ["Rose"]) that
-  // would lose real floral credit entirely, versus 70 products where this causes a Rosemary-only
-  // false floral tag (e.g. "Cuir de Russie", a woody/leather formula with zero real floral
-  // character). Kept as documented, not silently accepted — see fragranceCompatibility.test.js.
-  floral: [
-    "floral", "flower",
-    "jasmine", "rose", "tuberose", "magnolia", "freesia", "gardenia", "peony",
-    "ylang", "ylang-ylang", "osmanthus", "orange blossom",
-    "lily", "lily of the valley", "lily-of-the-valley", "lilac", "orchid", "carnation",
-    "narcissus", "wisteria", "hyacinth", "jonquil", "frangipani", "plumeria", "champaca", "muguet",
-    "camellia", "azalea", "cyclamen", "lotus", "mimosa",
-    "geranium", "hedione",
-    "violet", "iris", "orris",
-  ],
   // Fix (sensory-direction words produced zero signal) — confirmed live: a customer whose ENTIRE
   // stated likes were "dry, earthy, natural" matched no family and no literal note anywhere in this
   // file, so their candidate pool fell back to pure regional popularity with zero input from what
@@ -164,11 +101,10 @@ export function classifyAlmondCharacter(notes) {
 
 export const COMPATIBILITY_TAGS = {
   citrus: ["citrus", "bergamot", "lemon", "lime", "mandarin", "grapefruit", "orange", "tangerine"],
-  // Fix (Floral preference audit) — `floral` moved into PREFERENCE_FAMILIES above (with a larger,
-  // catalogue-reviewed keyword list) so there is exactly one floral definition, not two that could
-  // drift apart. Every existing consumer of "floral" here (role assignment's ALL_FAMILIES merge,
-  // COMPATIBLE_PAIRS' ["fruity","floral"]/["floral","musk"] entries) is unaffected — they all
-  // resolve "floral" generically by family name, not by which object defined it.
+  floral: [
+    "jasmine", "rose", "violet", "iris", "tuberose", "magnolia", "freesia",
+    "gardenia", "peony", "ylang", "osmanthus", "orange blossom",
+  ],
   musk: ["musk"],
   vanilla: ["vanilla"],
   aquatic: ["aquatic", "marine"],
@@ -219,12 +155,6 @@ const FAMILY_DESCRIPTOR_WORDS = new Set([
   // note) — a customer saying "dry, earthy, natural" would otherwise reject every real combination
   // outright, since no actual catalog note is literally spelled "dry"/"earthy"/etc.
   "dry", "earthy", "natural", "earth", "soil", "herb", "mineral", "green note", "forest floor", "botanical", "dry wood",
-  // Fix (Floral preference audit) — "floral"/"flower" are the family's own generic descriptor words
-  // (same role as "fruity"/"fresh"/"spicy" above), never a customer's literal named note on their
-  // own — without this, literalNoteTermsFromLikes(["Floral"]) would wrongly treat the bare word
-  // "Floral" itself as if the customer had named a specific real note (like "Jasmine"), which would
-  // then wrongly feed the exact-note hard gate in scoreProposedCombination.
-  "floral", "flower",
 ]);
 
 function escapeRegex(text) {
@@ -353,29 +283,6 @@ export function exactNoteCoverageScore(distinctMatchCount) {
   let score = 0;
   for (let i = 0; i < distinctMatchCount; i++) {
     score += EXACT_NOTE_COVERAGE_TIERS[Math.min(i, EXACT_NOTE_COVERAGE_TIERS.length - 1)];
-  }
-  return score;
-}
-
-// Fix (multi-like family breadth, Floral audit Phase 8) — a customer who states more than one
-// family ("Likes: Fresh, Floral") had no mechanism rewarding a combination that genuinely covers
-// BOTH over one that racks up the same family's per-product bonus twice (matchedLikes/
-// likeMatchStrength's existing loop in scoreProposedCombination already credits every (product,
-// matched-family) pair it finds, so two Fresh components can already out-accumulate a Fresh+Floral
-// pair purely by each independently re-earning the same "fresh" bonus — depth, not breadth). This is
-// an ADDITIVE bonus on top of that existing per-product scoring, keyed only on the DISTINCT family
-// count (a Set, so repeating one family across components never inflates it) — the 1st distinct
-// family earns no extra bonus here (it's already covered by the existing per-product loop); only
-// the 2nd and beyond do, same diminishing-tier shape as exactNoteCoverageScore above, deliberately
-// smaller in magnitude (family-level matching is meant to stay the smaller signal, same principle
-// documented on SCORE_WEIGHTS.matchesLike). A single-family profile (matchedPreferenceFamilies.size
-// <= 1, e.g. "Likes: Floral" alone) can never trigger this — it only ever changes scoring for
-// genuinely multi-family profiles.
-const FAMILY_BREADTH_BONUS_FROM_SECOND = [6, 3];
-export function familyBreadthCoverageScore(distinctFamilyCount) {
-  let score = 0;
-  for (let i = 1; i < distinctFamilyCount; i++) {
-    score += FAMILY_BREADTH_BONUS_FROM_SECOND[Math.min(i - 1, FAMILY_BREADTH_BONUS_FROM_SECOND.length - 1)];
   }
   return score;
 }
