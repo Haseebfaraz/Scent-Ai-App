@@ -36,7 +36,6 @@ import {
   literalNoteTermsFromLikes,
   literalNoteMatchCount,
   exactNoteCoverageScore,
-  familyBreadthCoverageScore,
   matchedLiteralTerms,
   missingLiteralTerms,
   splitDislikesByExactness,
@@ -244,28 +243,11 @@ function dominantRole(notes) {
 // several directions (Royal Chariot Attar: bergamot/mandarin + cardamom/pepper + patchouli/guaiac +
 // sandalwood/vanilla) is now visibly complex and multi-directional instead of disappearing into one
 // bucket.
-// Fix (Floral preference audit, Phase 9) — ranking/debugging signal only, deliberately never a hard
-// requirement: a Floral-only customer's winning combination should NORMALLY contain a component
-// where Floral is the primary role or a strong secondary one, but genuinely strong Floral coverage
-// spread across components (rather than concentrated in one) is just as real, so this is exposed as
-// data (floralNoteCount/floralCoverage per product, floralRoleStrength on the combo) rather than
-// enforced as a rule here. Uses the same PREFERENCE_FAMILIES.floral keyword list every other Floral
-// check in this codebase now uses — never a second, separate Floral definition.
-function floralNoteCountOf(notes) {
-  const keywords = PREFERENCE_FAMILIES.floral;
-  return (Array.isArray(notes) ? notes : []).filter((note) => {
-    const lower = String(note).toLowerCase();
-    return keywords.some((kw) => lower.includes(kw));
-  }).length;
-}
-
 export function assignRoles(comboProducts) {
   return comboProducts.map((p) => {
     const families = familiesOf(p.notes);
     const role = dominantRole(p.notes);
     const primaryFamily = role ? FAMILY_ROLE_PRIORITY.find(([, r]) => r === role)?.[0] : null;
-    const totalNoteCount = (p.notes || []).length;
-    const floralNoteCount = floralNoteCountOf(p.notes);
     return {
       ...p,
       role: role || "Contrast",
@@ -274,9 +256,6 @@ export function assignRoles(comboProducts) {
       intensityDrivers: detectIntensityDrivers(p.notes),
       softeningNotes: detectSofteningNotes(p.notes),
       complexityLevel: computeComplexityLevel((p.notes || []).length),
-      floralNoteCount,
-      totalNoteCount,
-      floralCoverage: totalNoteCount > 0 ? floralNoteCount / totalNoteCount : 0,
     };
   });
 }
@@ -639,21 +618,6 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
       preferenceScore += SCORE_WEIGHTS.matchesLike * Math.max(0.2, likeMatchStrength(p.notes, family));
     });
   }
-  // Fix (multi-like family breadth, Phase 8) — see familyBreadthCoverageScore's own comment: an
-  // additive bonus for DISTINCT families covered (never for the same family repeating across
-  // components), on top of the per-product bonus above.
-  preferenceScore += familyBreadthCoverageScore(matchedPreferenceFamilies.size);
-  // Fix (Floral preference audit, Phase 7/10) — persisted/returned alongside preferenceScore so a
-  // caller (the auto-confirm gate, admin debug output, copy generation) can see exactly which of the
-  // customer's stated families this specific combination did and didn't cover, rather than only the
-  // blended score. `requestedPreferenceFamilies` is the same `likeFamilies` already computed above,
-  // named for what it's persisted as.
-  const requestedPreferenceFamilies = likeFamilies;
-  const missingPreferenceFamilies = likeFamilies.filter((f) => !matchedPreferenceFamilies.has(f));
-  // Ranking/debugging only (Phase 9) — never a hard requirement; the strongest single component's
-  // real floral-note density, so "genuinely Floral-dominant somewhere in this combo" is visible
-  // without forcing every combo to have a component whose PRIMARY role is Floral.
-  const floralRoleStrength = Math.max(0, ...roledProducts.map((p) => p.floralCoverage || 0));
   // Fix (tiered exact-note coverage scoring) — a stated like of "Apple, Strawberry, Peach" collapses
   // to one `fruity` family above, so a combo built from unrelated fruity notes (Pear, Blackcurrant)
   // scored identically to one containing what the customer actually named. Distinct literal notes
@@ -1065,15 +1029,6 @@ function scoreProposedCombination({ comboProducts, type, componentKey, profile, 
     // Fix (final-batch preference coverage, requirement 6) — the raw tiered-coverage contribution,
     // separate from the blended preferenceScore it was added into.
     exactNoteCoverageScore: exactNoteScore,
-    // Fix (Floral preference audit, Phase 7/9/10) — see this function's own comments above for why
-    // each is computed. requestedPreferenceFamilies/matchedPreferenceFamilies/
-    // missingPreferenceFamilies let the auto-confirm gate, admin debug output, and copy generation
-    // all see exactly which stated families this combination did/didn't cover, instead of only the
-    // blended preferenceScore. floralRoleStrength is ranking/debugging only — never a hard gate.
-    requestedPreferenceFamilies,
-    matchedPreferenceFamilies: [...matchedPreferenceFamilies],
-    missingPreferenceFamilies,
-    floralRoleStrength,
 
     // Customer-facing — safe for SSE payloads, recommendation cards, and chat text.
     type,

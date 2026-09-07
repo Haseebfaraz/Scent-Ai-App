@@ -153,58 +153,6 @@ describe("evaluateAutoConfirmEligibility (deterministic — no network call)", (
     expect(result.highestCountedRiskSeverity).toBe("medium");
     expect(result.autoConfirmEligible).toBe(true); // medium never blocks on its own, only high/critical
   });
-
-  // Floral preference audit, Phase 11 — independent re-check, defense in depth exactly like
-  // hasHardDislikeConflict/shapeValid above. scoreProposedCombination's own like-match hard gate
-  // already prevents a zero-coverage combination from ever being generated once floral is a real
-  // PREFERENCE_FAMILIES member, but this candidate object could come from an older code path (a
-  // stale pre-fix persisted recommendation, for example) that never computed
-  // requestedPreferenceFamilies/matchedPreferenceFamilies at all.
-  it("blocks auto-confirm when the customer has recognized liked families and the candidate matched none of them, even with strong everything else", () => {
-    const c = candidate({
-      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } },
-      riskBreakdown: [],
-      requestedPreferenceFamilies: ["floral"],
-      matchedPreferenceFamilies: [],
-    });
-    const result = evaluate(c, { dislikes: [] });
-    expect(result.autoConfirmEligible).toBe(false);
-    expect(result.autoConfirmReasons).toContain("no_stated_preference_coverage");
-  });
-
-  it("does not block when at least one of the customer's requested families was matched (multi-family, partial coverage)", () => {
-    const c = candidate({
-      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } },
-      riskBreakdown: [],
-      requestedPreferenceFamilies: ["fresh", "floral"],
-      matchedPreferenceFamilies: ["fresh"],
-    });
-    const result = evaluate(c, { dislikes: [] });
-    expect(result.autoConfirmReasons).not.toContain("no_stated_preference_coverage");
-  });
-
-  it("never fires for a candidate with no recognized liked families at all (preferredStyle-only profiles, unchanged)", () => {
-    const c = candidate({
-      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } },
-      riskBreakdown: [],
-      requestedPreferenceFamilies: [],
-      matchedPreferenceFamilies: [],
-    });
-    const result = evaluate(c, { dislikes: [] });
-    expect(result.autoConfirmReasons).not.toContain("no_stated_preference_coverage");
-  });
-
-  it("treats a legacy candidate object with no requestedPreferenceFamilies field at all as nothing-to-check, never a false pass-through failure", () => {
-    const c = candidate({
-      confidenceBreakdown: { customerFit: { value: "high" }, compatibility: { value: "high" } },
-      riskBreakdown: [],
-    });
-    delete c.requestedPreferenceFamilies;
-    delete c.matchedPreferenceFamilies;
-    const result = evaluate(c, { dislikes: [] });
-    expect(result.autoConfirmEligible).toBe(true);
-    expect(result.autoConfirmReasons).not.toContain("no_stated_preference_coverage");
-  });
 });
 
 // Odoo manufacturing feasibility — the FINAL, separate gate. Real OdooOilMapping row + mocked
