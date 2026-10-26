@@ -18,6 +18,34 @@
   }
 
   /**
+   * Conversation session. The backend mints the conversation id AND a secret token together and
+   * delivers the token once (the stream's first "id" event); every later chat or history request
+   * must present the matching pair, or it is refused with 401. Kept per tab in sessionStorage,
+   * sent only in the X-Conversation-Token header, never in a URL.
+   */
+  const SESSION_ID_KEY = 'shopAiConversationId';
+  const SESSION_TOKEN_KEY = 'shopAiConversationToken';
+
+  function getSession() {
+    const id = sessionStorage.getItem(SESSION_ID_KEY);
+    const token = sessionStorage.getItem(SESSION_TOKEN_KEY);
+    if (id && token) return { id: id, token: token };
+    // An id without its token (stored by the previous widget version) can never be used.
+    if (id || token) clearSession();
+    return null;
+  }
+
+  function saveSession(id, token) {
+    sessionStorage.setItem(SESSION_ID_KEY, id);
+    sessionStorage.setItem(SESSION_TOKEN_KEY, token);
+  }
+
+  function clearSession() {
+    sessionStorage.removeItem(SESSION_ID_KEY);
+    sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  }
+
+  /**
    * Application namespace to prevent global scope pollution
    */
   const ShopAIChat = {
@@ -410,7 +438,6 @@
        */
       send: async function(chatInput, messagesContainer) {
         const userMessage = chatInput.value.trim();
-        const conversationId = sessionStorage.getItem('shopAiConversationId');
 
         // The first real message always hides the "Start a conversation" hint -- there is no
         // client-side greeting to track or forward to Python anymore; the backend's own first
@@ -427,7 +454,7 @@
         ShopAIChat.UI.showTypingIndicator();
 
         try {
-          ShopAIChat.API.streamResponse(userMessage, conversationId, messagesContainer);
+          ShopAIChat.API.streamResponse(userMessage, messagesContainer);
         } catch (error) {
           console.error('Error communicating with Claude API:', error);
           ShopAIChat.UI.removeTypingIndicator();
@@ -641,17 +668,18 @@
       /**
        * Stream a response from the API
        * @param {string} userMessage - User's message text
-       * @param {string} conversationId - Conversation ID for context
        * @param {HTMLElement} messagesContainer - The messages container
+       * @param {boolean} [isRetry] - true for the single automatic resend after an expired session
        */
-      streamResponse: async function(userMessage, conversationId, messagesContainer) {
+      streamResponse: async function(userMessage, messagesContainer, isRetry) {
         let currentMessageElement = null;
+        const session = getSession();
 
         try {
           const promptType = window.shopChatConfig?.promptType || "standardAssistant";
           const requestBody = JSON.stringify({
             message: userMessage,
-            conversation_id: conversationId,
+            conversation_id: session ? session.id : null,
             prompt_type: promptType,
             shop_domain: window.shopDomain,
             customer_email: ShopAIChat.customerEmail || null,
@@ -661,19 +689,40 @@
           const streamUrl = getApiBaseUrl() + '/chat';
           const shopId = window.shopId;
 
+          const headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+            'X-Shopify-Shop-Id': shopId,
+            // Skips ngrok's browser-warning interstitial page when the tunnel is a free
+            // ngrok URL — without this, ngrok intercepts the request before it ever reaches
+            // the app, and this fetch gets an HTML warning page back instead of the stream.
+            'ngrok-skip-browser-warning': 'true'
+          };
+          if (session) headers['X-Conversation-Token'] = session.token;
+
           const response = await fetch(streamUrl, {
             method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'text/event-stream',
-              'X-Shopify-Shop-Id': shopId,
-              // Skips ngrok's browser-warning interstitial page when the tunnel is a free
-              // ngrok URL — without this, ngrok intercepts the request before it ever reaches
-              // the app, and this fetch gets an HTML warning page back instead of the stream.
-              'ngrok-skip-browser-warning': 'true'
-            },
+            headers: headers,
             body: requestBody
           });
+
+          // A refused or failed request has no stream: never leave the typing dots or an empty
+          // assistant bubble behind. 401 = the stored session expired or was revoked: drop it and
+          // resend this one message once, which starts a fresh conversation.
+          if (!response.ok) {
+            ShopAIChat.UI.removeTypingIndicator();
+            if (response.status === 401 && session && !isRetry) {
+              clearSession();
+              ShopAIChat.Message.add("Your previous conversation expired, so I've started a new one.", 'assistant', messagesContainer);
+              ShopAIChat.UI.showTypingIndicator();
+              return this.streamResponse(userMessage, messagesContainer, true);
+            }
+            if (response.status === 401) clearSession();
+            ShopAIChat.Message.add(response.status === 429
+              ? "Sorry, our servers are currently busy. Please try again in a moment."
+              : "Sorry, I couldn't process your request. Please try again later.", 'assistant', messagesContainer);
+            return;
+          }
 
           const reader = response.body.getReader();
           const decoder = new TextDecoder();
@@ -708,11 +757,24 @@
               }
             }
           }
+          ShopAIChat.UI.removeTypingIndicator();
+          this.removeIfEmpty(currentMessageElement);
         } catch (error) {
           console.error('Error in streaming:', error);
           ShopAIChat.UI.removeTypingIndicator();
+          this.removeIfEmpty(currentMessageElement);
           ShopAIChat.Message.add("Sorry, I couldn't process your request. Please try again later.",
             'assistant', messagesContainer);
+        }
+      },
+
+      /**
+       * Drop an assistant bubble that never received any text (stream ended or failed early).
+       * @param {HTMLElement|null} element
+       */
+      removeIfEmpty: function(element) {
+        if (element && element.parentNode && !element.textContent && !element.dataset.rawText) {
+          element.parentNode.removeChild(element);
         }
       },
 
@@ -769,8 +831,13 @@
 
         switch (data.type) {
           case 'id':
-            if (data.conversation_id) {
-              sessionStorage.setItem('shopAiConversationId', data.conversation_id);
+            // The token arrives only on the first response of a new conversation: store the pair.
+            // Later "id" events repeat just the id; an id that differs from the stored one with no
+            // token of its own can never be used, so never pair it with the old token.
+            if (data.conversation_id && data.conversation_token) {
+              saveSession(data.conversation_id, data.conversation_token);
+            } else if (data.conversation_id && data.conversation_id !== sessionStorage.getItem(SESSION_ID_KEY)) {
+              clearSession();
             }
             break;
 
@@ -855,10 +922,10 @@
 
       /**
        * Fetch chat history from the server
-       * @param {string} conversationId - Conversation ID
+       * @param {{id: string, token: string}} session - Stored conversation id and token
        * @param {HTMLElement} messagesContainer - The messages container
        */
-      fetchChatHistory: async function(conversationId, messagesContainer) {
+      fetchChatHistory: async function(session, messagesContainer) {
         try {
           // Show a loading message
           const loadingMessage = document.createElement('div');
@@ -867,14 +934,14 @@
           messagesContainer.appendChild(loadingMessage);
 
           // Fetch history from the server
-          const historyUrl = `${getApiBaseUrl()}/chat?history=true&conversation_id=${encodeURIComponent(conversationId)}`;
-          console.log('Fetching history from:', historyUrl);
+          const historyUrl = `${getApiBaseUrl()}/chat?history=true&conversation_id=${encodeURIComponent(session.id)}`;
 
           const response = await fetch(historyUrl, {
             method: 'GET',
             headers: {
               'Accept': 'application/json',
               'Content-Type': 'application/json',
+              'X-Conversation-Token': session.token,
               'ngrok-skip-browser-warning': 'true'
             },
             mode: 'cors'
@@ -928,7 +995,7 @@
 
           // History couldn't be fetched -- treat this the same as no conversation: clear the
           // stale id and leave the empty-state hint showing (default markup), no fake message.
-          sessionStorage.removeItem('shopAiConversationId');
+          clearSession();
         }
       }
     },
@@ -1244,11 +1311,11 @@
       this.UI.init(container);
 
       // Check for existing conversation
-      const conversationId = sessionStorage.getItem('shopAiConversationId');
+      const session = getSession();
 
-      if (conversationId) {
+      if (session) {
         // Fetch conversation history
-        this.API.fetchChatHistory(conversationId, this.UI.elements.messagesContainer);
+        this.API.fetchChatHistory(session, this.UI.elements.messagesContainer);
       }
       // No previous conversation -- the empty-state hint ("Start a conversation...") is already
       // showing by default in the static markup. No fake assistant message is ever injected: the
