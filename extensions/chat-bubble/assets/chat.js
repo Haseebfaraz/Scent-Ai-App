@@ -438,6 +438,11 @@
        */
       send: async function(chatInput, messagesContainer) {
         const userMessage = chatInput.value.trim();
+        // One reply at a time: the backend refuses a second message while the first is still being
+        // answered (409), which used to surface as "Sorry, I couldn't process your request". The
+        // typed text stays in the box so it can be sent once the reply arrives.
+        if (!userMessage || this.inFlight) return;
+        this.setInFlight(true);
 
         // The first real message always hides the "Start a conversation" hint -- there is no
         // client-side greeting to track or forward to Python anymore; the backend's own first
@@ -454,12 +459,22 @@
         ShopAIChat.UI.showTypingIndicator();
 
         try {
-          ShopAIChat.API.streamResponse(userMessage, messagesContainer);
+          await ShopAIChat.API.streamResponse(userMessage, messagesContainer);
         } catch (error) {
           console.error('Error communicating with Claude API:', error);
           ShopAIChat.UI.removeTypingIndicator();
           this.add("Sorry, I couldn't process your request at the moment. Please try again later.", 'assistant', messagesContainer);
+        } finally {
+          this.setInFlight(false);
         }
+      },
+
+      inFlight: false,
+
+      setInFlight: function(busy) {
+        this.inFlight = busy;
+        const sendButton = ShopAIChat.UI.elements && ShopAIChat.UI.elements.sendButton;
+        if (sendButton) sendButton.disabled = busy;
       },
 
       /**
@@ -718,9 +733,13 @@
               return this.streamResponse(userMessage, messagesContainer, true);
             }
             if (response.status === 401) clearSession();
-            ShopAIChat.Message.add(response.status === 429
-              ? "Sorry, our servers are currently busy. Please try again in a moment."
-              : "Sorry, I couldn't process your request. Please try again later.", 'assistant', messagesContainer);
+            const statusMessages = {
+              409: "I'm still finishing my last reply. Give me a moment, then send that again.",
+              429: "Sorry, our servers are currently busy. Please try again in a moment.",
+              503: "Sorry, our servers are currently busy. Please try again in a moment."
+            };
+            ShopAIChat.Message.add(statusMessages[response.status]
+              || "Sorry, I couldn't process your request. Please try again later.", 'assistant', messagesContainer);
             return;
           }
 
@@ -800,17 +819,43 @@
           console.error('Invalid preview URL', event.previewUrl);
           return false;
         }
+        if (target.protocol !== 'https:') {
+          console.error('Refusing a non-https preview URL');
+          return false;
+        }
 
         console.info('PREVIEW_READY_RECEIVED_BY_WIDGET', {
           recommendationId: event.recommendationId || null,
           previewUrl: target.toString()
         });
         ShopAIChat.UI.removeTypingIndicator();
+        // The backend's own URL stays in the conversation as a link, so the preview is still
+        // reachable if navigation is blocked, slow, or the customer comes back to the chat.
+        this.addPreviewLink(target.toString());
         ShopAIChat.UI.showPreviewOpeningAnimation();
 
         console.info('PREVIEW_REDIRECT_STARTED', { previewUrl: target.toString() });
         window.location.assign(target.toString());
+        // If the page has not left after a while, the overlay must not trap the customer.
+        setTimeout(() => ShopAIChat.UI.removeProductCreatingAnimation(), 8000);
         return true;
+      },
+
+      /**
+       * @param {string} url - an https preview URL supplied by the backend in preview_ready
+       */
+      addPreviewLink: function(url) {
+        const messagesContainer = ShopAIChat.UI.elements && ShopAIChat.UI.elements.messagesContainer;
+        if (!messagesContainer) return;
+        const messageElement = document.createElement('div');
+        messageElement.classList.add('shop-ai-message', 'assistant');
+        const link = document.createElement('a');
+        link.href = url;
+        link.textContent = 'Open your fragrance preview';
+        link.rel = 'noopener';
+        messageElement.appendChild(link);
+        messagesContainer.appendChild(messageElement);
+        ShopAIChat.UI.scrollToBottom();
       },
 
       /**
@@ -861,7 +906,9 @@
           case 'error':
             console.error('Stream error:', data.error);
             ShopAIChat.UI.removeTypingIndicator();
-            currentMessageElement.textContent = "Sorry, I couldn't process your request. Please try again later.";
+            currentMessageElement.textContent = data.error === 'That took too long. Please try again.'
+              ? "That took longer than it should. Please send it again."
+              : "Sorry, I couldn't process your request. Please try again later.";
             break;
 
           case 'rate_limit_exceeded':
